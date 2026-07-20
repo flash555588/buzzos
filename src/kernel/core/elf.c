@@ -110,5 +110,28 @@ uint32_t elf_load(const uint8_t *buf, size_t size) {
         }
     }
 
+    /* Apply final write permissions only after relocation/copying is done.
+     * ELF segments need not begin on separate pages. First restrict every
+     * page covered by a non-writable segment, then restore pages covered by
+     * writable segments. The second pass implements the required page-level
+     * permission union for overlapping PT_LOAD ranges.
+     *
+     * i386 without PAE/NX cannot enforce execute-disable, but read-only code
+     * pages still prevent user processes from modifying their instructions. */
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+        const struct elf32_phdr *phdr =
+            (const struct elf32_phdr *)(buf + ehdr->e_phoff + i * sizeof(struct elf32_phdr));
+        if (phdr->p_type == PT_LOAD && !(phdr->p_flags & PF_W) &&
+            paging_set_user_range_writable(phdr->p_vaddr, phdr->p_memsz, 0) < 0)
+            return 0;
+    }
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+        const struct elf32_phdr *phdr =
+            (const struct elf32_phdr *)(buf + ehdr->e_phoff + i * sizeof(struct elf32_phdr));
+        if (phdr->p_type == PT_LOAD && (phdr->p_flags & PF_W) &&
+            paging_set_user_range_writable(phdr->p_vaddr, phdr->p_memsz, 1) < 0)
+            return 0;
+    }
+
     return ehdr->e_entry;
 }

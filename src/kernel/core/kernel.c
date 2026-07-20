@@ -217,6 +217,7 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     ramfs_register("/bin/sh", initrd_bin_sh_data, INITRD_BIN_SH_SIZE);
     ramfs_register("/bin/nano", initrd_bin_nano_data, INITRD_BIN_NANO_SIZE);
     ramfs_register("/bin/basm", initrd_bin_basm_data, INITRD_BIN_BASM_SIZE);
+    ramfs_register("/bin/bcc", initrd_bin_bcc_data, INITRD_BIN_BCC_SIZE);
     ramfs_register("/bin/gui", initrd_bin_gui_data, INITRD_BIN_GUI_SIZE);
     ramfs_register("/bin/futexhold", initrd_bin_futexhold_data, INITRD_BIN_FUTEXHOLD_SIZE);
     ramfs_register("/bin/cat", initrd_bin_cat_data, INITRD_BIN_CAT_SIZE);

@@ -97,6 +97,7 @@ USER_ELF := $(BUILD)/user/hello.elf
 SHELL_ELF := $(BUILD)/user/shell.elf
 NANO_ELF := $(BUILD)/user/nano.elf
 BASM_ELF := $(BUILD)/user/basm.elf
+BCC_ELF := $(BUILD)/user/bcc.elf
 GUI_ELF := $(BUILD)/user/gui.elf
 FUTEXHOLD_ELF := $(BUILD)/user/futexhold.elf
 CAT_ELF := $(BUILD)/user/cat.elf
@@ -106,12 +107,14 @@ SOCKETLEAK_ELF := $(BUILD)/user/socketleak.elf
 GUI_APP_NAMES := textedit paint calculator filemanager
 GUI_APP_ELFS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).elf)
 GUI_APP_SRCS := $(foreach app,$(GUI_APP_NAMES),src/user/bin/$(app).c)
-USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(GUI_APP_ELFS)
-USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c $(GUI_APP_SRCS)
+USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(GUI_APP_ELFS)
+USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c $(GUI_APP_SRCS)
 USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c
 USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/appui.h src/kernel/drv/font_builtin.h
 INITRD_H := $(GENERATED_DIR)/initrd.h
 APP_REGISTRY_H := $(GENERATED_DIR)/app_registry.h
+BASM_EXAMPLE := examples/basm-full.asm
+BCC_EXAMPLE := examples/hello.c
 FONT_H := src/kernel/drv/font_builtin.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
@@ -195,6 +198,12 @@ $(BUILD)/user/nano.o: src/user/bin/nano.c src/user/libc/libc.h | $(BUILD)/user
 $(BUILD)/user/basm.o: src/user/bin/basm.c src/user/libc/libc.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/bin/basm.c -o $(BUILD)/user/basm.o
 
+$(BUILD)/user/basm_engine.o: src/user/bin/basm.c src/user/bin/basm.h src/user/libc/libc.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -DBASM_LIBRARY -Isrc/user/bin -c src/user/bin/basm.c -o $@
+
+$(BUILD)/user/bcc.o: src/user/bin/bcc.c src/user/bin/basm.h src/user/libc/libc.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -Isrc/user/bin -c src/user/bin/bcc.c -o $@
+
 $(BUILD)/user/gui.o: src/user/bin/gui.c $(USER_HEADERS) | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/bin/gui.c -o $(BUILD)/user/gui.o
 
@@ -221,6 +230,12 @@ $(BASM_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/basm.o
 	$(OBJCOPY) --strip-sections $@
 
+$(BCC_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/bcc.o $(BUILD)/user/basm_engine.o $(BUILD)/user/user.ld | $(BUILD)/user
+	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
+		$(BUILD)/user/bcc.o $(BUILD)/user/basm_engine.o
+	$(OBJCOPY) --strip-sections $@
+
 $(GUI_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/gui.o $(BUILD)/user/user.ld | $(BUILD)/user
 	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/gui.o
@@ -235,13 +250,16 @@ $(INITRD_H): $(USER_ELFS) tools/mkinitrd.py
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
 	$(PYTHON) tools/mkinitrd.py /hello $(USER_ELF) /bin/sh $(SHELL_ELF) \
 		/bin/nano $(NANO_ELF) /bin/basm $(BASM_ELF) /bin/gui $(GUI_ELF) \
+		/bin/bcc $(BCC_ELF) \
 		/bin/futexhold $(FUTEXHOLD_ELF) /bin/cat $(CAT_ELF) /bin/echo $(ECHO_ELF) \
 		/bin/faulttest $(FAULTTEST_ELF) /bin/socketleak $(SOCKETLEAK_ELF) \
 		$(foreach app,$(GUI_APP_NAMES),/bin/$(app) $(BUILD)/user/$(app).elf) > $@
 
-$(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META)
+$(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META) $(BASM_EXAMPLE) $(BCC_EXAMPLE)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
-	$(PYTHON) tools/gen_app_registry.py --apps "$(GUI_APP_NAMES)" --out $@
+	$(PYTHON) tools/gen_app_registry.py --apps "$(GUI_APP_NAMES)" \
+		--seed "/fs/basm-full.asm=$(BASM_EXAMPLE)" \
+		--seed "/fs/hello.c=$(BCC_EXAMPLE)" --out $@
 
 .PHONY: user
 user: $(INITRD_H)

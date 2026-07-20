@@ -1412,6 +1412,19 @@ static void resolve_external_path(const char *cmd, char *out, int cap) {
     append_text(out, cmd, cap);
 }
 
+static void run_external_command(const char *line) {
+    char local[LINE_MAX];
+    char path[128];
+    char *argv[16];
+    copy_text(local, line, sizeof(local));
+    int argc = split_args(local, argv, 16);
+    if (argc <= 0)
+        return;
+    resolve_external_path(argv[0], path, sizeof(path));
+    argv[0] = path;
+    run_program_sync(local, path, argv, argc);
+}
+
 static int has_exec_operator(const char *line, int *has_pipe) {
     int found = 0;
     if (has_pipe)
@@ -1841,8 +1854,7 @@ static void execute(char *line) {
     else if (starts_with(line, "echo ")) puts(line + 5);
     else if (starts_with(line, "sleep ")) sleep_ms((unsigned int)parse_u32(line + 6) * 1000u);
     else if (starts_with(line, "reboot")) reboot();
-    else if (line[0] == '/') cmd_exec(line);
-    else puts("? try help");
+    else run_external_command(line);
 }
 
 int main(int argc, char **argv) {
