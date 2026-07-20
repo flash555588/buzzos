@@ -27,18 +27,18 @@ def c_ident(name):
 
 def c_string_literal(text):
     out = ['"']
-    for ch in text:
-        code = ord(ch)
-        if ch == "\n":
+    # A C narrow string stores UTF-8 bytes, not Unicode code points.
+    for code in text.encode("utf-8"):
+        if code == 10:
             out.append(r"\n")
-        elif ch == "\t":
+        elif code == 9:
             out.append(r"\t")
-        elif ch == '"':
+        elif code == 34:
             out.append(r"\"")
-        elif ch == "\\":
+        elif code == 92:
             out.append(r"\\")
         elif 32 <= code <= 126:
-            out.append(ch)
+            out.append(chr(code))
         else:
             out.append(f"\\{code:03o}")
     out.append('"')

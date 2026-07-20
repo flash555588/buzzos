@@ -90,6 +90,11 @@ struct gfx_info {
     uint32_t bpp;
 };
 
+#define FONT_GLYPH_HEIGHT 22
+#define FONT_GLYPH_MAX_WIDTH 24
+#define FONT_GLYPH_STRIDE 3
+#define FONT_GLYPH_BYTES (FONT_GLYPH_HEIGHT * FONT_GLYPH_STRIDE)
+
 /* --- Syscalls --- */
 void exit(int code) __attribute__((noreturn));
 int  open(const char *path, int flags);
@@ -142,6 +147,7 @@ int  gfx_text(int x, int y, const char *s, int fg, int bg);
 int  fb_blit(int x, int y, int w, int h, const uint8_t *pixels);
 int  mouse_get(struct mouse_state *out);
 int  gfx_info(struct gfx_info *out);
+int  font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap);
 void gfx_set_origin(int x, int y);
 void gfx_get_origin(int *x_out, int *y_out);
 

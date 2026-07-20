@@ -46,6 +46,7 @@ KERNEL_SRCS := \
 	src/kernel/drv/mouse.c \
 	src/kernel/drv/timer.c \
 	src/kernel/drv/serial.c \
+	src/kernel/drv/font_unicode.c \
 	src/kernel/drv/fb.c \
 	src/kernel/drv/reboot.c \
 	src/kernel/drv/ne2000.c
@@ -104,9 +105,10 @@ CAT_ELF := $(BUILD)/user/cat.elf
 ECHO_ELF := $(BUILD)/user/echo.elf
 FAULTTEST_ELF := $(BUILD)/user/faulttest.elf
 SOCKETLEAK_ELF := $(BUILD)/user/socketleak.elf
-GUI_APP_NAMES := textedit paint calculator filemanager
+GUI_APP_NAMES := textedit paint calculator filemanager browser
 GUI_APP_ELFS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).elf)
 GUI_APP_SRCS := $(foreach app,$(GUI_APP_NAMES),src/user/bin/$(app).c)
+GUI_APP_OBJS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).o)
 USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(GUI_APP_ELFS)
 USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c $(GUI_APP_SRCS)
 USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c
@@ -115,10 +117,18 @@ INITRD_H := $(GENERATED_DIR)/initrd.h
 APP_REGISTRY_H := $(GENERATED_DIR)/app_registry.h
 BASM_EXAMPLE := examples/basm-full.asm
 BCC_EXAMPLE := examples/hello.c
+UTF8_EXAMPLE := examples/utf8.txt
 FONT_H := src/kernel/drv/font_builtin.h
+UNICODE_FONT_H := src/kernel/drv/font_unicode_data.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
 .PHONY: all clean help doctor run run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke gui-smoke report verify image-reset-fs new-app
+
+# These objects are prerequisites of pattern-built user ELFs, not disposable
+# intermediates. Keeping them makes source timestamp changes rebuild reliably.
+.SECONDARY: $(GUI_APP_OBJS) \
+	$(BUILD)/user/futexhold.o $(BUILD)/user/cat.o $(BUILD)/user/echo.o \
+	$(BUILD)/user/faulttest.o $(BUILD)/user/socketleak.o
 
 all: $(IMAGE)
 
@@ -138,7 +148,7 @@ $(OBJDIR)/syscall/sys_proc.o: src/kernel/arch/i386/user.h src/kernel/syscall/sys
 $(OBJDIR)/syscall/syscall.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/syscall/sys_net.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/syscall/sys_file.o: src/kernel/fs/minifs/minifs.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h
-$(OBJDIR)/syscall/sys_gfx.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h
+$(OBJDIR)/syscall/sys_gfx.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/drv/font_unicode.h
 $(OBJDIR)/sched/task.o: src/kernel/syscall/sys_ipc.h
 $(OBJDIR)/syscall/sys_ipc.o: src/kernel/syscall/sys_ipc.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/sched/task.h src/kernel/drv/timer.h
 $(OBJDIR)/fs/minifs/minifs.o: src/kernel/fs/minifs/minifs.h
@@ -147,10 +157,14 @@ $(OBJDIR)/net/net.o: src/kernel/net/net.h src/kernel/net/netdev.h src/kernel/sch
 $(OBJDIR)/core/elf.o: src/kernel/core/elf.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/arch/i386/paging.o: src/kernel/arch/i386/paging.h src/kernel/mm/pmm.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/mm/pmm.o: src/kernel/mm/pmm.h
-$(OBJDIR)/drv/fb.o: $(FONT_H)
+$(OBJDIR)/drv/fb.o: $(FONT_H) src/kernel/drv/font_unicode.h
+$(OBJDIR)/drv/font_unicode.o: src/kernel/drv/font_unicode.h $(UNICODE_FONT_H)
 
 $(FONT_H): tools/gen_kernel_font.ps1
 	powershell -NoProfile -ExecutionPolicy Bypass -File tools/gen_kernel_font.ps1 -Out $(FONT_H)
+
+$(UNICODE_FONT_H): tools/gen_unicode_font.ps1
+	powershell -NoProfile -ExecutionPolicy Bypass -File tools/gen_unicode_font.ps1 -Out $(UNICODE_FONT_H)
 
 $(OBJDIR)/%.o-asm: src/kernel/%.asm | $(OBJDIR)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force (Split-Path '$@' -Parent) | Out-Null"
@@ -204,7 +218,7 @@ $(BUILD)/user/basm_engine.o: src/user/bin/basm.c src/user/bin/basm.h src/user/li
 $(BUILD)/user/bcc.o: src/user/bin/bcc.c src/user/bin/basm.h src/user/libc/libc.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -Isrc/user/bin -c src/user/bin/bcc.c -o $@
 
-$(BUILD)/user/gui.o: src/user/bin/gui.c $(USER_HEADERS) | $(BUILD)/user
+$(BUILD)/user/gui.o: src/user/bin/gui.c src/user/bin/pinyin_data.h $(USER_HEADERS) | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/bin/gui.c -o $(BUILD)/user/gui.o
 
 $(BUILD)/user/%.o: src/user/bin/%.c $(USER_HEADERS) | $(BUILD)/user
@@ -255,11 +269,12 @@ $(INITRD_H): $(USER_ELFS) tools/mkinitrd.py
 		/bin/faulttest $(FAULTTEST_ELF) /bin/socketleak $(SOCKETLEAK_ELF) \
 		$(foreach app,$(GUI_APP_NAMES),/bin/$(app) $(BUILD)/user/$(app).elf) > $@
 
-$(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META) $(BASM_EXAMPLE) $(BCC_EXAMPLE)
+$(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META) $(BASM_EXAMPLE) $(BCC_EXAMPLE) $(UTF8_EXAMPLE)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
 	$(PYTHON) tools/gen_app_registry.py --apps "$(GUI_APP_NAMES)" \
 		--seed "/fs/basm-full.asm=$(BASM_EXAMPLE)" \
-		--seed "/fs/hello.c=$(BCC_EXAMPLE)" --out $@
+		--seed "/fs/hello.c=$(BCC_EXAMPLE)" \
+		--seed "/fs/utf8.txt=$(UTF8_EXAMPLE)" --out $@
 
 .PHONY: user
 user: $(INITRD_H)

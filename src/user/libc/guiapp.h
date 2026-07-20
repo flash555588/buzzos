@@ -8,6 +8,7 @@
 #define GUIAPP_MAX_H 800
 #define GUIAPP_TITLE_MAX 32
 #define GUIAPP_PATH_MAX 128
+#define GUIAPP_TEXT_MAX 32
 
 enum {
     GUIAPP_EVT_INIT = 1,
@@ -15,7 +16,11 @@ enum {
     GUIAPP_EVT_KEY = 3,
     GUIAPP_EVT_MOUSE = 4,
     GUIAPP_EVT_CLOSE = 5,
+    GUIAPP_EVT_TEXT = 6,
+    GUIAPP_EVT_COMMAND = 7,
 };
+
+enum { GUIAPP_CMD_COPY = 1, GUIAPP_CMD_PASTE = 2, GUIAPP_CMD_CUT = 3 };
 
 enum {
     GUIAPP_KEY_ESC = 0x1B,
@@ -36,6 +41,7 @@ struct guiapp_event {
     int32_t key;
     int32_t buttons;
     int32_t wheel;
+    char text[GUIAPP_TEXT_MAX];
 };
 
 struct guiapp_frame {
@@ -56,6 +62,8 @@ enum {
     GUIAPP_FRAME_FULL = 1,
     GUIAPP_FRAME_DIRTY = 2,
     GUIAPP_FRAME_LAUNCH = 3,
+    GUIAPP_FRAME_CLIPBOARD = 4,
+    GUIAPP_FRAME_EXEC = 5,
 };
 
 struct guiapp_ctx {
@@ -72,5 +80,7 @@ int guiapp_send_dirty(struct guiapp_ctx *ctx, const char *title,
                       const uint8_t *pixels, int stride);
 int guiapp_request_launch(struct guiapp_ctx *ctx, const char *target,
                           const char *argument);
+int guiapp_set_clipboard(struct guiapp_ctx *ctx, const char *text);
+int guiapp_request_exec(struct guiapp_ctx *ctx, const char *path);
 
 #endif

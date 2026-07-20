@@ -1308,6 +1308,9 @@ def check_gui_style():
     ]:
         if snippet not in appui_h:
             fail(f"appui.h is missing shared drawing helper: {snippet}")
+    for snippet in ["appui_utf8_next", "appui_utf8_prev", "appui_draw_codepoint", "font_glyph"]:
+        if snippet not in appui_h:
+            fail(f"appui.h is missing UTF-8 drawing feature: {snippet}")
     for snippet in ["guiapp_event", "GUIAPP_EVT_CLOSE", "guiapp_send_frame", "guiapp_send_dirty"]:
         if snippet not in guiapp_h:
             fail(f"guiapp.h is missing desktop protocol feature: {snippet}")
@@ -1317,6 +1320,32 @@ def check_gui_style():
     gui_c = read_text("src/user/bin/gui.c")
     textedit_c = read_text("src/user/bin/textedit.c")
     files_c = read_text("src/user/bin/filemanager.c")
+    pinyin_h = read_text("src/user/bin/pinyin_data.h")
+    shell_c = read_text("src/user/bin/shell.c")
+    for snippet in ["GUIAPP_EVT_TEXT", "GUIAPP_TEXT_MAX"]:
+        if snippet not in guiapp_h:
+            fail(f"GUI app protocol is missing system text input: {snippet}")
+    for snippet in ["GUIAPP_EVT_COMMAND", "GUIAPP_FRAME_CLIPBOARD", "guiapp_set_clipboard"]:
+        if snippet not in guiapp_h + read_text("src/user/libc/guiapp.c"):
+            fail(f"GUI app protocol is missing system clipboard support: {snippet}")
+    for snippet in ["ime_handle_key", "ime_submit", "draw_ime", "app_send_text"]:
+        if snippet not in gui_c:
+            fail(f"desktop is missing system Pinyin IME feature: {snippet}")
+    for snippet in ["draw_context_menu", "clipboard_command", "GUIAPP_CMD_COPY", "GUIAPP_CMD_CUT"]:
+        if snippet not in gui_c:
+            fail(f"desktop is missing context clipboard feature: {snippet}")
+    for snippet in ["term_input", "terminal_input_append", 'terminal_send("\\x15"']:
+        if snippet not in gui_c:
+            fail(f"desktop Terminal is missing UTF-8 clipboard input tracking: {snippet}")
+    for snippet in ["terminal_position_at", "terminal_has_selection", "terminal_copy_selection", "term_selecting"]:
+        if snippet not in gui_c:
+            fail(f"desktop Terminal is missing visible mouse selection: {snippet}")
+    for snippet in ["utf8_prev", "utf8_next", "c <= 255", "c == 0x15"]:
+        if snippet not in shell_c:
+            fail(f"shell is missing UTF-8 line editing support: {snippet}")
+    for snippet in ['{"ni",', '{"zhongguo",', "PINYIN_ENTRY_COUNT"]:
+        if snippet not in pinyin_h:
+            fail(f"Pinyin dictionary is missing coverage: {snippet}")
     for snippet in ["app_target_allowed", "run_app_with_arg", "GUIAPP_FRAME_LAUNCH"]:
         if snippet not in gui_c:
             fail(f"desktop is missing cross-app launch handling: {snippet}")
@@ -1327,9 +1356,23 @@ def check_gui_style():
     for snippet in ["set_document_path", "argc > 4", "file_path"]:
         if snippet not in textedit_c:
             fail(f"TextEdit is missing document argument support: {snippet}")
+    if "GUIAPP_EVT_TEXT" not in textedit_c or "insert_text" not in textedit_c:
+        fail("TextEdit is missing system UTF-8 text input support")
+    for snippet in ["selection_anchor", "position_at", "guiapp_set_clipboard"]:
+        if snippet not in textedit_c:
+            fail(f"TextEdit is missing selection/clipboard support: {snippet}")
     for snippet in ["getdents", "guiapp_request_launch", "MODE_DELETE", "scan_directory"]:
         if snippet not in files_c:
             fail(f"filemanager is missing required feature: {snippet}")
+    for snippet in ["is_elf_file", "has_gui_manifest", "guiapp_request_exec"]:
+        if snippet not in files_c:
+            fail(f"filemanager is missing CLI/GUI executable dispatch: {snippet}")
+    for snippet in ["GUIAPP_FRAME_EXEC", "terminal_execute_path", "exec_target_allowed"]:
+        if snippet not in guiapp_h + gui_c:
+            fail(f"desktop is missing non-GUI ELF terminal dispatch: {snippet}")
+    for snippet in ["app_reader_loop", "app_reader_functions", "reader_dead", "reap_dead_apps"]:
+        if snippet not in gui_c:
+            fail(f"desktop is missing asynchronous app frame handling: {snippet}")
 
     for app in parse_make_words(makefile, "GUI_APP_NAMES"):
         source = read_text(f"src/user/bin/{app}.c")

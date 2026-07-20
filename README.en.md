@@ -133,6 +133,13 @@ Default user GUI apps:
 | Paint | Bitmap drawing tool with canvas and toolbar resizing with window, supports pen, eraser, line, rectangle, fill, and continuous strokes |
 | Calculator | Expression calculator supporting parentheses, decimals, and common arithmetic expressions |
 | Files | File manager with directory navigation, create, rename, delete, and Open in TextEdit |
+| Browser | Small HTTP browser with history, redirects, scrolling, and UTF-8 page text |
+
+The GUI text pipeline decodes UTF-8 and covers common Chinese, extended Latin,
+Greek, Cyrillic, Japanese kana, and punctuation. `/fs/utf8.txt` is the built-in
+multilingual sample. TextEdit moves and deletes complete UTF-8 code points.
+Press `Ctrl+Space` in the desktop to toggle the system Pinyin IME; Space/Enter
+commits the first candidate and digits `1`-`9` choose a candidate.
 
 View app information in the text shell:
 

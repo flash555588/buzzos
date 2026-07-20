@@ -312,6 +312,18 @@ try {
     Send-Key "down"
     Send-Key "down"
     Send-Key "down"
+    Send-Key "down"
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 900
+    $browserPpm = (Join-Path $OutDir "browser.ppm")
+    $screens += Capture-Screen "browser" $browserPpm (Join-Path $OutDir "browser.png")
+    Send-Key "esc"
+    Wait-ForLog "\[gui\] exited" 10
+
+    Type-Command "gui"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "down"
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $filesPpm = (Join-Path $OutDir "filemanager.ppm")

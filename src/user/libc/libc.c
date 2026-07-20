@@ -52,7 +52,7 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_GFX_CLEAR=44, SYS_GFX_PUTPIXEL=45,
        SYS_GFX_FILL_RECT=46, SYS_GFX_TEXT=47, SYS_FB_BLIT=48,
        SYS_MOUSE_GET=49, SYS_FSSTAT=50, SYS_FUTEX_WAIT_TIMEOUT=51,
-       SYS_GFX_INFO=52 };
+       SYS_GFX_INFO=52, SYS_FONT_GLYPH=53 };
 
 void exit(int code) {
     syscall1(SYS_EXIT, code);
@@ -256,6 +256,11 @@ int mouse_get(struct mouse_state *out) {
 
 int gfx_info(struct gfx_info *out) {
     return syscall1(SYS_GFX_INFO, (int)(uintptr_t)out);
+}
+
+int font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap) {
+    return syscall3(SYS_FONT_GLYPH, (int)codepoint,
+                    (int)(uintptr_t)bits, (int)cap);
 }
 
 void gfx_set_origin(int x, int y) {

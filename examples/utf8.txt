@@ -1,0 +1,9 @@
+BuzzOS UTF-8 多语言示例
+
+中文：你好，世界！文件、窗口标题与网页正文都可以显示中文。
+English: The quick brown fox jumps over the lazy dog.
+Ελληνικά: Καλημέρα κόσμε.
+Русский: Привет, мир.
+日本語：こんにちは、世界。
+
+TextEdit 会按完整的 UTF-8 字符移动光标和执行退格，不会拆坏多字节字符。

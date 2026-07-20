@@ -8,6 +8,8 @@ static uint8_t pixels[MAX_W * MAX_H];
 static char textbuf[TEXT_CAP];
 static int text_len;
 static int cursor;
+static int selection_anchor;
+static int selecting;
 static int prev_buttons;
 static int w = 560;
 static int h = 360;
@@ -69,6 +71,7 @@ static void load_file(void) {
     textbuf[n] = 0;
     text_len = n;
     cursor = text_len;
+    selection_anchor = cursor;
     set_path_status("Opened ");
 }
 
@@ -87,6 +90,14 @@ static void save_file(void) {
 }
 
 static void insert_char(char ch) {
+    int lo = appui_min(cursor, selection_anchor);
+    int hi = appui_max(cursor, selection_anchor);
+    if (hi > lo) {
+        for (int i = lo; i + hi - lo <= text_len; i++)
+            textbuf[i] = textbuf[i + hi - lo];
+        text_len -= hi - lo;
+        cursor = selection_anchor = lo;
+    }
     if (text_len >= TEXT_CAP - 1)
         return;
     for (int i = text_len; i > cursor; i--)
@@ -96,13 +107,62 @@ static void insert_char(char ch) {
     textbuf[text_len] = 0;
 }
 
+static void insert_text(const char *value) {
+    int lo = appui_min(cursor, selection_anchor);
+    int hi = appui_max(cursor, selection_anchor);
+    int n = (int)strlen(value);
+    if (n <= 0 || text_len - (hi - lo) + n >= TEXT_CAP)
+        return;
+    if (hi > lo) {
+        for (int i = lo; i + hi - lo <= text_len; i++)
+            textbuf[i] = textbuf[i + hi - lo];
+        text_len -= hi - lo;
+        cursor = selection_anchor = lo;
+    }
+    for (int i = text_len; i >= cursor; i--)
+        textbuf[i + n] = textbuf[i];
+    for (int i = 0; i < n; i++)
+        textbuf[cursor + i] = value[i];
+    cursor += n;
+    text_len += n;
+    selection_anchor = cursor;
+}
+
+static int utf8_prev_pos(int pos) {
+    if (pos <= 0) return 0;
+    pos--;
+    while (pos > 0 && ((uint8_t)textbuf[pos] & 0xC0u) == 0x80u)
+        pos--;
+    return pos;
+}
+
+static int utf8_next_pos(int pos) {
+    if (pos >= text_len) return text_len;
+    const char *p = textbuf + pos;
+    (void)appui_utf8_next(&p);
+    int next = (int)(p - textbuf);
+    return next <= text_len ? next : text_len;
+}
+
 static void backspace(void) {
+    int lo = appui_min(cursor, selection_anchor);
+    int hi = appui_max(cursor, selection_anchor);
+    if (hi > lo) {
+        for (int i = lo; i + hi - lo <= text_len; i++)
+            textbuf[i] = textbuf[i + hi - lo];
+        text_len -= hi - lo;
+        cursor = selection_anchor = lo;
+        return;
+    }
     if (cursor <= 0)
         return;
-    for (int i = cursor - 1; i < text_len; i++)
-        textbuf[i] = textbuf[i + 1];
-    cursor--;
-    text_len--;
+    int previous = utf8_prev_pos(cursor);
+    int removed = cursor - previous;
+    for (int i = previous; i + removed <= text_len; i++)
+        textbuf[i] = textbuf[i + removed];
+    cursor = previous;
+    selection_anchor = cursor;
+    text_len -= removed;
 }
 
 static int line_start_of(int pos) {
@@ -117,36 +177,68 @@ static int line_end_of(int pos) {
     return pos;
 }
 
+static int width_between(int start, int end) {
+    int width = 0;
+    int pos = start;
+    while (pos < end) {
+        const char *p = textbuf + pos;
+        uint32_t cp = appui_utf8_next(&p);
+        if (cp == '\n') break;
+        width += appui_codepoint_width(cp);
+        pos = (int)(p - textbuf);
+    }
+    return width;
+}
+
+static int position_for_x(int start, int end, int target_x) {
+    int x = 0;
+    int pos = start;
+    while (pos < end) {
+        const char *p = textbuf + pos;
+        uint32_t cp = appui_utf8_next(&p);
+        int width = appui_codepoint_width(cp);
+        if (x + width / 2 >= target_x)
+            break;
+        x += width;
+        pos = (int)(p - textbuf);
+    }
+    return pos;
+}
+
 static void cursor_up(void) {
     int start = line_start_of(cursor);
-    int col = cursor - start;
+    int target_x = width_between(start, cursor);
     if (start == 0)
         return;
     int prev_end = start - 1;
     int prev_start = line_start_of(prev_end);
-    cursor = prev_start + appui_min(col, prev_end - prev_start);
+    cursor = position_for_x(prev_start, prev_end, target_x);
 }
 
 static void cursor_down(void) {
     int start = line_start_of(cursor);
-    int col = cursor - start;
+    int target_x = width_between(start, cursor);
     int end = line_end_of(cursor);
     if (end >= text_len)
         return;
     int next_start = end + 1;
     int next_end = line_end_of(next_start);
-    cursor = next_start + appui_min(col, next_end - next_start);
+    cursor = position_for_x(next_start, next_end, target_x);
 }
 
-static int max_line_len(void) {
+static int max_line_width(void) {
     int best = 0;
     int cur = 0;
-    for (int i = 0; i < text_len; i++) {
-        if (textbuf[i] == '\n') {
+    int pos = 0;
+    while (pos < text_len) {
+        const char *p = textbuf + pos;
+        uint32_t cp = appui_utf8_next(&p);
+        pos = (int)(p - textbuf);
+        if (cp == '\n') {
             if (cur > best) best = cur;
             cur = 0;
         } else {
-            cur++;
+            cur += appui_codepoint_width(cp);
         }
     }
     if (cur > best) best = cur;
@@ -162,7 +254,7 @@ static int line_count(void) {
 }
 
 static int content_w(void) {
-    return max_line_len() * KFONT_WIDTH + 16;
+    return max_line_width() + 16;
 }
 
 static int content_h(void) {
@@ -187,16 +279,51 @@ static void clamp_scrolls(void) {
 static void cursor_xy(int *x_out, int *y_out) {
     int x = 0;
     int y = 0;
-    for (int i = 0; i < cursor && i < text_len; i++) {
-        if (textbuf[i] == '\n') {
+    int pos = 0;
+    while (pos < cursor && pos < text_len) {
+        const char *p = textbuf + pos;
+        uint32_t cp = appui_utf8_next(&p);
+        pos = (int)(p - textbuf);
+        if (cp == '\n') {
             x = 0;
             y += KFONT_HEIGHT + 4;
         } else {
-            x += KFONT_WIDTH;
+            x += appui_codepoint_width(cp);
         }
     }
     *x_out = x;
     *y_out = y;
+}
+
+static int position_at(int mx, int my) {
+    struct appui_rect clip = text_clip_rect();
+    int target_x = mx - clip.x + scroll_x;
+    int target_y = my - clip.y + scroll_y;
+    if (target_x < 0) target_x = 0;
+    if (target_y < 0) target_y = 0;
+    int wanted_line = target_y / (KFONT_HEIGHT + 4);
+    int line = 0;
+    int x = 0;
+    int pos = 0;
+    while (pos < text_len) {
+        int start = pos;
+        const char *p = textbuf + pos;
+        uint32_t cp = appui_utf8_next(&p);
+        pos = (int)(p - textbuf);
+        if (cp == '\n') {
+            if (line == wanted_line) return start;
+            line++; x = 0;
+            continue;
+        }
+        if (line == wanted_line) {
+            int width = appui_codepoint_width(cp);
+            if (target_x < x + width / 2) return start;
+            x += width;
+        } else if (line > wanted_line) {
+            return start;
+        }
+    }
+    return text_len;
 }
 
 static void ensure_cursor_visible(void) {
@@ -269,25 +396,39 @@ static void render(void) {
     int y = clip.y - scroll_y;
     int cur_x = x;
     int cur_y = y;
-    for (int i = 0; i <= text_len; i++) {
-        if (i == cursor) {
+    int pos = 0;
+    int select_lo = appui_min(cursor, selection_anchor);
+    int select_hi = appui_max(cursor, selection_anchor);
+    for (;;) {
+        if (pos == cursor) {
             cur_x = x;
             cur_y = y;
         }
-        if (i == text_len)
+        if (pos == text_len)
             break;
-        char ch = textbuf[i];
-        if (ch == '\n') {
+        int glyph_start = pos;
+        const char *p = textbuf + pos;
+        uint32_t cp = appui_utf8_next(&p);
+        pos = (int)(p - textbuf);
+        if (cp == '\n') {
             x = clip.x - scroll_x;
             y += KFONT_HEIGHT + 4;
             continue;
         }
-        if (y + KFONT_HEIGHT >= clip.y && y < clip.y + clip.h &&
-            x + KFONT_WIDTH >= clip.x && x < clip.x + clip.w) {
-            char s[2] = { ch, 0 };
-            appui_text(pixels, w, h, x, y, s, 0, -1, clip);
+        int glyph_w = appui_codepoint_width(cp);
+        if (glyph_start < select_hi && pos > select_lo) {
+            int sx = appui_max(x, clip.x);
+            int sy = appui_max(y, clip.y);
+            int ex = appui_min(x + glyph_w, clip.x + clip.w);
+            int ey = appui_min(y + KFONT_HEIGHT, clip.y + clip.h);
+            if (ex > sx && ey > sy)
+                appui_fill(pixels, w, h, (struct appui_rect){sx, sy, ex - sx, ey - sy},
+                           appui_rgb6(2, 4, 5));
         }
-        x += KFONT_WIDTH;
+        if (y + KFONT_HEIGHT >= clip.y && y < clip.y + clip.h &&
+            x + glyph_w >= clip.x && x < clip.x + clip.w)
+            appui_draw_codepoint(pixels, w, h, x, y, cp, 0, -1, clip);
+        x += glyph_w;
     }
     appui_fill(pixels, w, h, (struct appui_rect){cur_x, cur_y, 2, KFONT_HEIGHT + 2},
                appui_rgb6(0, 2, 5));
@@ -302,6 +443,7 @@ static void click(int x, int y) {
     else if (appui_inside(x, y, (struct appui_rect){166, 8, 70, 26})) {
         text_len = 0;
         cursor = 0;
+        selection_anchor = 0;
         textbuf[0] = 0;
         set_status("Cleared");
     }
@@ -334,9 +476,18 @@ static void mouse(int x, int y, int buttons, int wheel) {
             drag_scroll_axis = 0;
             drag_mouse_start = x;
             drag_scroll_start = scroll_x;
+        } else if (appui_inside(x, y, text_clip_rect())) {
+            cursor = position_at(x, y);
+            selection_anchor = cursor;
+            selecting = 1;
+            ensure_cursor_visible();
         } else {
             click(x, y);
         }
+    }
+    if ((buttons & 1) && selecting) {
+        cursor = position_at(x, y);
+        ensure_cursor_visible();
     }
     if ((buttons & 1) && drag_scroll_axis >= 0) {
         if (drag_scroll_axis) {
@@ -351,8 +502,10 @@ static void mouse(int x, int y, int buttons, int wheel) {
             scroll_x = drag_scroll_start + (x - drag_mouse_start) * max_scroll_x() / span;
         }
     }
-    if (!(buttons & 1))
+    if (!(buttons & 1)) {
         drag_scroll_axis = -1;
+        selecting = 0;
+    }
     prev_buttons = buttons;
     clamp_scrolls();
 }
@@ -361,9 +514,9 @@ static void key(int k) {
     if (k == GUIAPP_KEY_BACKSPACE || k == 127)
         backspace();
     else if (k == GUIAPP_KEY_LEFT && cursor > 0)
-        cursor--;
+        cursor = utf8_prev_pos(cursor);
     else if (k == GUIAPP_KEY_RIGHT && cursor < text_len)
-        cursor++;
+        cursor = utf8_next_pos(cursor);
     else if (k == GUIAPP_KEY_UP)
         cursor_up();
     else if (k == GUIAPP_KEY_DOWN)
@@ -372,7 +525,27 @@ static void key(int k) {
         insert_char('\n');
     else if (k >= 32 && k < 127)
         insert_char((char)k);
+    selection_anchor = cursor;
     ensure_cursor_visible();
+}
+
+static void command(struct guiapp_ctx *ctx, int value) {
+    int lo = appui_min(cursor, selection_anchor);
+    int hi = appui_max(cursor, selection_anchor);
+    if (value == GUIAPP_CMD_PASTE || hi <= lo)
+        return;
+    char copied[GUIAPP_PATH_MAX];
+    int n = hi - lo;
+    if (n >= (int)sizeof(copied)) n = (int)sizeof(copied) - 1;
+    for (int i = 0; i < n; i++) copied[i] = textbuf[lo + i];
+    copied[n] = 0;
+    (void)guiapp_set_clipboard(ctx, copied);
+    if (value == GUIAPP_CMD_CUT) {
+        for (int i = lo; i + hi - lo <= text_len; i++)
+            textbuf[i] = textbuf[i + hi - lo];
+        text_len -= hi - lo;
+        cursor = selection_anchor = lo;
+    }
 }
 
 int main(int argc, char **argv) {
@@ -383,6 +556,7 @@ int main(int argc, char **argv) {
     if (argc > 4)
         set_document_path(argv[4]);
     load_file();
+    selection_anchor = cursor;
     for (;;) {
         if (guiapp_read_event(&ctx, &ev) < 0 || ev.type == GUIAPP_EVT_CLOSE)
             break;
@@ -392,6 +566,11 @@ int main(int argc, char **argv) {
             ensure_cursor_visible();
         } else if (ev.type == GUIAPP_EVT_KEY) {
             key(ev.key);
+        } else if (ev.type == GUIAPP_EVT_TEXT) {
+            insert_text(ev.text);
+            ensure_cursor_visible();
+        } else if (ev.type == GUIAPP_EVT_COMMAND) {
+            command(&ctx, ev.key);
         } else if (ev.type == GUIAPP_EVT_MOUSE) {
             mouse(ev.x, ev.y, ev.buttons, ev.wheel);
         }

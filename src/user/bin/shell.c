@@ -206,13 +206,27 @@ static void term_right(int count) {
         write(1, "\x1B[C", 3);
 }
 
+static int utf8_prev(const char *line, int pos) {
+    if (pos <= 0) return 0;
+    pos--;
+    while (pos > 0 && ((unsigned char)line[pos] & 0xC0u) == 0x80u) pos--;
+    return pos;
+}
+
+static int utf8_next(const char *line, int len, int pos) {
+    if (pos >= len) return len;
+    pos++;
+    while (pos < len && ((unsigned char)line[pos] & 0xC0u) == 0x80u) pos++;
+    return pos;
+}
+
 static void redraw_from(char *line, int len, int from, int target, int clear_extra) {
     for (int i = from; i < len; i++)
         putchar(line[i]);
-    if (clear_extra)
+    for (int i = 0; i < clear_extra; i++)
         putchar(' ');
 
-    int printed = len - from + (clear_extra ? 1 : 0);
+    int printed = len - from + clear_extra;
     int keep = target - from;
     if (printed > keep)
         term_left(printed - keep);
@@ -275,15 +289,17 @@ static int read_line(char *line, int size) {
         }
         if (c == KEY_LEFT) {
             if (cursor > 0) {
-                cursor--;
-                term_left(1);
+                int previous = utf8_prev(line, cursor);
+                term_left(cursor - previous);
+                cursor = previous;
             }
             continue;
         }
         if (c == KEY_RIGHT) {
             if (cursor < len) {
-                cursor++;
-                term_right(1);
+                int next = utf8_next(line, len, cursor);
+                term_right(next - cursor);
+                cursor = next;
             }
             continue;
         }
@@ -316,25 +332,38 @@ static int read_line(char *line, int size) {
         }
         if (c == '\b' || c == 0x7F) {
             if (cursor > 0) {
+                int previous = utf8_prev(line, cursor);
+                int removed = cursor - previous;
                 for (int i = cursor; i < len; i++)
-                    line[i - 1] = line[i];
-                len--;
-                cursor--;
-                term_left(1);
-                redraw_from(line, len, cursor, cursor, 1);
+                    line[i - removed] = line[i];
+                len -= removed;
+                cursor = previous;
+                term_left(removed);
+                redraw_from(line, len, cursor, cursor, removed);
             }
             continue;
         }
         if (c == KEY_DELETE) {
             if (cursor < len) {
-                for (int i = cursor + 1; i < len; i++)
-                    line[i - 1] = line[i];
-                len--;
-                redraw_from(line, len, cursor, cursor, 1);
+                int next = utf8_next(line, len, cursor);
+                int removed = next - cursor;
+                for (int i = next; i < len; i++)
+                    line[i - removed] = line[i];
+                len -= removed;
+                redraw_from(line, len, cursor, cursor, removed);
             }
             continue;
         }
-        if (c >= 32 && c < 127 && len < size - 1) {
+        if (c == 0x15) {
+            term_right(len - cursor);
+            term_left(len);
+            for (int i = 0; i < len; i++) putchar(' ');
+            term_left(len);
+            len = cursor = 0;
+            line[0] = 0;
+            continue;
+        }
+        if (c >= 32 && c <= 255 && len < size - 1) {
             for (int i = len; i > cursor; i--)
                 line[i] = line[i - 1];
             line[cursor] = (char)c;

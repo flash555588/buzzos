@@ -88,6 +88,10 @@ void keyboard_handler(uint8_t scancode) {
     if (c == 0) return;
     if (ctrl_down) {
         char base = scancode_ascii[scancode];
+        if (base == ' ') {
+            enqueue_char(0x1F); /* desktop input-method toggle */
+            return;
+        }
         if (base >= 'a' && base <= 'z')
             c = (char)(base - 'a' + 1);
         else if (base == '[')

@@ -2,6 +2,7 @@
 #define BUZZOS_APPUI_H
 
 #include <stdint.h>
+#include "libc.h"
 #include "../../kernel/drv/font_builtin.h"
 
 struct appui_rect {
@@ -57,37 +58,122 @@ static void appui_border(uint8_t *fb, int w, int h, struct appui_rect r, int hi,
     appui_fill(fb, w, h, (struct appui_rect){r.x + r.w - 1, r.y, 1, r.h}, lo);
 }
 
+/* Decode one UTF-8 scalar and always make progress. Invalid input is rendered
+ * as U+FFFD, so arbitrary file/network bytes cannot wedge a GUI application. */
+static __attribute__((unused)) uint32_t appui_utf8_next(const char **text) {
+    const uint8_t *s = (const uint8_t *)*text;
+    uint32_t cp;
+    int extra;
+    if (!s || !*s)
+        return 0;
+    if (s[0] < 0x80) {
+        *text = (const char *)(s + 1);
+        return s[0];
+    }
+    if (s[0] >= 0xC2 && s[0] <= 0xDF) {
+        cp = s[0] & 0x1Fu; extra = 1;
+    } else if (s[0] >= 0xE0 && s[0] <= 0xEF) {
+        cp = s[0] & 0x0Fu; extra = 2;
+    } else if (s[0] >= 0xF0 && s[0] <= 0xF4) {
+        cp = s[0] & 0x07u; extra = 3;
+    } else {
+        *text = (const char *)(s + 1);
+        return 0xFFFDu;
+    }
+    for (int i = 1; i <= extra; i++) {
+        if (!s[i] || (s[i] & 0xC0u) != 0x80u) {
+            *text = (const char *)(s + 1);
+            return 0xFFFDu;
+        }
+        cp = (cp << 6) | (s[i] & 0x3Fu);
+    }
+    if ((extra == 2 && cp < 0x800u) || (extra == 3 && cp < 0x10000u) ||
+        (cp >= 0xD800u && cp <= 0xDFFFu) || cp > 0x10FFFFu) {
+        *text = (const char *)(s + 1);
+        return 0xFFFDu;
+    }
+    *text = (const char *)(s + extra + 1);
+    return cp;
+}
+
+static __attribute__((unused)) int appui_utf8_prev(const char *text, int pos) {
+    if (!text || pos <= 0) return 0;
+    pos--;
+    while (pos > 0 && ((uint8_t)text[pos] & 0xC0u) == 0x80u)
+        pos--;
+    return pos;
+}
+
+static __attribute__((unused)) int appui_codepoint_width(uint32_t cp) {
+    if (cp < 0x80u)
+        return KFONT_WIDTH;
+    uint8_t bits[FONT_GLYPH_BYTES];
+    int width = font_glyph(cp, bits, sizeof(bits));
+    return width > 0 ? width : KFONT_WIDTH;
+}
+
+static __attribute__((unused)) int appui_draw_codepoint(
+    uint8_t *fb, int w, int h, int x, int y, uint32_t cp,
+    int fg, int bg, struct appui_rect clip) {
+    uint8_t bits[FONT_GLYPH_BYTES];
+    const uint8_t *alpha = 0;
+    int glyph_w = KFONT_WIDTH;
+    if (cp >= KFONT_FIRST && cp < KFONT_FIRST + KFONT_COUNT) {
+        alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
+    } else if (cp >= 0x80u) {
+        glyph_w = font_glyph(cp, bits, sizeof(bits));
+        if (glyph_w <= 0) {
+            cp = '?'; glyph_w = KFONT_WIDTH;
+            alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
+        }
+    } else {
+        cp = '?';
+        alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
+    }
+    if (x + glyph_w > clip.x && y + KFONT_HEIGHT > clip.y &&
+        x < clip.x + clip.w && y < clip.y + clip.h) {
+        for (int py = 0; py < KFONT_HEIGHT; py++) {
+            for (int px = 0; px < glyph_w; px++) {
+                int on = alpha ? alpha[py * KFONT_WIDTH + px] >= 128 :
+                    ((bits[py * FONT_GLYPH_STRIDE + px / 8] &
+                      (uint8_t)(0x80u >> (px & 7))) != 0);
+                int tx = x + px;
+                int ty = y + py;
+                if (!appui_inside(tx, ty, clip))
+                    continue;
+                if (on)
+                    appui_pixel(fb, w, h, tx, ty, fg);
+                else if (bg >= 0)
+                    appui_pixel(fb, w, h, tx, ty, bg);
+            }
+        }
+    }
+    return glyph_w;
+}
+
+static __attribute__((unused)) int appui_text_width(const char *s) {
+    int width = 0;
+    while (s && *s) {
+        uint32_t cp = appui_utf8_next(&s);
+        if (cp == '\n')
+            break;
+        width += appui_codepoint_width(cp);
+    }
+    return width;
+}
+
 static void appui_text(uint8_t *fb, int w, int h, int x, int y,
                        const char *s, int fg, int bg, struct appui_rect clip) {
     while (s && *s) {
-        unsigned char ch = (unsigned char)*s++;
-        if (ch == '\n') {
+        uint32_t cp = appui_utf8_next(&s);
+        if (cp == '\n') {
             y += KFONT_HEIGHT;
             x = clip.x;
             continue;
         }
-        if (ch < KFONT_FIRST || ch >= KFONT_FIRST + KFONT_COUNT)
-            ch = '?';
         if (x >= clip.x + clip.w)
             return;
-        if (x + KFONT_WIDTH > clip.x && y + KFONT_HEIGHT > clip.y &&
-            x < clip.x + clip.w && y < clip.y + clip.h) {
-            const uint8_t *alpha = &kfont_alpha[ch - KFONT_FIRST][0][0];
-            for (int py = 0; py < KFONT_HEIGHT; py++) {
-                for (int px = 0; px < KFONT_WIDTH; px++) {
-                    uint8_t a = alpha[py * KFONT_WIDTH + px];
-                    int tx = x + px;
-                    int ty = y + py;
-                    if (!appui_inside(tx, ty, clip))
-                        continue;
-                    if (a >= 128)
-                        appui_pixel(fb, w, h, tx, ty, fg);
-                    else if (bg >= 0)
-                        appui_pixel(fb, w, h, tx, ty, bg);
-                }
-            }
-        }
-        x += KFONT_WIDTH;
+        x += appui_draw_codepoint(fb, w, h, x, y, cp, fg, bg, clip);
     }
 }
 

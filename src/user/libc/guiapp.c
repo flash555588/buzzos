@@ -126,3 +126,21 @@ int guiapp_request_launch(struct guiapp_ctx *ctx, const char *target,
     copy_field(frame.argument, argument, GUIAPP_PATH_MAX);
     return write_full(ctx->frame_fd, &frame, (int)sizeof(frame));
 }
+
+int guiapp_set_clipboard(struct guiapp_ctx *ctx, const char *text) {
+    struct guiapp_frame frame;
+    if (!ctx || !text)
+        return -1;
+    init_frame(&frame, GUIAPP_FRAME_CLIPBOARD);
+    copy_field(frame.argument, text, GUIAPP_PATH_MAX);
+    return write_full(ctx->frame_fd, &frame, (int)sizeof(frame));
+}
+
+int guiapp_request_exec(struct guiapp_ctx *ctx, const char *path) {
+    struct guiapp_frame frame;
+    if (!ctx || !path || !path[0])
+        return -1;
+    init_frame(&frame, GUIAPP_FRAME_EXEC);
+    copy_field(frame.target, path, GUIAPP_PATH_MAX);
+    return write_full(ctx->frame_fd, &frame, (int)sizeof(frame));
+}

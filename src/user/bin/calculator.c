@@ -262,6 +262,22 @@ static void key(int k) {
         press_label("sqrt");
 }
 
+static void text_input(const char *value) {
+    while (value && *value) {
+        unsigned char ch = (unsigned char)*value++;
+        if (ch < 0x80u)
+            key(ch);
+    }
+}
+
+static void command(struct guiapp_ctx *ctx, int value) {
+    if (value != GUIAPP_CMD_COPY && value != GUIAPP_CMD_CUT)
+        return;
+    (void)guiapp_set_clipboard(ctx, display);
+    if (value == GUIAPP_CMD_CUT)
+        clear();
+}
+
 int main(int argc, char **argv) {
     struct guiapp_ctx ctx;
     struct guiapp_event ev;
@@ -275,6 +291,10 @@ int main(int argc, char **argv) {
             mouse(ev.x, ev.y, ev.buttons);
         else if (ev.type == GUIAPP_EVT_KEY)
             key(ev.key);
+        else if (ev.type == GUIAPP_EVT_TEXT)
+            text_input(ev.text);
+        else if (ev.type == GUIAPP_EVT_COMMAND)
+            command(&ctx, ev.key);
         render();
         if (guiapp_send_frame(&ctx, "Calculator", W, H, pixels) < 0)
             break;

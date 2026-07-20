@@ -178,13 +178,16 @@ int sys_send(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32
     uint16_t peer_port = s->peer_port;
     struct net_tcp_pcb *tcp = &s->tcp;
     socket_unlock();
+    int ret = -1;
     if (type == SOCK_STREAM_K)
-        return net_tcp_send_pcb(tcp, (const void *)(uintptr_t)buf, (size_t)len);
-    if (type == SOCK_DGRAM_K)
-        return net_udp_send(peer_ip, local_port, peer_port, (const void *)(uintptr_t)buf, (size_t)len);
-    if (type == SOCK_RAW_K)
-        return net_icmp_send_echo(peer_ip, local_port, 1, (const void *)(uintptr_t)buf, (size_t)len);
-    return -1;
+        ret = net_tcp_send_pcb(tcp, (const void *)(uintptr_t)buf, (size_t)len);
+    else if (type == SOCK_DGRAM_K)
+        ret = net_udp_send(peer_ip, local_port, peer_port,
+                           (const void *)(uintptr_t)buf, (size_t)len);
+    else if (type == SOCK_RAW_K)
+        ret = net_icmp_send_echo(peer_ip, local_port, 1,
+                                 (const void *)(uintptr_t)buf, (size_t)len);
+    return ret < 0 ? ret : (int)len;
 }
 
 int sys_recv(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32_t e) {
@@ -248,13 +251,14 @@ int sys_sendto(uint32_t sd_arg, uint32_t buf, uint32_t len,
     int type = s->type;
     uint16_t local_port = s->local_port;
     socket_unlock();
+    int ret = -1;
     if (type == SOCK_DGRAM_K)
-        return net_udp_send(addr->sin_addr, local_port, ntoh16(addr->sin_port),
-                            (const void *)(uintptr_t)buf, (size_t)len);
-    if (type == SOCK_RAW_K)
-        return net_icmp_send_echo(addr->sin_addr, local_port, 1,
-                                  (const void *)(uintptr_t)buf, (size_t)len);
-    return -1;
+        ret = net_udp_send(addr->sin_addr, local_port, ntoh16(addr->sin_port),
+                           (const void *)(uintptr_t)buf, (size_t)len);
+    else if (type == SOCK_RAW_K)
+        ret = net_icmp_send_echo(addr->sin_addr, local_port, 1,
+                                 (const void *)(uintptr_t)buf, (size_t)len);
+    return ret < 0 ? ret : (int)len;
 }
 
 int sys_recvfrom(uint32_t sd_arg, uint32_t buf, uint32_t len,

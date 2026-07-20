@@ -97,6 +97,7 @@ void syscall_init(void) {
     syscall_table[SYS_MOUSE_GET] = sys_mouse_get;
     syscall_table[SYS_FSSTAT] = sys_fsstat;
     syscall_table[SYS_GFX_INFO] = sys_gfx_info;
+    syscall_table[SYS_FONT_GLYPH] = sys_font_glyph;
     syscall_table[SYS_SPAWN] = sys_spawn;
     syscall_table[SYS_YIELD] = sys_yield;
     syscall_table[SYS_JOIN]  = sys_join;

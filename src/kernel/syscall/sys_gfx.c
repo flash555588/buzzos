@@ -1,6 +1,15 @@
 #include "syscall_internal.h"
 #include "fb.h"
 #include "mouse.h"
+#include "font_unicode.h"
+
+int sys_font_glyph(uint32_t codepoint, uint32_t out_arg, uint32_t cap,
+                   uint32_t d, uint32_t e) {
+    (void)d; (void)e;
+    if (cap < UFONT_BYTES || !user_range_writable(out_arg, UFONT_BYTES))
+        return -1;
+    return font_unicode_lookup(codepoint, (uint8_t *)(uintptr_t)out_arg);
+}
 
 int sys_gfx_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
     (void)b; (void)c; (void)d; (void)e;

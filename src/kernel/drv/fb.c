@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include "fb.h"
 #include "font_builtin.h"
+#include "font_unicode.h"
 #include "paging.h"
 
 enum {
@@ -112,6 +113,62 @@ static void draw_glyph(int x, int y, char c, uint8_t fg, int bg) {
             fb_store_rgb(x + px, y + py, rgb);
         }
     }
+}
+
+static int draw_unicode_glyph(int x, int y, uint32_t cp, uint8_t fg, int bg) {
+    uint8_t bits[UFONT_BYTES];
+    int width = font_unicode_lookup(cp, bits);
+    if (width <= 0) {
+        draw_glyph(x, y, '?', fg, bg);
+        return FB_FONT_W;
+    }
+    uint32_t fg_rgb = palette_rgb(fg);
+    uint32_t bg_rgb = bg >= 0 ? palette_rgb((uint8_t)bg) : 0;
+    for (int py = 0; py < UFONT_HEIGHT; py++) {
+        for (int px = 0; px < width; px++) {
+            int on = (bits[py * UFONT_STRIDE + px / 8] &
+                      (uint8_t)(0x80u >> (px & 7))) != 0;
+            if (on)
+                fb_store_rgb(x + px, y + py, fg_rgb);
+            else if (bg >= 0)
+                fb_store_rgb(x + px, y + py, bg_rgb);
+        }
+    }
+    return width;
+}
+
+static uint32_t utf8_next(const char **text) {
+    const uint8_t *s = (const uint8_t *)*text;
+    uint32_t cp;
+    int extra;
+    if (s[0] < 0x80u) {
+        *text = (const char *)(s + 1);
+        return s[0];
+    }
+    if (s[0] >= 0xC2u && s[0] <= 0xDFu) {
+        cp = s[0] & 0x1Fu; extra = 1;
+    } else if (s[0] >= 0xE0u && s[0] <= 0xEFu) {
+        cp = s[0] & 0x0Fu; extra = 2;
+    } else if (s[0] >= 0xF0u && s[0] <= 0xF4u) {
+        cp = s[0] & 0x07u; extra = 3;
+    } else {
+        *text = (const char *)(s + 1);
+        return 0xFFFDu;
+    }
+    for (int i = 1; i <= extra; i++) {
+        if (!s[i] || (s[i] & 0xC0u) != 0x80u) {
+            *text = (const char *)(s + 1);
+            return 0xFFFDu;
+        }
+        cp = (cp << 6) | (s[i] & 0x3Fu);
+    }
+    if ((extra == 2 && cp < 0x800u) || (extra == 3 && cp < 0x10000u) ||
+        (cp >= 0xD800u && cp <= 0xDFFFu) || cp > 0x10FFFFu) {
+        *text = (const char *)(s + 1);
+        return 0xFFFDu;
+    }
+    *text = (const char *)(s + extra + 1);
+    return cp;
 }
 
 static void draw_cell(uint16_t r, uint16_t c) {
@@ -361,14 +418,18 @@ int fb_text(int x, int y, const char *s, uint8_t fg, int bg) {
         return -1;
     int start_x = x;
     while (*s) {
-        if (*s == '\n') {
+        uint32_t cp = utf8_next(&s);
+        if (cp == '\n') {
             x = start_x;
             y += FB_FONT_H;
-            s++;
             continue;
         }
-        draw_glyph(x, y, *s++, fg, bg);
-        x += FB_FONT_W;
+        if (cp < 0x80u) {
+            draw_glyph(x, y, (char)cp, fg, bg);
+            x += FB_FONT_W;
+        } else {
+            x += draw_unicode_glyph(x, y, cp, fg, bg);
+        }
     }
     return 0;
 }

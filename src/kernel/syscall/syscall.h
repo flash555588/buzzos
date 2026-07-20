@@ -32,7 +32,7 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_GFX_CLEAR=44, SYS_GFX_PUTPIXEL=45,
        SYS_GFX_FILL_RECT=46, SYS_GFX_TEXT=47, SYS_FB_BLIT=48,
        SYS_MOUSE_GET=49, SYS_FSSTAT=50, SYS_FUTEX_WAIT_TIMEOUT=51,
-       SYS_GFX_INFO=52 };
+       SYS_GFX_INFO=52, SYS_FONT_GLYPH=53 };
 
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);

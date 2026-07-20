@@ -1,5 +1,6 @@
 #include "libc.h"
 #include "guiapp.h"
+#include "pinyin_data.h"
 #include "../../kernel/drv/font_builtin.h"
 
 enum {
@@ -20,6 +21,7 @@ enum {
     MAX_APPS = 16,
     TERM_LINES = 256,
     TERM_COLS = 128,
+    TERM_LINE_BYTES = TERM_COLS * 4,
     APP_DEFAULT_W = 560,
     APP_DEFAULT_H = 360,
     APP_SURFACE_MAX_W = GUIAPP_MAX_W,
@@ -64,6 +66,9 @@ struct app_session {
     int want_w;
     int want_h;
     int resize_dirty;
+    int reader_tid;
+    volatile int reader_dead;
+    volatile int closing;
     char title[GUIAPP_TITLE_MAX];
 };
 
@@ -101,7 +106,7 @@ static int scroll_x[WIN_COUNT];
 static int scroll_y[WIN_COUNT];
 static int focus = WIN_LAUNCHER;
 static int app_mouse_capture = -1;
-static char term_lines[TERM_LINES][TERM_COLS + 1];
+static char term_lines[TERM_LINES][TERM_LINE_BYTES + 1];
 static int term_row;
 static int term_col;
 static volatile int term_lock;
@@ -109,6 +114,13 @@ static int term_in_fd = -1;
 static int term_out_fd = -1;
 static int term_pid = -1;
 static int term_reader_tid = -1;
+static char term_input[512];
+static int term_input_len;
+static int term_select_anchor_row;
+static int term_select_anchor_pos;
+static int term_select_row;
+static int term_select_pos;
+static int term_selecting;
 static int term_ansi_state;
 static int term_ansi_param;
 static unsigned int tick;
@@ -116,6 +128,14 @@ static unsigned int last_render_tick;
 static volatile int desktop_dirty = 1;
 static uint32_t last_wheel_seq;
 static int last_wheel_value;
+static int ime_enabled;
+static char ime_buffer[24];
+static int ime_length;
+static char clipboard[GUIAPP_PATH_MAX];
+static int context_open;
+static int context_x;
+static int context_y;
+static int context_target = -1;
 
 static int rgb6(int r, int g, int b) {
     if (r < 0) r = 0; if (r > 5) r = 5;
@@ -164,20 +184,21 @@ static void copy_text(char *dst, const char *src, size_t cap) {
 }
 
 static int app_target_allowed(const char *path) {
-    static const char prefix[] = "/fs/apps/";
+    for (int i = 0; i < app_count; i++)
+        if (strcmp(path, apps[i].path) == 0)
+            return 1;
+    return 0;
+}
+
+static int exec_target_allowed(const char *path) {
+    static const char prefix[] = "/fs/";
     int i = 0;
-    while (prefix[i]) {
-        if (path[i] != prefix[i])
-            return 0;
-        i++;
-    }
-    if (!path[i])
-        return 0;
+    while (prefix[i]) { if (path[i] != prefix[i]) return 0; i++; }
+    if (!path[i]) return 0;
     for (; path[i]; i++) {
-        char ch = path[i];
-        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-'))
-            return 0;
+        unsigned char ch = (unsigned char)path[i];
+        if (ch < 32 || ch == ' ' || ch == ';' || ch == '|' || ch == '<' ||
+            ch == '>' || ch == '&') return 0;
     }
     return 1;
 }
@@ -289,32 +310,92 @@ static void text(int x, int y, const char *s, int fg, int bg) {
     text_clip(x, y, s, fg, bg, clip);
 }
 
+static uint32_t gui_utf8_next(const char **text) {
+    const uint8_t *s = (const uint8_t *)*text;
+    uint32_t cp;
+    int extra;
+    if (s[0] < 0x80u) { *text = (const char *)(s + 1); return s[0]; }
+    if (s[0] >= 0xC2u && s[0] <= 0xDFu) { cp = s[0] & 0x1Fu; extra = 1; }
+    else if (s[0] >= 0xE0u && s[0] <= 0xEFu) { cp = s[0] & 0x0Fu; extra = 2; }
+    else if (s[0] >= 0xF0u && s[0] <= 0xF4u) { cp = s[0] & 7u; extra = 3; }
+    else { *text = (const char *)(s + 1); return 0xFFFDu; }
+    for (int i = 1; i <= extra; i++) {
+        if (!s[i] || (s[i] & 0xC0u) != 0x80u) {
+            *text = (const char *)(s + 1); return 0xFFFDu;
+        }
+        cp = (cp << 6) | (s[i] & 0x3Fu);
+    }
+    if ((extra == 2 && cp < 0x800u) || (extra == 3 && cp < 0x10000u) ||
+        (cp >= 0xD800u && cp <= 0xDFFFu) || cp > 0x10FFFFu) {
+        *text = (const char *)(s + 1); return 0xFFFDu;
+    }
+    *text = (const char *)(s + extra + 1);
+    return cp;
+}
+
+static int gui_utf8_prev(const char *text, int pos) {
+    if (!text || pos <= 0) return 0;
+    pos--;
+    while (pos > 0 && ((uint8_t)text[pos] & 0xC0u) == 0x80u) pos--;
+    return pos;
+}
+
+static int gui_codepoint_width(uint32_t cp) {
+    if (cp < 0x80u) return KFONT_WIDTH;
+    uint8_t bits[FONT_GLYPH_BYTES];
+    int width = font_glyph(cp, bits, sizeof(bits));
+    return width > 0 ? width : KFONT_WIDTH;
+}
+
+static int gui_text_width(const char *s) {
+    int width = 0;
+    while (s && *s) {
+        uint32_t cp = gui_utf8_next(&s);
+        if (cp == '\n') break;
+        width += gui_codepoint_width(cp);
+    }
+    return width;
+}
+
 static void text_clip(int x, int y, const char *s, int fg, int bg, struct rect clip) {
     while (s && *s) {
-        unsigned char ch = (unsigned char)*s++;
-        if (ch == '\n') {
+        uint32_t cp = gui_utf8_next(&s);
+        if (cp == '\n') {
             y += KFONT_HEIGHT;
             x = clip.x;
             continue;
         }
-        if (ch < KFONT_FIRST || ch >= KFONT_FIRST + KFONT_COUNT)
-            ch = '?';
         if (x >= clip.x + clip.w)
             return;
-        if (x + KFONT_WIDTH > clip.x && y + KFONT_HEIGHT > clip.y &&
+        uint8_t bits[FONT_GLYPH_BYTES];
+        const uint8_t *alpha = 0;
+        int glyph_w = KFONT_WIDTH;
+        if (cp >= KFONT_FIRST && cp < KFONT_FIRST + KFONT_COUNT) {
+            alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
+        } else if (cp >= 0x80u) {
+            glyph_w = font_glyph(cp, bits, sizeof(bits));
+            if (glyph_w <= 0) {
+                cp = '?'; glyph_w = KFONT_WIDTH;
+                alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
+            }
+        } else {
+            cp = '?'; alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
+        }
+        if (x + glyph_w > clip.x && y + KFONT_HEIGHT > clip.y &&
             x < clip.x + clip.w && y < clip.y + clip.h) {
-        const uint8_t *alpha = &kfont_alpha[ch - KFONT_FIRST][0][0];
         for (int py = 0; py < KFONT_HEIGHT; py++) {
-            for (int px = 0; px < KFONT_WIDTH; px++) {
-                uint8_t a = alpha[py * KFONT_WIDTH + px];
-                if (a >= 128)
+            for (int px = 0; px < glyph_w; px++) {
+                int on = alpha ? alpha[py * KFONT_WIDTH + px] >= 128 :
+                    ((bits[py * FONT_GLYPH_STRIDE + px / 8] &
+                      (uint8_t)(0x80u >> (px & 7))) != 0);
+                if (on)
                     pixel_clip(x + px, y + py, fg, clip);
                 else if (bg >= 0)
                     pixel_clip(x + px, y + py, bg, clip);
             }
         }
         }
-        x += KFONT_WIDTH;
+        x += glyph_w;
     }
 }
 
@@ -389,6 +470,7 @@ static void close_window(int id);
 static void clamp_scroll(int id);
 static void activate(int id);
 static void run_app_with_arg(const char *path, const char *argument);
+static void terminal_execute_path(const char *path);
 
 static void term_lock_enter(void) {
     while (__sync_lock_test_and_set(&term_lock, 1))
@@ -419,7 +501,7 @@ static void term_newline_locked(void) {
 }
 
 static void term_clear_line_from_cursor_locked(void) {
-    for (int i = term_col; i < TERM_COLS; i++)
+    for (int i = term_col; i < TERM_LINE_BYTES; i++)
         term_lines[term_row][i] = 0;
 }
 
@@ -444,7 +526,7 @@ static void term_putc_locked(char ch) {
             if (term_col < 0) term_col = 0;
         } else if (ch == 'C') {
             term_col += n;
-            if (term_col >= TERM_COLS) term_col = TERM_COLS - 1;
+            if (term_col >= TERM_LINE_BYTES) term_col = TERM_LINE_BYTES - 1;
         } else if (ch == 'K') {
             term_clear_line_from_cursor_locked();
         }
@@ -472,7 +554,7 @@ static void term_putc_locked(char ch) {
     }
     if ((unsigned char)ch < 32)
         return;
-    if (term_col >= TERM_COLS - 1)
+    if (term_col >= TERM_LINE_BYTES - 1)
         term_newline_locked();
     term_lines[term_row][term_col++] = ch;
     term_lines[term_row][term_col] = 0;
@@ -574,9 +656,17 @@ static void scan_apps(void) {
             }
             if (!executable)
                 continue;
+            char app_path[64];
+            char manifest_path[72];
+            struct stat manifest_st;
+            copy_text(app_path, "/fs/apps/", sizeof(app_path));
+            append_text(app_path, ents[i].d_name, sizeof(app_path));
+            copy_text(manifest_path, app_path, sizeof(manifest_path));
+            append_text(manifest_path, ".app", sizeof(manifest_path));
+            if (stat(manifest_path, &manifest_st) < 0 || manifest_st.st_type != DT_REG)
+                continue;
             copy_text(apps[app_count].name, ents[i].d_name, sizeof(apps[app_count].name));
-            copy_text(apps[app_count].path, "/fs/apps/", sizeof(apps[app_count].path));
-            append_text(apps[app_count].path, ents[i].d_name, sizeof(apps[app_count].path));
+            copy_text(apps[app_count].path, app_path, sizeof(apps[app_count].path));
             apps[app_count].size = ents[i].d_size;
             app_count++;
         }
@@ -595,6 +685,7 @@ static int app_send_event(int slot, int type, int x, int y, int key, int buttons
     if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used)
         return -1;
     struct guiapp_event ev;
+    memset(&ev, 0, sizeof(ev));
     ev.magic = GUIAPP_MAGIC;
     ev.type = (uint32_t)type;
     ev.width = app_sessions[slot].want_w;
@@ -604,6 +695,19 @@ static int app_send_event(int slot, int type, int x, int y, int key, int buttons
     ev.key = key;
     ev.buttons = buttons;
     ev.wheel = wheel;
+    return write_full(app_sessions[slot].to_fd, &ev, (int)sizeof(ev));
+}
+
+static int app_send_text(int slot, const char *value) {
+    if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used || !value)
+        return -1;
+    struct guiapp_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.magic = GUIAPP_MAGIC;
+    ev.type = GUIAPP_EVT_TEXT;
+    ev.width = app_sessions[slot].want_w;
+    ev.height = app_sessions[slot].want_h;
+    copy_text(ev.text, value, sizeof(ev.text));
     return write_full(app_sessions[slot].to_fd, &ev, (int)sizeof(ev));
 }
 
@@ -618,6 +722,17 @@ static int app_read_frame(int slot) {
             return -1;
         frame.target[GUIAPP_PATH_MAX - 1] = 0;
         frame.argument[GUIAPP_PATH_MAX - 1] = 0;
+        if (frame.type == GUIAPP_FRAME_CLIPBOARD) {
+            copy_text(clipboard, frame.argument, sizeof(clipboard));
+            desktop_dirty = 1;
+            continue;
+        }
+        if (frame.type == GUIAPP_FRAME_EXEC) {
+            if (!exec_target_allowed(frame.target))
+                return -1;
+            terminal_execute_path(frame.target);
+            continue;
+        }
         if (frame.type != GUIAPP_FRAME_LAUNCH)
             break;
         if (!app_target_allowed(frame.target))
@@ -656,6 +771,28 @@ static int app_read_frame(int slot) {
     return 0;
 }
 
+static void app_reader_loop(int slot) {
+    while (app_sessions[slot].used && !app_sessions[slot].closing) {
+        if (app_read_frame(slot) < 0)
+            break;
+    }
+    if (!app_sessions[slot].closing) {
+        app_sessions[slot].reader_dead = 1;
+        desktop_dirty = 1;
+    }
+}
+
+#define APP_READER_WRAPPER(n) static void app_reader_##n(void) { app_reader_loop(n); }
+APP_READER_WRAPPER(0) APP_READER_WRAPPER(1) APP_READER_WRAPPER(2)
+APP_READER_WRAPPER(3) APP_READER_WRAPPER(4) APP_READER_WRAPPER(5)
+APP_READER_WRAPPER(6) APP_READER_WRAPPER(7) APP_READER_WRAPPER(8)
+APP_READER_WRAPPER(9)
+
+static thread_fn app_reader_functions[MAX_GUI_APPS] = {
+    app_reader_0, app_reader_1, app_reader_2, app_reader_3, app_reader_4,
+    app_reader_5, app_reader_6, app_reader_7, app_reader_8, app_reader_9
+};
+
 static void app_target_size(int id, int *tw, int *th) {
     struct rect c = content_rect(id);
     *tw = clamp_i(c.w, 180, APP_SURFACE_MAX_W);
@@ -682,14 +819,10 @@ static int sync_app_size(int id) {
     app_sessions[slot].want_h = target_h;
     if (app_send_event(slot, GUIAPP_EVT_RESIZE, 0, 0, 0, 0, 0) < 0)
         return -1;
-    if (app_read_frame(slot) < 0)
-        return -1;
-    app_sessions[slot].resize_dirty =
-        (app_sessions[slot].surface_w != target_w ||
-         app_sessions[slot].surface_h != target_h);
+    app_sessions[slot].resize_dirty = 0;
     scroll_x[id] = 0;
     scroll_y[id] = 0;
-    return app_sessions[slot].resize_dirty ? -1 : 0;
+    return 0;
 }
 
 static void run_app_with_arg(const char *path, const char *argument) {
@@ -759,10 +892,13 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].surface_w = 0;
     app_sessions[slot].surface_h = 0;
     app_sessions[slot].resize_dirty = 0;
+    app_sessions[slot].reader_dead = 0;
+    app_sessions[slot].closing = 0;
     copy_text(app_sessions[slot].title, "Application", sizeof(app_sessions[slot].title));
 
-    if (app_send_event(slot, GUIAPP_EVT_INIT, 0, 0, 0, 0, 0) < 0 ||
-        app_read_frame(slot) < 0) {
+    app_sessions[slot].reader_tid = spawn(app_reader_functions[slot]);
+    if (app_sessions[slot].reader_tid < 0 ||
+        app_send_event(slot, GUIAPP_EVT_INIT, 0, 0, 0, 0, 0) < 0) {
         term_log("app protocol failed");
         close_window(id);
         return;
@@ -923,7 +1059,7 @@ static int content_width(int id) {
     if (slot >= 0 && app_sessions[slot].used)
         return content_rect(id).w;
     if (id == WIN_TERMINAL)
-        return TERM_COLS * KFONT_WIDTH + 28;
+        return TERM_COLS * FONT_GLYPH_MAX_WIDTH + 28;
     if (id == WIN_LAUNCHER)
         return 460;
     return 520;
@@ -1042,18 +1178,95 @@ static void draw_terminal(void) {
     int y = c.y + 8 - scroll_y[WIN_TERMINAL];
     term_lock_enter();
     for (int i = 0; i < TERM_LINES; i++) {
-        if (term_lines[i][0])
+        if (term_lines[i][0]) {
+            int ar = term_select_anchor_row, ap = term_select_anchor_pos;
+            int br = term_select_row, bp = term_select_pos;
+            if (ar > br || (ar == br && ap > bp)) {
+                int tr = ar, tp = ap; ar = br; ap = bp; br = tr; bp = tp;
+            }
+            int px = ox;
+            int pos = 0;
+            while (term_lines[i][pos]) {
+                int start = pos;
+                const char *p = term_lines[i] + pos;
+                uint32_t cp = gui_utf8_next(&p);
+                pos = (int)(p - term_lines[i]);
+                int glyph_w = gui_codepoint_width(cp);
+                int selected = (i > ar || (i == ar && pos > ap)) &&
+                               (i < br || (i == br && start < bp));
+                if (selected) {
+                    struct rect mark = intersect_rect(
+                        (struct rect){px, y, glyph_w, KFONT_HEIGHT}, clip);
+                    if (mark.w > 0 && mark.h > 0)
+                        fill(mark, rgb6(1, 3, 5));
+                }
+                px += glyph_w;
+            }
             text_clip(ox, y, term_lines[i], rgb6(3, 5, 4), -1, clip);
+        }
         y += 22;
     }
     if ((tick / 30) & 1)
         fill(intersect_rect((struct rect){
-            ox + term_col * KFONT_WIDTH,
+            ox + gui_text_width(term_lines[term_row]),
             c.y + 8 + term_row * 22 - scroll_y[WIN_TERMINAL] + 4,
             8, 16
         }, clip), 15);
     term_lock_leave();
     draw_scrollbars(WIN_TERMINAL);
+}
+
+static void terminal_position_at(int mx, int my, int *row_out, int *pos_out) {
+    struct rect c = content_rect(WIN_TERMINAL);
+    int row = (my - (c.y + 8) + scroll_y[WIN_TERMINAL]) / 22;
+    row = clamp_i(row, 0, TERM_LINES - 1);
+    int target_x = mx - (c.x + 10) + scroll_x[WIN_TERMINAL];
+    if (target_x < 0) target_x = 0;
+    int x = 0;
+    int pos = 0;
+    while (term_lines[row][pos]) {
+        int start = pos;
+        const char *p = term_lines[row] + pos;
+        uint32_t cp = gui_utf8_next(&p);
+        pos = (int)(p - term_lines[row]);
+        int width = gui_codepoint_width(cp);
+        if (target_x < x + width / 2) { pos = start; break; }
+        x += width;
+    }
+    *row_out = row;
+    *pos_out = pos;
+}
+
+static int terminal_has_selection(void) {
+    return term_select_anchor_row != term_select_row ||
+           term_select_anchor_pos != term_select_pos;
+}
+
+static void terminal_copy_selection(void) {
+    int ar = term_select_anchor_row, ap = term_select_anchor_pos;
+    int br = term_select_row, bp = term_select_pos;
+    if (ar > br || (ar == br && ap > bp)) {
+        int tr = ar, tp = ap; ar = br; ap = bp; br = tr; bp = tp;
+    }
+    int out = 0;
+    clipboard[0] = 0;
+    for (int row = ar; row <= br && out + 1 < (int)sizeof(clipboard); row++) {
+        int first = row == ar ? ap : 0;
+        int last = row == br ? bp : (int)strlen(term_lines[row]);
+        int pos = first;
+        while (pos < last) {
+            const char *p = term_lines[row] + pos;
+            (void)gui_utf8_next(&p);
+            int next = (int)(p - term_lines[row]);
+            int bytes = next - pos;
+            if (out + bytes >= (int)sizeof(clipboard)) break;
+            for (int i = 0; i < bytes; i++) clipboard[out++] = term_lines[row][pos + i];
+            pos = next;
+        }
+        if (row < br && out + 1 < (int)sizeof(clipboard))
+            clipboard[out++] = '\n';
+    }
+    clipboard[out] = 0;
 }
 
 static void draw_status(void) {
@@ -1133,7 +1346,7 @@ static void draw_dock_tooltip(void) {
         !windows[dock_hover].visible)
         return;
     const char *title = windows[dock_hover].title;
-    int tw = min_i(sw - 16, (int)strlen(title) * KFONT_WIDTH + 20);
+    int tw = min_i(sw - 16, gui_text_width(title) + 20);
     int tx = clamp_i(pointer_x - tw / 2, 8, sw - tw - 8);
     int ty = sh - 96;
     struct rect tip = {tx, ty, tw, 26};
@@ -1190,6 +1403,76 @@ static void draw_dock(void) {
     draw_dock_tooltip();
 }
 
+static const char *ime_candidates(void) {
+    for (int i = 0; i < PINYIN_ENTRY_COUNT; i++)
+        if (strcmp(pinyin_entries[i].key, ime_buffer) == 0)
+            return pinyin_entries[i].items;
+    return 0;
+}
+
+static int ime_candidate_at(int wanted, char out[GUIAPP_TEXT_MAX]) {
+    const char *items = ime_candidates();
+    int index = 0;
+    if (!items || wanted < 0)
+        return 0;
+    while (*items) {
+        while (*items == ' ') items++;
+        if (!*items) break;
+        const char *start = items;
+        while (*items && *items != ' ') items++;
+        if (index++ == wanted) {
+            int n = (int)(items - start);
+            if (n >= GUIAPP_TEXT_MAX) n = GUIAPP_TEXT_MAX - 1;
+            for (int i = 0; i < n; i++) out[i] = start[i];
+            out[n] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void draw_ime(void) {
+    const char *mode = ime_enabled ? "中" : "英";
+    struct rect badge = {sw - 48, 8, 34, 25};
+    fill(badge, ime_enabled ? rgb6(0, 3, 5) : gray(3));
+    border(badge, gray(9), gray(1));
+    text_clip(badge.x + 5, badge.y + 2, mode, 15, -1,
+              (struct rect){badge.x + 2, badge.y + 1, badge.w - 4, badge.h - 2});
+    if (!ime_enabled || ime_length == 0)
+        return;
+    char line[192];
+    copy_text(line, ime_buffer, sizeof(line));
+    append_text(line, "   ", sizeof(line));
+    for (int i = 0; i < 9; i++) {
+        char item[GUIAPP_TEXT_MAX];
+        char number[4] = {(char)('1' + i), '.', 0, 0};
+        if (!ime_candidate_at(i, item)) break;
+        append_text(line, number, sizeof(line));
+        append_text(line, item, sizeof(line));
+        append_text(line, "  ", sizeof(line));
+    }
+    int panel_w = min_i(sw - 24, max_i(260, gui_text_width(line) + 20));
+    struct rect panel = {(sw - panel_w) / 2, sh - 108, panel_w, 32};
+    fill(panel, 15);
+    border(panel, rgb6(0, 3, 5), gray(1));
+    text_clip(panel.x + 10, panel.y + 5, line, 0, -1,
+              (struct rect){panel.x + 5, panel.y + 3, panel.w - 10, panel.h - 6});
+}
+
+static void draw_context_menu(void) {
+    if (!context_open) return;
+    static const char *labels[] = {"Copy", "Paste", "Cut"};
+    struct rect menu = {context_x, context_y, 124, 88};
+    if (menu.x + menu.w > sw) menu.x = sw - menu.w;
+    if (menu.y + menu.h > sh) menu.y = sh - menu.h;
+    context_x = menu.x; context_y = menu.y;
+    fill(menu, gray(3));
+    border(menu, gray(9), gray(1));
+    for (int i = 0; i < 3; i++)
+        button((struct rect){menu.x + 4, menu.y + 4 + i * 27, menu.w - 8, 25},
+               labels[i], i == 1 && clipboard[0]);
+}
+
 static void draw_pointer(void) {
     static const uint16_t arrow[16] = {
         0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
@@ -1222,6 +1505,8 @@ static void render(void) {
             draw_app_window(id);
     }
     draw_dock();
+    draw_ime();
+    draw_context_menu();
     draw_pointer();
     fb_blit(0, 0, sw, sh, fb);
 }
@@ -1389,18 +1674,24 @@ static void close_window(int id) {
         return;
     int slot = app_slot_for_win(id);
     if (slot >= 0 && app_sessions[slot].used) {
+        app_sessions[slot].closing = 1;
         (void)app_send_event(slot, GUIAPP_EVT_CLOSE, 0, 0, 0, 0, 0);
         close(app_sessions[slot].to_fd);
-        close(app_sessions[slot].from_fd);
         if (app_sessions[slot].pid > 0) {
             int status;
             (void)kill(app_sessions[slot].pid);
             (void)waitpid(app_sessions[slot].pid, &status, 0);
         }
+        if (app_sessions[slot].reader_tid > 0)
+            (void)join(app_sessions[slot].reader_tid);
+        close(app_sessions[slot].from_fd);
         app_sessions[slot].used = 0;
         app_sessions[slot].pid = 0;
         app_sessions[slot].to_fd = -1;
         app_sessions[slot].from_fd = -1;
+        app_sessions[slot].reader_tid = -1;
+        app_sessions[slot].reader_dead = 0;
+        app_sessions[slot].closing = 0;
     }
     windows[id].visible = 0;
     windows[id].minimized = 0;
@@ -1410,6 +1701,15 @@ static void close_window(int id) {
         if (windows[next].visible && !windows[next].minimized) {
             activate(next);
             return;
+        }
+    }
+}
+
+static void reap_dead_apps(void) {
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
+        if (app_sessions[slot].used && app_sessions[slot].reader_dead) {
+            term_log("app protocol ended");
+            close_window(WIN_APP_BASE + slot);
         }
     }
 }
@@ -1488,8 +1788,7 @@ static void send_mouse_to_app(int id, int buttons, int wheel) {
     struct rect c = content_rect(id);
     int x = pointer_x - c.x;
     int y = pointer_y - c.y;
-    if (app_send_event(slot, GUIAPP_EVT_MOUSE, x, y, 0, buttons, wheel) == 0)
-        (void)app_read_frame(slot);
+    (void)app_send_event(slot, GUIAPP_EVT_MOUSE, x, y, 0, buttons, wheel);
 }
 
 static void flush_pending_app_resizes(void) {
@@ -1507,6 +1806,27 @@ static void terminal_send(const char *s, int len) {
         (void)write(term_in_fd, s, (size_t)len);
 }
 
+static void terminal_execute_path(const char *path) {
+    terminal_send("\x15", 1);
+    terminal_send(path, (int)strlen(path));
+    terminal_send("\n", 1);
+    term_input_len = 0;
+    term_input[0] = 0;
+    activate(WIN_TERMINAL);
+}
+
+static void terminal_input_append(const char *s) {
+    int n = (int)strlen(s);
+    if (n <= 0 || term_input_len + n >= (int)sizeof(term_input)) return;
+    for (int i = 0; i < n; i++) term_input[term_input_len++] = s[i];
+    term_input[term_input_len] = 0;
+}
+
+static void terminal_input_backspace(void) {
+    term_input_len = gui_utf8_prev(term_input, term_input_len);
+    term_input[term_input_len] = 0;
+}
+
 static void terminal_send_key(int k) {
     char ch;
     if (k == KEY_UP)
@@ -1518,13 +1838,140 @@ static void terminal_send_key(int k) {
     else if (k == KEY_LEFT)
         terminal_send("\x1B[D", 3);
     else if (k == KEY_BACKSPACE || k == 127)
-        terminal_send("\b", 1);
-    else if (k == '\r')
+        { terminal_send("\b", 1); terminal_input_backspace(); }
+    else if (k == '\r') {
         terminal_send("\n", 1);
+        term_input_len = 0; term_input[0] = 0;
+    }
     else if (k >= 0 && k < 256) {
         ch = (char)k;
         terminal_send(&ch, 1);
+        if (k >= 32 && k != 127) {
+            char value[2] = {ch, 0};
+            terminal_input_append(value);
+        }
     }
+}
+
+static int ime_target_active(void) {
+    if (focus == WIN_TERMINAL)
+        return 1;
+    int slot = app_slot_for_win(focus);
+    return slot >= 0 && app_sessions[slot].used;
+}
+
+static void ime_submit(const char *value) {
+    if (!value || !value[0]) return;
+    if (focus == WIN_TERMINAL) {
+        terminal_send(value, (int)strlen(value));
+        terminal_input_append(value);
+    } else {
+        int slot = app_slot_for_win(focus);
+        while (slot >= 0 && app_sessions[slot].used && *value) {
+            int n = (int)strlen(value);
+            if (n > GUIAPP_TEXT_MAX - 1) n = GUIAPP_TEXT_MAX - 1;
+            while (n > 0 && ((uint8_t)value[n] & 0xC0u) == 0x80u) n--;
+            if (n <= 0) n = GUIAPP_TEXT_MAX - 1;
+            char chunk[GUIAPP_TEXT_MAX];
+            for (int i = 0; i < n; i++) chunk[i] = value[i];
+            chunk[n] = 0;
+            if (app_send_text(slot, chunk) < 0)
+                break;
+            value += n;
+        }
+    }
+}
+
+static void clipboard_command(int command) {
+    if (context_target < 0) return;
+    activate(context_target);
+    if (command == GUIAPP_CMD_PASTE) {
+        if (clipboard[0]) ime_submit(clipboard);
+        return;
+    }
+    if (context_target == WIN_TERMINAL) {
+        if (terminal_has_selection())
+            terminal_copy_selection();
+        else
+            copy_text(clipboard, term_input, sizeof(clipboard));
+        if (!terminal_has_selection() && command == GUIAPP_CMD_CUT && term_input_len > 0) {
+            terminal_send("\x15", 1); /* Ctrl+U: clear shell edit line */
+            term_input_len = 0;
+            term_input[0] = 0;
+        }
+        return;
+    }
+    int slot = app_slot_for_win(context_target);
+    if (slot >= 0 && app_sessions[slot].used &&
+        app_send_event(slot, GUIAPP_EVT_COMMAND, 0, 0, command, 0, 0) < 0)
+        app_sessions[slot].reader_dead = 1;
+}
+
+static void ime_clear(void) {
+    ime_length = 0;
+    ime_buffer[0] = 0;
+}
+
+static void ime_commit_candidate(int index) {
+    char item[GUIAPP_TEXT_MAX];
+    if (ime_candidate_at(index, item))
+        ime_submit(item);
+    else
+        ime_submit(ime_buffer);
+    ime_clear();
+}
+
+static const char *ime_punctuation(int k) {
+    switch (k) {
+    case ',': return "，"; case '.': return "。"; case '?': return "？";
+    case '!': return "！"; case ':': return "："; case ';': return "；";
+    case '(': return "（"; case ')': return "）";
+    default: return 0;
+    }
+}
+
+/* Returns non-zero when the desktop IME consumed the key. */
+static int ime_handle_key(int k) {
+    if (k == 0x1F) { /* Ctrl+Space from the keyboard driver */
+        ime_enabled = !ime_enabled;
+        ime_clear();
+        desktop_dirty = 1;
+        return 1;
+    }
+    if (!ime_enabled || !ime_target_active())
+        return 0;
+    if (k == KEY_ESC && ime_length > 0) {
+        ime_clear(); desktop_dirty = 1; return 1;
+    }
+    if ((k == KEY_BACKSPACE || k == 127) && ime_length > 0) {
+        ime_buffer[--ime_length] = 0;
+        desktop_dirty = 1;
+        return 1;
+    }
+    if ((k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z')) {
+        if (ime_length + 1 < (int)sizeof(ime_buffer)) {
+            if (k >= 'A' && k <= 'Z') k += 'a' - 'A';
+            ime_buffer[ime_length++] = (char)k;
+            ime_buffer[ime_length] = 0;
+        }
+        desktop_dirty = 1;
+        return 1;
+    }
+    if (ime_length > 0) {
+        if (k >= '1' && k <= '9') {
+            ime_commit_candidate(k - '1'); desktop_dirty = 1; return 1;
+        }
+        if (k == ' ' || k == '\r' || k == '\n') {
+            ime_commit_candidate(0); desktop_dirty = 1; return 1;
+        }
+        /* Commit the composition before passing punctuation/navigation on. */
+        ime_commit_candidate(0);
+    }
+    const char *punct = ime_punctuation(k);
+    if (punct) {
+        ime_submit(punct); desktop_dirty = 1; return 1;
+    }
+    return 0;
 }
 
 static void activate_next_visible(void) {
@@ -1540,6 +1987,8 @@ static void activate_next_visible(void) {
 }
 
 static void handle_key(int k) {
+    if (ime_handle_key(k))
+        return;
     if (k == KEY_ESC) {
         running = 0;
         return;
@@ -1565,8 +2014,8 @@ static void handle_key(int k) {
     }
     int slot = app_slot_for_win(focus);
     if (slot >= 0 && app_sessions[slot].used) {
-        if (app_send_event(slot, GUIAPP_EVT_KEY, 0, 0, k, 0, 0) == 0)
-            (void)app_read_frame(slot);
+        if (app_send_event(slot, GUIAPP_EVT_KEY, 0, 0, k, 0, 0) < 0)
+            app_sessions[slot].reader_dead = 1;
     }
 }
 
@@ -1580,7 +2029,36 @@ static void handle_mouse(void) {
     pointer_x = ms.x;
     pointer_y = ms.y;
     int left = ms.buttons & 1;
+    int right = ms.buttons & 2;
     dock_hover = hit_dock(pointer_x, pointer_y);
+
+    if (right && !(prev_buttons & 2)) {
+        int target = hit_window(pointer_x, pointer_y);
+        if (target == WIN_TERMINAL ||
+            (target >= WIN_APP_BASE && inside(pointer_x, pointer_y, content_rect(target)))) {
+            context_open = 1;
+            context_x = pointer_x;
+            context_y = pointer_y;
+            context_target = target;
+            activate(target);
+        } else {
+            context_open = 0;
+        }
+        prev_buttons = ms.buttons;
+        return;
+    }
+
+    if (left && !(prev_buttons & 1) && context_open) {
+        int item = (pointer_y - context_y - 4) / 27;
+        if (pointer_x >= context_x + 4 && pointer_x < context_x + 120 &&
+            pointer_y >= context_y + 4 && item >= 0 && item < 3) {
+            static const int commands[] = {GUIAPP_CMD_COPY, GUIAPP_CMD_PASTE, GUIAPP_CMD_CUT};
+            clipboard_command(commands[item]);
+        }
+        context_open = 0;
+        prev_buttons = ms.buttons;
+        return;
+    }
 
     if (ms.wheel_seq != last_wheel_seq) {
         int wheel_delta = ms.wheel - last_wheel_value;
@@ -1694,7 +2172,13 @@ static void handle_mouse(void) {
                 }
             } else {
                 int slot = app_slot_for_win(focus);
-                if (slot >= 0 && inside(pointer_x, pointer_y, content_rect(focus))) {
+                if (focus == WIN_TERMINAL && inside(pointer_x, pointer_y, content_rect(focus))) {
+                    terminal_position_at(pointer_x, pointer_y,
+                                         &term_select_anchor_row, &term_select_anchor_pos);
+                    term_select_row = term_select_anchor_row;
+                    term_select_pos = term_select_anchor_pos;
+                    term_selecting = 1;
+                } else if (slot >= 0 && inside(pointer_x, pointer_y, content_rect(focus))) {
                     app_mouse_capture = focus;
                     send_mouse_to_app(focus, ms.buttons, 0);
                 }
@@ -1709,8 +2193,14 @@ static void handle_mouse(void) {
         drag_win = -1;
         scroll_drag_win = -1;
         resize_win = -1;
+        term_selecting = 0;
         if (finished_resize >= WIN_APP_BASE)
             (void)sync_app_size(finished_resize);
+    }
+    if (left && term_selecting) {
+        terminal_position_at(pointer_x, pointer_y, &term_select_row, &term_select_pos);
+        prev_buttons = ms.buttons;
+        return;
     }
     if (left && resize_win >= 0) {
         apply_resize(resize_win, pointer_x, pointer_y);
@@ -1818,6 +2308,7 @@ int main(int argc, char **argv) {
     (void)argv;
     init_desktop();
     while (running) {
+        reap_dead_apps();
         int key;
         while ((key = read_key_poll()) >= 0) {
             desktop_dirty = 1;

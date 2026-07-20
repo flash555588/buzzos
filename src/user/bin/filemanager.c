@@ -207,6 +207,24 @@ static void selected_path(char *path) {
         (void)join_path(path, current_path, entries[selected].name);
 }
 
+static int is_elf_file(const char *path) {
+    uint8_t magic[4];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    int n = read(fd, magic, sizeof(magic));
+    close(fd);
+    return n == 4 && magic[0] == 0x7Fu && magic[1] == 'E' &&
+           magic[2] == 'L' && magic[3] == 'F';
+}
+
+static int has_gui_manifest(const char *path) {
+    char manifest[PATH_CAP];
+    struct stat st;
+    appui_copy_text(manifest, path, sizeof(manifest));
+    appui_append_text(manifest, ".app", sizeof(manifest));
+    return stat(manifest, &st) == 0 && st.st_type == DT_REG;
+}
+
 static void open_selected(struct guiapp_ctx *ctx) {
     if (selected < 0 || selected >= entry_count)
         return;
@@ -223,24 +241,25 @@ static void open_selected(struct guiapp_ctx *ctx) {
         set_status("This item cannot be opened");
         return;
     }
-    const char *target = "/fs/apps/textedit";
-    const char *argument = path;
-    if (strcmp(current_path, "/fs/apps") == 0) {
-        int executable = 1;
-        for (int i = 0; entries[selected].name[i]; i++)
-            if (entries[selected].name[i] == '.')
-                executable = 0;
-        if (executable) {
-            target = path;
-            argument = 0;
+    if (is_elf_file(path)) {
+        if (strcmp(current_path, "/fs/apps") == 0 && has_gui_manifest(path)) {
+            if (guiapp_request_launch(ctx, path, 0) < 0)
+                set_status("Could not launch GUI app");
+            else
+                set_status("Launched GUI app");
+        } else {
+            if (guiapp_request_exec(ctx, path) < 0)
+                set_status("Could not execute program");
+            else
+                set_status("Running in Terminal");
         }
+        return;
     }
-    if (guiapp_request_launch(ctx, target, argument) < 0) {
+    if (guiapp_request_launch(ctx, "/fs/apps/textedit", path) < 0) {
         set_status("Could not launch TextEdit");
         return;
     }
-    appui_copy_text(status, argument ? "Opened in TextEdit: " : "Launched: ",
-                    sizeof(status));
+    appui_copy_text(status, "Opened in TextEdit: ", sizeof(status));
     appui_append_text(status, entries[selected].name, sizeof(status));
 }
 
@@ -425,7 +444,7 @@ static void draw_dialog(void) {
         appui_border(pixels, w, h, field, appui_rgb6(0, 4, 5), appui_gray(1));
         appui_text(pixels, w, h, field.x + 6, field.y + 6, input_text, 0, -1,
                    (struct appui_rect){field.x + 4, field.y + 3, field.w - 8, 22});
-        int caret_x = field.x + 6 + input_len * KFONT_WIDTH;
+        int caret_x = field.x + 6 + appui_text_width(input_text);
         appui_fill(pixels, w, h, (struct appui_rect){caret_x, field.y + 5, 2,
                    KFONT_HEIGHT + 2}, appui_rgb6(0, 3, 5));
     } else if (selected >= 0) {
@@ -605,7 +624,7 @@ static void handle_key(struct guiapp_ctx *ctx, int key) {
             finish_input();
         } else if (key == GUIAPP_KEY_BACKSPACE || key == 127) {
             if (input_mode != MODE_DELETE && input_len > 0)
-                input_text[--input_len] = 0;
+                input_text[input_len = appui_utf8_prev(input_text, input_len)] = 0;
         } else if (input_mode != MODE_DELETE && key >= 32 && key < 127 &&
                    input_len + 1 < (int)sizeof(input_text)) {
             input_text[input_len++] = (char)key;
@@ -628,6 +647,31 @@ static void handle_key(struct guiapp_ctx *ctx, int key) {
     clamp_selection();
 }
 
+static void handle_text(const char *value) {
+    if (input_mode == MODE_NONE || input_mode == MODE_DELETE)
+        return;
+    int n = (int)strlen(value);
+    if (n <= 0 || input_len + n >= (int)sizeof(input_text))
+        return;
+    for (int i = 0; i < n; i++)
+        input_text[input_len++] = value[i];
+    input_text[input_len] = 0;
+}
+
+static void handle_command(struct guiapp_ctx *ctx, int command) {
+    if (command != GUIAPP_CMD_COPY && command != GUIAPP_CMD_CUT)
+        return;
+    if (input_mode != MODE_NONE && input_mode != MODE_DELETE) {
+        (void)guiapp_set_clipboard(ctx, input_text);
+        if (command == GUIAPP_CMD_CUT) {
+            input_len = 0;
+            input_text[0] = 0;
+        }
+    } else if (selected >= 0 && selected < entry_count) {
+        (void)guiapp_set_clipboard(ctx, entries[selected].name);
+    }
+}
+
 int main(int argc, char **argv) {
     struct guiapp_ctx ctx;
     struct guiapp_event event;
@@ -643,6 +687,10 @@ int main(int argc, char **argv) {
             clamp_selection();
         } else if (event.type == GUIAPP_EVT_KEY) {
             handle_key(&ctx, event.key);
+        } else if (event.type == GUIAPP_EVT_TEXT) {
+            handle_text(event.text);
+        } else if (event.type == GUIAPP_EVT_COMMAND) {
+            handle_command(&ctx, event.key);
         } else if (event.type == GUIAPP_EVT_MOUSE) {
             handle_mouse(&ctx, event.x, event.y, event.buttons, event.wheel);
         }

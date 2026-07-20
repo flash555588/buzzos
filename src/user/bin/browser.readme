@@ -1,0 +1,7 @@
+Browser is a small native BuzzOS HTTP browser.
+
+It has an editable address bar, Back and Go buttons, DNS and TCP HTTP/1.0
+fetching, a scrollable page view, and safe text rendering for HTML.
+
+Supported: http:// URLs, optional ports, HTML text, common entities.
+Not supported yet: HTTPS/TLS, images, CSS, JavaScript, forms, downloads.
