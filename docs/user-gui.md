@@ -111,7 +111,7 @@ src/user/bin/paint.seed
 ```
 
 `tools/gen_app_registry.py` turns those sidecar files into
-`src/kernel/app_registry.h`, which the kernel uses to seed `/fs/apps` at boot.
+`build/generated/app_registry.h`, which the kernel uses to seed `/fs/apps` at boot.
 The generated registry is intentionally checked in like `initrd.h`, making the
 boot image reproducible and easy to inspect.
 

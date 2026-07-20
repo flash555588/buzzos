@@ -348,7 +348,7 @@ static int read_line(char *line, int size) {
 static void cmd_help(const char *topic) {
     topic = skip_spaces(topic);
     if (!topic[0]) {
-        puts("commands: ls cd pwd stat about health interfaces limits fsinfo fsstat fdstat cat mkdir rmdir touch write rm mv nano basm gui apps ping wget tcptwotest dhcp netstat syncstat elfbadtest pipetest pipeedgetest pipeblocktest futextest futextimeouttest futexcanceltest futexblocktest threads exec wait kill ps echo sleep reboot help");
+        puts("commands: ls cd pwd stat about health interfaces limits fsinfo fsstat fdstat cat mkdir rmdir touch write rm mv nano basm gui apps ping wget tcptwotest dhcp netstat syncstat badptrtest elfbadtest pipetest pipeedgetest pipeblocktest futextest futextimeouttest futexcanceltest futexblocktest threadreusetest threads exec wait kill ps echo sleep reboot help");
         puts("external: /bin/echo /bin/cat; pipeline: echo hello | cat");
         puts("topics: help apps | help gui | help files | help proc | help edit | help net | help pipes");
         puts("quick start: about; health; fsinfo; gui");
@@ -840,6 +840,24 @@ static void cmd_ps(const char *arg) {
 
 static void cmd_threads(void) {
     cmd_cat("/proc/threads");
+}
+
+static volatile int thread_reuse_runs;
+
+static void thread_reuse_worker(void) {
+    thread_reuse_runs++;
+}
+
+static void cmd_threadreusetest(void) {
+    thread_reuse_runs = 0;
+    for (int i = 0; i < 40; i++) {
+        int tid = spawn(thread_reuse_worker);
+        if (tid < 0 || join(tid) < 0) {
+            printf("threadreuse: failed at %d\n", i);
+            return;
+        }
+    }
+    printf("threadreuse: joined %d\n", thread_reuse_runs);
 }
 
 static void cmd_health(void) {
@@ -1377,6 +1395,12 @@ static void cmd_elfbadtest(void) {
     printf("elfbad: %s\n", ok ? "ok" : "failed");
 }
 
+static void cmd_badptrtest(void) {
+    const char *unmapped = (const char *)0x02700000u;
+    int rc = write(1, unmapped, 16);
+    printf("badptr: rejected %d\n", rc);
+}
+
 static void resolve_external_path(const char *cmd, char *out, int cap) {
     if (!cmd || !cmd[0] || cap <= 0)
         return;
@@ -1767,6 +1791,7 @@ static void execute(char *line) {
     else if (starts_with(line, "dhcp")) cmd_dhcp();
     else if (starts_with(line, "netstat")) cmd_netstat();
     else if (starts_with(line, "syncstat")) cmd_syncstat();
+    else if (starts_with(line, "badptrtest")) cmd_badptrtest();
     else if (starts_with(line, "elfbadtest")) cmd_elfbadtest();
     else if (starts_with(line, "pipetest")) cmd_pipetest();
     else if (starts_with(line, "pipeedgetest")) cmd_pipeedgetest();
@@ -1775,6 +1800,7 @@ static void execute(char *line) {
     else if (starts_with(line, "futexblocktest")) cmd_futexblocktest();
     else if (starts_with(line, "futextimeouttest")) cmd_futextimeouttest();
     else if (starts_with(line, "futexcanceltest")) cmd_futexcanceltest();
+    else if (starts_with(line, "threadreusetest")) cmd_threadreusetest();
     else if (starts_with(line, "threads")) cmd_threads();
     else if (starts_with(line, "mkdir ")) {
         if (mkdir(line + 6) < 0) puts("mkdir: failed");

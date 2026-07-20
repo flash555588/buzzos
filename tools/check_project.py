@@ -42,13 +42,6 @@ def parse_make_words(text, name):
     return m.group(1).split()
 
 
-def parse_define_int(text, name):
-    m = re.search(rf"^\s*%define\s+{re.escape(name)}\s+(\d+)\b", text, re.M)
-    if not m:
-        fail(f"missing {name} in boot.asm")
-    return int(m.group(1))
-
-
 def parse_define_number(text, name):
     m = re.search(rf"^\s*#define\s+{re.escape(name)}\s+(0x[0-9A-Fa-f]+|\d+)u?\b", text, re.M)
     if not m:
@@ -111,32 +104,29 @@ def elf_section_range(path, wanted):
 
 def check_image_layout():
     makefile = read_text("Makefile")
-    boot = read_text("src/boot/boot.asm")
     minifs_h = read_text("src/kernel/fs/minifs/minifs.h")
-    kernel_sectors = parse_make_int(makefile, "KERNEL_SECTORS")
-    boot_kernel_sectors = parse_define_int(boot, "KERNEL_SECTORS")
+    boot_start = parse_make_int(makefile, "BOOT_PARTITION_START")
+    boot_sectors = parse_make_int(makefile, "BOOT_PARTITION_SECTORS")
     fs_start = parse_make_int(makefile, "FS_START_SECTOR")
     fs_sectors = parse_make_int(makefile, "FS_SECTORS")
     minifs_start = parse_c_int(minifs_h, "MINIFS_LBA_START")
     minifs_sectors = parse_c_int(minifs_h, "MINIFS_SECTORS")
 
-    if kernel_sectors != boot_kernel_sectors:
-        fail(f"KERNEL_SECTORS mismatch: Makefile={kernel_sectors}, boot.asm={boot_kernel_sectors}")
     if fs_start != minifs_start:
         fail(f"FS_START_SECTOR mismatch: Makefile={fs_start}, minifs.h={minifs_start}")
     if fs_sectors != minifs_sectors:
         fail(f"FS_SECTORS mismatch: Makefile={fs_sectors}, minifs.h={minifs_sectors}")
-    kernel_end = 1 + kernel_sectors
-    if kernel_end > fs_start:
-        fail(f"kernel area ends at LBA {kernel_end}, overlaps FS start LBA {fs_start}")
+    boot_end = boot_start + boot_sectors
+    if boot_end > fs_start:
+        fail(f"boot partition ends at LBA {boot_end}, overlaps FS start LBA {fs_start}")
 
-    kernel_bin = ROOT / "build/obj/kernel/kernel.bin"
-    if not kernel_bin.exists():
-        fail("missing build/obj/kernel/kernel.bin; run make first")
-    kernel_size = kernel_bin.stat().st_size
-    max_kernel = kernel_sectors * 512
+    kernel_elf = ROOT / "build/obj/kernel/kernel.elf"
+    if not kernel_elf.exists():
+        fail("missing build/obj/kernel/kernel.elf; run make first")
+    kernel_size = kernel_elf.stat().st_size
+    max_kernel = boot_sectors * 512
     if kernel_size > max_kernel:
-        fail(f"kernel.bin is {kernel_size} bytes, limit is {max_kernel}")
+        fail(f"kernel.elf is {kernel_size} bytes, boot partition capacity is {max_kernel}")
 
     image = ROOT / "build/buzzos.img"
     if image.exists():
@@ -145,11 +135,11 @@ def check_image_layout():
         if actual != expected:
             fail(f"buzzos.img size is {actual}, expected {expected}")
 
-    ok(f"image layout: kernel {kernel_size}/{max_kernel} bytes, fs LBA {fs_start}..{fs_start + fs_sectors - 1}")
+    ok(f"image layout: kernel ELF {kernel_size}/{max_kernel} bytes, boot LBA {boot_start}..{boot_end - 1}, fs LBA {fs_start}..{fs_start + fs_sectors - 1}")
 
 
 def check_kernel_memory_layout():
-    boot = read_text("src/boot/boot.asm")
+    boot = read_text("src/kernel/arch/i386/mb2_entry.asm")
     pmm_c = read_text("src/kernel/mm/pmm.c")
     kernel_elf = ROOT / "build/obj/kernel/kernel.elf"
     if not kernel_elf.exists():
@@ -203,6 +193,139 @@ def check_user_bounds():
 
     ok(f"user bounds: load 0x{load_start:06X}..0x{load_end:06X}, stack 0x{stack_top:06X}, mapped to 0x{ptr_end:06X}")
     return load_start, load_end, stack_top
+
+
+def check_user_fault_isolation():
+    bounds_h = read_text("src/kernel/arch/i386/user_bounds.h")
+    paging_c = read_text("src/kernel/arch/i386/paging.c")
+    pmm_c = read_text("src/kernel/mm/pmm.c")
+    user_c = read_text("src/kernel/arch/i386/user.c")
+    exec_c = read_text("src/kernel/core/exec.c")
+    idt_c = read_text("src/kernel/arch/i386/idt.c")
+    syscall_c = read_text("src/kernel/syscall/syscall.c")
+    makefile = read_text("Makefile")
+    kernel_c = read_text("src/kernel/core/kernel.c")
+    shell_c = read_text("src/user/bin/shell.c")
+    smoke_ps1 = read_text("scripts/smoke.ps1")
+
+    for snippet in [
+        "paging_user_range_accessible",
+        "!(pde & PAGE_USER)",
+        "write && !(pte & PAGE_RW)",
+        "paging_set_user_range_writable",
+    ]:
+        if snippet not in paging_c:
+            fail(f"page-aware user access checks are missing: {snippet}")
+
+    for snippet in [
+        "paging_user_range_accessible(ptr, len, 0)",
+        "paging_user_range_accessible(ptr, len, 1)",
+    ]:
+        if snippet not in syscall_c:
+            fail(f"syscall pointer validation is missing: {snippet}")
+
+    for snippet in [
+        "USER_TRAMPOLINE_BASE",
+        "jmp edx",
+    ]:
+        if snippet not in bounds_h + "\n" + user_c:
+            fail(f"private user trampoline support is missing: {snippet}")
+    for snippet in [
+        "paging_map_user_range(USER_TRAMPOLINE_BASE",
+        "user_install_trampoline()",
+        "paging_set_user_range_writable(USER_TRAMPOLINE_BASE",
+    ]:
+        if snippet not in exec_c:
+            fail(f"exec trampoline setup is missing: {snippet}")
+    if "0x1FF000" in paging_c + "\n" + pmm_c + "\n" + user_c:
+        fail("the legacy shared writable trampoline at 0x1FF000 is still present")
+
+    for snippet in [
+        "(frame[11] & 3u) == 3u",
+        "task_exit_process_code(vector ? -(int)vector : -1)",
+        "Terminating faulting user task",
+    ]:
+        if snippet not in idt_c:
+            fail(f"user exception isolation is missing: {snippet}")
+
+    fixture_text = makefile + "\n" + kernel_c + "\n" + shell_c + "\n" + smoke_ps1
+    for snippet in [
+        "FAULTTEST_ELF",
+        "/bin/faulttest",
+        "cmd_badptrtest",
+        '"badptrtest"',
+        '"exec /bin/faulttest"',
+        "Terminating faulting user task",
+    ]:
+        if snippet not in fixture_text:
+            fail(f"user-fault regression coverage is missing: {snippet}")
+
+    ok("user isolation: page-aware pointers, private read-only trampoline, and per-process fault termination are covered")
+
+
+def check_runtime_lifecycle():
+    idt_c = read_text("src/kernel/arch/i386/idt.c")
+    irq_h = read_text("src/kernel/arch/i386/irq.h")
+    task_c = read_text("src/kernel/sched/task.c")
+    sys_proc = read_text("src/kernel/syscall/sys_proc.c")
+    sys_net = read_text("src/kernel/syscall/sys_net.c")
+    gui_c = read_text("src/user/bin/gui.c")
+    gui_smoke = read_text("scripts/gui-smoke.ps1")
+    smoke = read_text("scripts/smoke.ps1")
+
+    for snippet in ["irq_save", "irq_restore", "pushf; pop %0; cli"]:
+        if snippet not in irq_h:
+            fail(f"shared IRQ-state helper is missing: {snippet}")
+    for snippet in [
+        "IDT_GATE_TRAP_USER",
+        "{SYSCALL_VECTOR, syscall_stub, IDT_GATE_TRAP_USER}",
+    ]:
+        if snippet not in idt_c:
+            fail(f"preemptible syscall gate is missing: {snippet}")
+    schedule_match = re.search(r"static void schedule\(void\) \{(.*?)\n\}", task_c, re.S)
+    if not schedule_match or "irq_save()" not in schedule_match.group(1) or "irq_restore(irq_flags)" not in schedule_match.group(1):
+        fail("scheduler does not preserve the caller's interrupt state")
+    if '__asm__ volatile("sti")' in schedule_match.group(1):
+        fail("scheduler still enables interrupts unconditionally")
+
+    for snippet in [
+        "task_exit_process_code",
+        "syscall_cleanup_process(id)",
+        "syscall_release_thread(id)",
+    ]:
+        if snippet not in task_c:
+            fail(f"process/thread lifecycle cleanup is missing: {snippet}")
+    for snippet in [
+        "process_thread_slots",
+        "USER_THREAD_STACK_SLOTS",
+        "USER_MAIN_STACK_SIZE",
+        "syscall_release_thread",
+        "sys_net_cleanup_owner(task_id)",
+    ]:
+        if snippet not in sys_proc:
+            fail(f"thread stack/socket ownership cleanup is missing: {snippet}")
+    for snippet in ["sys_net_cleanup_owner", "socket_clear", "s->owner != owner"]:
+        if snippet not in sys_net:
+            fail(f"socket owner cleanup is missing: {snippet}")
+
+    for snippet in [
+        "shutdown_desktop",
+        "join(term_reader_tid)",
+        "waitpid(term_pid",
+        "desktop_dirty",
+        "tick - last_render_tick >= 60u",
+        "sync_app_size(resize_win)",
+    ]:
+        if snippet not in gui_c:
+            fail(f"desktop lifecycle/event-driven rendering is missing: {snippet}")
+    for snippet in ["threadreusetest", "socketleak: opened 8", "3072"]:
+        if snippet not in smoke:
+            fail(f"resource/TCP smoke coverage is missing: {snippet}")
+    for snippet in ["textedit-maximized", "Move-MouseRelative", "Click-Left"]:
+        if snippet not in gui_smoke:
+            fail(f"live TextEdit resize coverage is missing: {snippet}")
+
+    ok("runtime lifecycle: IRQ state, process exit, thread/socket reuse, GUI shutdown/live resize, and idle redraw are covered")
 
 
 def check_elf_loader_hardening():
@@ -338,14 +461,14 @@ def parse_initrd_blobs(initrd):
             fail(f"duplicate initrd data symbol: {data}")
         pairs[data] = macro
     if not pairs:
-        fail("no initrd blobs found in src/kernel/initrd.h")
+        fail("no initrd blobs found in build/generated/initrd.h")
     return pairs
 
 
 def check_initrd_reachability():
-    initrd = read_text("src/kernel/initrd.h")
+    initrd = read_text("build/generated/initrd.h")
     kernel_c = read_text("src/kernel/core/kernel.c")
-    app_registry = read_text_if_exists("src/kernel/app_registry.h")
+    app_registry = read_text_if_exists("build/generated/app_registry.h")
     refs = kernel_c + "\n" + app_registry
     blobs = parse_initrd_blobs(initrd)
 
@@ -514,6 +637,8 @@ def check_network_socket_state():
     for snippet in [
         "NET_TCP_RX_CAP",
         "registered",
+        "snd_una",
+        "peer_window",
         "rx_len",
         "rx_buf[NET_TCP_RX_CAP]",
         "struct net_tcp_pcb *next",
@@ -530,6 +655,9 @@ def check_network_socket_state():
         "net_tcp_take_rx",
         "net_tcp_rx_buffered",
         "net_tcp_rx_dropped",
+        "net_tcp_receive_window",
+        "NET_TCP_RETRIES",
+        "accepted_fin",
         "net_tcp_dispatch_frame(rxbuf, n)",
     ]:
         if snippet not in net_c:
@@ -553,6 +681,7 @@ def check_network_socket_state():
         "BUZZOS_TCP_TWO_B",
         "tcptwotest 10.0.2.2",
         "wget 10.0.2.2",
+        '"x" * 3072',
     ]:
         if snippet not in smoke_ps1:
             fail(f"smoke.ps1 is missing deterministic TCP socket coverage: {snippet}")
@@ -618,16 +747,14 @@ def check_procfs_diagnostics():
         fail("shell is missing limits /proc/limits command")
     if "cmd_fsinfo" not in shell_c or 'cmd_cat("/proc/fs")' not in shell_c:
         fail("shell is missing fsinfo /proc/fs command")
-    if 'shell_cmd_cat("/proc/about")' not in gui_c or "ABOUT = /PROC/ABOUT" not in gui_c:
-        fail("GUI shell is missing about /proc/about command/help")
-    if 'shell_cmd_cat("/proc/health")' not in gui_c or "HEALTH = /PROC/HEALTH" not in gui_c:
-        fail("GUI shell is missing health /proc/health command/help")
-    if 'shell_cmd_cat("/proc/interfaces")' not in gui_c or "INTERFACES = /PROC/INTERFACES" not in gui_c:
-        fail("GUI shell is missing interfaces /proc/interfaces command/help")
-    if 'shell_cmd_cat("/proc/limits")' not in gui_c or "LIMITS = /PROC/LIMITS" not in gui_c:
-        fail("GUI shell is missing limits /proc/limits command/help")
-    if 'shell_cmd_cat("/proc/fs")' not in gui_c or "FSINFO = /PROC/FS" not in gui_c:
-        fail("GUI shell is missing fsinfo /proc/fs command/help")
+    for snippet in [
+        'argv[0] = "/bin/sh"',
+        'spawn_process_args("/bin/sh"',
+        "SPAWN_FLAG_INHERIT_STDIO",
+        "terminal_send_key",
+    ]:
+        if snippet not in gui_c:
+            fail(f"GUI terminal is not attached to the full /bin/sh command surface: {snippet}")
     if "collect_health_interfaces" not in report_py or "/proc/health" not in report_py:
         fail("project report is missing health interface summary")
     if "collect_project_identity" not in report_py or "/proc/about" not in report_py:
@@ -664,7 +791,7 @@ def check_procfs_diagnostics():
         "mount\\s+/fs",
         "driver\\s+minifs",
         "inodes_total\\s+128",
-        "blocks_total\\s+382",
+        "blocks_total\\s+3959",
         "host_repair\\s+make fs-repair",
         "gui:interfaces,make:report",
         "fs_status\\s+ok",
@@ -675,7 +802,7 @@ def check_procfs_diagnostics():
         if snippet not in smoke_ps1:
             fail(f"smoke.ps1 is missing procfs diagnostics coverage: {snippet}")
 
-    ok("procfs diagnostics: /proc/about, /proc/health, /proc/interfaces, /proc/limits, /proc/fs, shell/GUI wrappers, and fdstat are covered")
+    ok("procfs diagnostics: /proc/about, /proc/health, /proc/interfaces, /proc/limits, /proc/fs, full shell/GUI terminal access, and fdstat are covered")
 
 
 def check_host_doctor():
@@ -701,14 +828,6 @@ def check_host_doctor():
         "--qemu \"$(QEMU)\"",
         "run-gui:",
         "-Command gui",
-        "run-guidemo:",
-        "-Command guidemo",
-        "run-notes:",
-        "-Command notes",
-        "run-forms:",
-        "-Command forms",
-        "run-calc:",
-        "-Command calc",
         "FS_REPAIR_IMAGE",
         "fs-repair:",
         "tools/check_minifs.py --image \"$(FS_IMAGE)\" --repair --out \"$(FS_REPAIR_IMAGE)\"",
@@ -734,10 +853,6 @@ def check_host_doctor():
         "make doctor",
         "make run-local",
         "make run-gui",
-        "make run-guidemo",
-        "make run-notes",
-        "make run-forms",
-        "make run-calc",
         "make smoke",
         "make gui-smoke",
         "make verify",
@@ -761,7 +876,6 @@ def check_host_doctor():
         "tools/doctor.py",
         "make help",
         "make run-gui",
-        "make run-*",
         "make fs-repair",
         "--soft",
         "--no-version",
@@ -770,7 +884,7 @@ def check_host_doctor():
         if snippet not in report_py:
             fail(f"project report is missing host doctor summary: {snippet}")
 
-    for snippet in ["make help", "make doctor", "QEMU=", "tools/doctor.py", "make run-gui", "make run-calc", "make fs-repair", "docs/boot-guide.md", "docs/user-guide.md"]:
+    for snippet in ["make help", "make doctor", "QEMU=", "tools/doctor.py", "make run-gui", "make fs-repair", "docs/boot-guide.md", "docs/user-guide.md"]:
         if snippet not in readme or snippet not in readme_en:
             fail(f"README files are missing host doctor guidance: {snippet}")
 
@@ -782,7 +896,7 @@ def check_host_doctor():
         if snippet not in boot_guide:
             fail(f"docs/boot-guide.md is missing local startup guidance: {snippet}")
 
-    for snippet in ["help proc", "gui", "guidemo", "notes", "forms", "calc", "fsinfo", "cat /proc/fs", "/proc", "/fs", "输入框", "nano"]:
+    for snippet in ["help proc", "gui", "textedit", "paint", "calculator", "fsinfo", "cat /proc/fs", "/proc", "/fs", "输入框", "nano"]:
         if snippet not in user_guide:
             fail(f"docs/user-guide.md is missing user guidance: {snippet}")
 
@@ -793,7 +907,7 @@ def check_host_doctor():
         if snippet not in work_items:
             fail(f"docs/work-items.md is missing minifs repair completion: {snippet}")
 
-    for snippet in ["make help", "make doctor", "make run-gui", "make run-calc", "make fs-repair"]:
+    for snippet in ["make help", "make doctor", "make run-gui", "make fs-repair"]:
         if snippet not in changelog:
             fail(f"CHANGELOG is missing workflow entry: {snippet}")
 
@@ -1107,7 +1221,7 @@ def discover_app_manifests(source):
 
 def check_app_manifests(list_only=False):
     kernel_c = read_text("src/kernel/core/kernel.c")
-    app_registry = read_text_if_exists("src/kernel/app_registry.h")
+    app_registry = read_text_if_exists("build/generated/app_registry.h")
     source = kernel_c + "\n" + app_registry
     makefile = read_text("Makefile")
     app_names = set(parse_make_words(makefile, "GUI_APP_NAMES"))
@@ -1140,8 +1254,8 @@ def check_app_manifests(list_only=False):
             fail(f"{app}.app manifest symbol should be {app}_manifest, got {symbol}_manifest")
         if manifest["exec"] != f"/fs/apps/{app}":
             fail(f"{app}.app exec should be /fs/apps/{app}")
-        if not manifest["state"].startswith("/fs/apps/"):
-            fail(f"{app}.app state should live under /fs/apps")
+        if not manifest["state"].startswith("/fs/"):
+            fail(f"{app}.app state should live on persistent /fs storage")
         if app not in app_names:
             fail(f"{app} is missing from GUI_APP_NAMES in Makefile")
         source = ROOT / manifest["source"]
@@ -1165,71 +1279,64 @@ def check_app_manifests(list_only=False):
 
 def check_gui_style():
     makefile = read_text("Makefile")
-    style_h = read_text("src/user/libc/gui_style.h")
+    appui_h = read_text("src/user/libc/appui.h")
+    guiapp_h = read_text("src/user/libc/guiapp.h")
     new_app_py = read_text("tools/new_app.py")
     report_py = read_text("tools/project_report.py")
     readme = read_text("README.md")
     readme_en = read_text("README.en.md")
-    user_gui = read_text("docs/user-gui.md")
     project_status = read_text("docs/project-status.md")
-    work_items = read_text("docs/work-items.md")
     changelog = read_text("CHANGELOG.md")
 
     for snippet in [
         "USER_HEADERS",
-        "src/user/libc/gui_style.h",
+        "src/user/libc/appui.h",
+        "src/user/libc/guiapp.h",
         "$(BUILD)/user/%.o: src/user/bin/%.c $(USER_HEADERS)",
     ]:
         if snippet not in makefile:
-            fail(f"Makefile is missing GUI style dependency: {snippet}")
+            fail(f"Makefile is missing desktop app dependency: {snippet}")
 
     for snippet in [
-        "UI_ACCENT",
-        "ui_topbar",
-        "ui_panel",
-        "ui_button",
-        "ui_field",
-        "ui_textbox",
-        "ui_list_row",
-        "ui_scrollbar",
-        "ui_scroll_select_delta",
-        "ui_mouse_wheel_delta",
-        "ui_pointer",
+        "appui_rect",
+        "appui_fill",
+        "appui_border",
+        "appui_text",
+        "appui_button",
     ]:
-        if snippet not in style_h:
-            fail(f"gui_style.h is missing shared UI helper: {snippet}")
+        if snippet not in appui_h:
+            fail(f"appui.h is missing shared drawing helper: {snippet}")
+    for snippet in ["guiapp_event", "GUIAPP_EVT_CLOSE", "guiapp_send_frame", "guiapp_send_dirty"]:
+        if snippet not in guiapp_h:
+            fail(f"guiapp.h is missing desktop protocol feature: {snippet}")
 
     for app in parse_make_words(makefile, "GUI_APP_NAMES"):
         source = read_text(f"src/user/bin/{app}.c")
-        if '#include "gui_style.h"' not in source:
-            fail(f"{app}.c does not include shared GUI style")
-        for snippet in ["ui_topbar", "ui_panel", "ui_button", "ui_pointer"]:
+        for snippet in ['#include "appui.h"', '#include "guiapp.h"', "guiapp_read_event", "guiapp_send_frame"]:
             if snippet not in source:
-                fail(f"{app}.c is missing shared GUI helper: {snippet}")
-        for stale in ["static void border", "static void button", "static void draw_pointer"]:
-            if stale in source:
-                fail(f"{app}.c still has duplicated UI helper: {stale}")
+                fail(f"{app}.c is missing current desktop app feature: {snippet}")
 
-    for snippet in ["collect_gui_style", "## GUI Style", "gui_style.h"]:
+    for snippet in ["collect_gui_style", "## GUI Style", "appui.h"]:
         if snippet not in report_py:
-            fail(f"project report is missing GUI style summary: {snippet}")
+            fail(f"project report is missing desktop UI summary: {snippet}")
 
-    for snippet in ['#include "gui_style.h"', "ui_list_row", "ui_scrollbar", "ui_mouse_wheel_delta"]:
+    for snippet in ['#include "appui.h"', '#include "guiapp.h"', "guiapp_parse_args", "guiapp_read_event", "guiapp_send_frame"]:
         if snippet not in new_app_py:
-            fail(f"new app scaffold is missing shared GUI feature: {snippet}")
+            fail(f"new app scaffold is missing current desktop protocol: {snippet}")
 
-    for snippet in ["gui_style.h", "统一", "shared", "ui_scrollbar"]:
-        docs = readme + "\n" + readme_en + "\n" + user_gui + "\n" + project_status + "\n" + work_items + "\n" + changelog
+    docs = readme + "\n" + readme_en + "\n" + project_status + "\n" + changelog
+    for snippet in ["appui.h", "guiapp.h"]:
         if snippet not in docs:
-            fail(f"docs/logs are missing GUI style note: {snippet}")
+            fail(f"docs/logs are missing desktop app helper note: {snippet}")
 
-    ok("GUI style: seeded GUI apps and new app scaffolds share helpers for controls, highlight rows, scrollbars, wheel state, and pointer")
+    ok("desktop apps: seeded apps and scaffolds use shared drawing helpers and the current event/frame protocol")
 
 
 def main():
     parser = argparse.ArgumentParser(description="BuzzOS host-side consistency checks")
     parser.add_argument("--apps-only", action="store_true", help="only validate /fs/apps manifests and build outputs")
     parser.add_argument("--list-apps", action="store_true", help="list kernel-seeded /fs/apps manifests")
+    parser.add_argument("--source-only", action="store_true", help="run checks that do not require build artifacts")
     args = parser.parse_args()
 
     if args.list_apps:
@@ -1239,10 +1346,27 @@ def main():
         check_app_manifests()
         print("App check passed.")
         return
+    if args.source_only:
+        check_user_bounds()
+        check_user_fault_isolation()
+        check_runtime_lifecycle()
+        check_elf_loader_hardening()
+        check_syscall_abi()
+        check_network_socket_state()
+        check_procfs_diagnostics()
+        check_host_doctor()
+        check_futex_blocking()
+        check_shell_pipeline()
+        check_pipe_blocking()
+        check_gui_style()
+        print("Source check passed.")
+        return
 
     check_image_layout()
     check_kernel_memory_layout()
     load_start, load_end, stack_top = check_user_bounds()
+    check_user_fault_isolation()
+    check_runtime_lifecycle()
     check_elf_loader_hardening()
     check_syscall_abi()
     check_network_socket_state()

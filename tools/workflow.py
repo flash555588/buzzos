@@ -25,26 +25,6 @@ WORKFLOW = [
         "purpose": "boot and open the user-space GUI app manager",
     },
     {
-        "phase": "run",
-        "command": "make run-guidemo QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
-        "purpose": "boot directly into the textbox GUI demo",
-    },
-    {
-        "phase": "run",
-        "command": "make run-notes QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
-        "purpose": "boot directly into the multiline notes GUI demo",
-    },
-    {
-        "phase": "run",
-        "command": "make run-forms QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
-        "purpose": "boot directly into the form-input GUI example",
-    },
-    {
-        "phase": "run",
-        "command": "make run-calc QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
-        "purpose": "boot directly into the textbox calculator GUI demo",
-    },
-    {
         "phase": "test",
         "command": "make smoke QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
         "purpose": "run serial QEMU smoke coverage",

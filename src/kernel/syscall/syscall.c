@@ -1,8 +1,9 @@
 #include "syscall.h"
+#include "paging.h"
 #include "serial.h"
 #include "syscall_internal.h"
 
-int user_range_ok(uint32_t ptr, uint32_t len) {
+static int user_range_bounds_ok(uint32_t ptr, uint32_t len) {
     if (len == 0)
         return 1;
     if (ptr < USER_PTR_START || ptr >= USER_PTR_END)
@@ -10,6 +11,16 @@ int user_range_ok(uint32_t ptr, uint32_t len) {
     if (len > USER_PTR_END - ptr)
         return 0;
     return 1;
+}
+
+int user_range_ok(uint32_t ptr, uint32_t len) {
+    return user_range_bounds_ok(ptr, len) &&
+           paging_user_range_accessible(ptr, len, 0);
+}
+
+int user_range_writable(uint32_t ptr, uint32_t len) {
+    return user_range_bounds_ok(ptr, len) &&
+           paging_user_range_accessible(ptr, len, 1);
 }
 
 int user_string_ok(const char *s) {

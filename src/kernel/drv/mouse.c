@@ -1,6 +1,7 @@
 #include "io.h"
 #include "fb.h"
 #include "mouse.h"
+#include "irq.h"
 
 enum {
     PS2_DATA = 0x60,
@@ -51,17 +52,6 @@ static int ps2_wait_read(void) {
             return 0;
     }
     return -1;
-}
-
-static uint32_t irq_save(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void irq_restore(uint32_t flags) {
-    if (flags & (1u << 9))
-        __asm__ volatile("sti" ::: "memory");
 }
 
 static void ps2_flush_output(void) {

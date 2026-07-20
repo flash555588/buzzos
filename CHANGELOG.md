@@ -26,21 +26,29 @@ short log for reviewers and contributors; deeper design notes live under
   redirection, and stdio inheritance for spawned user programs.
 - Added a user-space GUI app center backed by `/fs/apps`.
 - Seeded GUI examples:
-  - `guidemo`: buttons, swatches, a focused single-line textbox, mouse input,
-    and saved state.
-  - `notes`: a multiline text editor with persistent note storage.
-  - `forms`: multiple text inputs with focus switching, cursor editing, live
-    preview, and persisted form state.
+  - `textedit`: a multiline text editor with persistent document storage.
+  - `paint`: a mouse-driven canvas with color/tool controls and saved artwork.
+  - `calculator`: a compact four-function calculator with keyboard and mouse
+    input.
 - Added source-side app metadata and registry generation so GUI apps can ship
   with `.app` manifests, readmes, optional seed files, and generated kernel
   seed data.
-- Unified seeded user GUI app styling through `src/user/libc/gui_style.h`,
-  sharing top bars, panels, buttons, text boxes, list highlighting,
-  scrollbars, mouse-wheel state, pointer drawing, and status colors across
-  `guidemo`, `notes`, `forms`, and `calc`.
+- Unified seeded desktop app drawing through `src/user/libc/appui.h` and the
+  event/frame protocol in `src/user/libc/guiapp.h`; the app scaffolder now
+  produces applications compatible with the current window manager.
 
 ### Kernel And Runtime
 
+- Added page-table-aware syscall pointer validation, a private read-only user
+  trampoline, and process-scoped termination for user-mode CPU exceptions.
+- Made main-thread exit process-wide, reclaimed joined thread stack slots and
+  process-owned sockets, and added repeated lifecycle regression fixtures.
+- Preserved interrupt state across scheduler/lock paths and changed user
+  syscall gates to trap gates so timer preemption can continue outside guarded
+  critical sections.
+- Added cumulative TCP ACK handling, receive-window advertisement, duplicate
+  and out-of-order segment handling, bounded SYN/data retransmission, and an
+  8 KiB receive queue with larger-flow smoke coverage.
 - Added `/proc` diagnostics for tasks, threads, memory, networking, sync
   waiters, file descriptors, and mounts.
 - Added a multi-interface project identity surface through `/proc/about`, the
@@ -70,9 +78,10 @@ short log for reviewers and contributors; deeper design notes live under
 
 ### Filesystem And Tooling
 
-- Added `make run-gui`, `make run-guidemo`, `make run-notes`,
-  `make run-forms`, and `make run-calc` as visible QEMU shortcuts for seeded
-  GUI demos.
+- Moved generated initrd and app-registry headers to `build/generated`, added a
+  cross-platform source-only CI check, and made `make clean` idempotent.
+- Added `make run-gui` as the visible QEMU shortcut for the desktop and seeded
+  GUI applications.
 - Added `make fs-repair` to write a conservatively repaired minifs image copy
   without overwriting the current image.
 - Added `make help` / `tools/workflow.py` to print the recommended local

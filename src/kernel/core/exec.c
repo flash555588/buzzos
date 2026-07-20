@@ -1,4 +1,5 @@
 #include "exec.h"
+#include "irq.h"
 #include "elf.h"
 #include "paging.h"
 #include "serial.h"
@@ -69,19 +70,23 @@ int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const cha
         return -1;
     }
 
-    __asm__ volatile("cli");
+    uint32_t irq_flags = irq_save();
     paging_switch(proc_cr3);
-    if (paging_map_user_range(USER_DEFAULT_STACK_TOP - 0x10000u, 0x10000u) < 0) {
+    if (paging_map_user_range(USER_TRAMPOLINE_BASE, 0x1000u) < 0 ||
+        user_install_trampoline() < 0 ||
+        paging_set_user_range_writable(USER_TRAMPOLINE_BASE, 0x1000u, 0) < 0 ||
+        paging_map_user_range(USER_DEFAULT_STACK_TOP - USER_MAIN_STACK_SIZE,
+                              USER_MAIN_STACK_SIZE) < 0) {
         paging_switch(old_cr3);
-        __asm__ volatile("sti");
+        irq_restore(irq_flags);
         paging_destroy_user_space(proc_cr3);
-        serial_puts("[exec] out of user stack pages\n");
+        serial_puts("[exec] out of user bootstrap pages\n");
         return -1;
     }
     uint32_t entry = elf_load(elf_data, elf_size);
     uint32_t stack = build_user_stack(argc, argv);
     paging_switch(old_cr3);
-    __asm__ volatile("sti");
+    irq_restore(irq_flags);
 
     if (!entry || !stack) {
         serial_puts("[exec] bad ELF\n");
@@ -89,11 +94,11 @@ int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const cha
         return -1;
     }
 
-    __asm__ volatile("cli");
+    irq_flags = irq_save();
     int id = task_create_ex(user_process_trampoline, name ? name : "user_proc", console_silent);
     if (id < 0) {
         paging_destroy_user_space(proc_cr3);
-        __asm__ volatile("sti");
+        irq_restore(irq_flags);
         return -1;
     }
 
@@ -114,7 +119,7 @@ int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const cha
     } else {
         vfs_setup_stdio(id, console_silent);
     }
-    __asm__ volatile("sti");
+    irq_restore(irq_flags);
 
     serial_puts("[exec] entry=");
     serial_puthex(entry);

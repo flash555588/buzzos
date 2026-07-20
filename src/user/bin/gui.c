@@ -22,6 +22,8 @@ enum {
     TERM_COLS = 128,
     APP_DEFAULT_W = 560,
     APP_DEFAULT_H = 360,
+    APP_SURFACE_MAX_W = GUIAPP_MAX_W,
+    APP_SURFACE_MAX_H = GUIAPP_MAX_H,
     MAX_SW = 1280,
     MAX_SH = 800,
     WIN_MIN_W = 260,
@@ -73,7 +75,7 @@ static struct window windows[WIN_COUNT];
 static int z_order[WIN_COUNT];
 static struct app_entry apps[MAX_APPS];
 static struct app_session app_sessions[MAX_GUI_APPS];
-static uint8_t app_pixels[MAX_GUI_APPS][GUIAPP_MAX_W * GUIAPP_MAX_H];
+static uint8_t app_pixels[MAX_GUI_APPS][APP_SURFACE_MAX_W * APP_SURFACE_MAX_H];
 static int app_count;
 static int app_selected;
 static int app_last_click = -1;
@@ -105,9 +107,12 @@ static volatile int term_lock;
 static int term_in_fd = -1;
 static int term_out_fd = -1;
 static int term_pid = -1;
+static int term_reader_tid = -1;
 static int term_ansi_state;
 static int term_ansi_param;
 static unsigned int tick;
+static unsigned int last_render_tick;
+static volatile int desktop_dirty = 1;
 static uint32_t last_wheel_seq;
 static int last_wheel_value;
 
@@ -471,14 +476,13 @@ static void terminal_reader(void) {
         if (term_out_fd < 0)
             return;
         int n = read(term_out_fd, buf, sizeof(buf));
-        if (n <= 0) {
-            yield();
-            continue;
-        }
+        if (n <= 0)
+            return;
         term_lock_enter();
         for (int i = 0; i < n; i++)
             term_putc_locked(buf[i]);
         term_lock_leave();
+        desktop_dirty = 1;
     }
 }
 
@@ -518,7 +522,8 @@ static int start_terminal_shell(void) {
     term_pid = pid;
     term_in_fd = in_pipe[1];
     term_out_fd = out_pipe[0];
-    if (spawn(terminal_reader) < 0)
+    term_reader_tid = spawn(terminal_reader);
+    if (term_reader_tid < 0)
         return -1;
     term_log("[desktop] attached /bin/sh");
     return 0;
@@ -588,7 +593,7 @@ static int app_read_frame(int slot) {
     if (read_full(app_sessions[slot].from_fd, &frame, (int)sizeof(frame)) < 0)
         return -1;
     if (frame.magic != GUIAPP_MAGIC || frame.width <= 0 || frame.height <= 0 ||
-        frame.width > GUIAPP_MAX_W || frame.height > GUIAPP_MAX_H)
+        frame.width > APP_SURFACE_MAX_W || frame.height > APP_SURFACE_MAX_H)
         return -1;
     if (frame.type == GUIAPP_FRAME_DIRTY) {
         if (frame.x < 0 || frame.y < 0 || frame.dirty_w <= 0 || frame.dirty_h <= 0 ||
@@ -615,13 +620,14 @@ static int app_read_frame(int slot) {
     windows[WIN_APP_BASE + slot].title = app_sessions[slot].title[0]
         ? app_sessions[slot].title : "Application";
     clamp_scroll(WIN_APP_BASE + slot);
+    desktop_dirty = 1;
     return 0;
 }
 
 static void app_target_size(int id, int *tw, int *th) {
     struct rect c = content_rect(id);
-    *tw = clamp_i(c.w, 180, GUIAPP_MAX_W);
-    *th = clamp_i(c.h, 140, GUIAPP_MAX_H);
+    *tw = clamp_i(c.w, 180, APP_SURFACE_MAX_W);
+    *th = clamp_i(c.h, 140, APP_SURFACE_MAX_H);
 }
 
 static int sync_app_size(int id) {
@@ -1283,8 +1289,11 @@ static void close_window(int id) {
         (void)app_send_event(slot, GUIAPP_EVT_CLOSE, 0, 0, 0, 0, 0);
         close(app_sessions[slot].to_fd);
         close(app_sessions[slot].from_fd);
-        if (app_sessions[slot].pid > 0)
-            kill(app_sessions[slot].pid);
+        if (app_sessions[slot].pid > 0) {
+            int status;
+            (void)kill(app_sessions[slot].pid);
+            (void)waitpid(app_sessions[slot].pid, &status, 0);
+        }
         app_sessions[slot].used = 0;
         app_sessions[slot].pid = 0;
         app_sessions[slot].to_fd = -1;
@@ -1432,6 +1441,9 @@ static void handle_mouse(void) {
     struct mouse_state ms;
     if (mouse_get(&ms) < 0)
         return;
+    if (ms.x != pointer_x || ms.y != pointer_y ||
+        ms.buttons != prev_buttons || ms.wheel_seq != last_wheel_seq)
+        desktop_dirty = 1;
     pointer_x = ms.x;
     pointer_y = ms.y;
     int left = ms.buttons & 1;
@@ -1565,7 +1577,7 @@ static void handle_mouse(void) {
     }
     if (left && resize_win >= 0) {
         apply_resize(resize_win, pointer_x, pointer_y);
-        if (resize_win >= WIN_APP_BASE && (tick & 3u) == 0)
+        if (resize_win >= WIN_APP_BASE)
             (void)sync_app_size(resize_win);
         prev_buttons = ms.buttons;
         return;
@@ -1638,25 +1650,52 @@ static void init_desktop(void) {
         term_log("terminal: failed to start /bin/sh");
 }
 
+static void shutdown_desktop(void) {
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
+        if (app_sessions[slot].used)
+            close_window(WIN_APP_BASE + slot);
+    }
+
+    if (term_in_fd >= 0) {
+        close(term_in_fd);
+        term_in_fd = -1;
+    }
+    if (term_pid > 0) {
+        int status;
+        (void)kill(term_pid);
+        (void)waitpid(term_pid, &status, 0);
+        term_pid = -1;
+    }
+    if (term_reader_tid > 0) {
+        (void)join(term_reader_tid);
+        term_reader_tid = -1;
+    }
+    if (term_out_fd >= 0) {
+        close(term_out_fd);
+        term_out_fd = -1;
+    }
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
     init_desktop();
     while (running) {
         int key;
-        while ((key = read_key_poll()) >= 0)
+        while ((key = read_key_poll()) >= 0) {
+            desktop_dirty = 1;
             handle_key(key);
+        }
         handle_mouse();
         flush_pending_app_resizes();
-        render();
+        if (desktop_dirty || tick - last_render_tick >= 60u) {
+            desktop_dirty = 0;
+            render();
+            last_render_tick = tick;
+        }
         tick++;
         sleep_ms(app_mouse_capture >= 0 ? 2 : 16);
     }
-    if (term_pid > 0)
-        kill(term_pid);
-    if (term_in_fd >= 0)
-        close(term_in_fd);
-    if (term_out_fd >= 0)
-        close(term_out_fd);
+    shutdown_desktop();
     return 0;
 }

@@ -66,6 +66,7 @@ int task_dump_threads_text(char *buf, int size, int show_dead);
 /* Mark a task as dead (used by sys_exit for spawned threads). */
 void task_exit(void);
 void task_exit_code(int code);
+void task_exit_process_code(int code);
 void task_sleep_until(uint32_t wake_tick);
 void task_prepare_block_current(uint32_t wake_tick);
 void task_block_current(void);

@@ -125,9 +125,6 @@ void pmm_init(void) {
      * later kernel stacks. */
     mark_range(0x006F0000, 0x00010000, 1);
 
-    /* Ring-3 entry trampoline lives here and is patched per process. */
-    mark_range(0x001FF000, 0x1000, 1);
-
     /* Reserve first 4 KiB (IVT / BDA) */
     mark_range(0, 0x1000, 1);
 

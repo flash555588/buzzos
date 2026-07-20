@@ -7,343 +7,92 @@ from string import Template
 ROOT = Path(__file__).resolve().parents[1]
 
 
-C_TEMPLATE = Template(r'''#include "libc.h"
-#include "gui_style.h"
+C_TEMPLATE = Template(r'''#include "appui.h"
+#include "guiapp.h"
+#include "libc.h"
 
-#define APP_TITLE "$upper"
-#define STATE_PATH "/fs/apps/$name.cfg"
+enum { W = 420, H = 260 };
 
-enum {
-    KEY_ESC = 0x1B,
-    CTRL_C = 0x03,
-    CTRL_S = 0x13,
-    KEY_UP = 256,
-    KEY_DOWN,
-    KEY_DELETE,
-
-    INPUT_MAX = 34,
-    LIST_X = 16,
-    LIST_Y = 48,
-    LIST_W = 112,
-    LIST_H = 84,
-    ROW_H = 14,
-
-    FIELD_X = 144,
-    FIELD_Y = 74,
-    FIELD_W = 150,
-    FIELD_H = 20,
-
-    SAVE_X = 144,
-    LOAD_X = 196,
-    CLEAR_X = 248,
-    BTN_Y = 128,
-    BTN_W = 46,
-    BTN_H = 14,
-};
-
-static const char *items[] = {
-    "OVERVIEW",
-    "TEXTBOX",
-    "SCROLLBAR",
-    "HIGHLIGHT",
-    "MOUSE WHEEL",
-    "PERSISTENCE",
-    "FILES",
-    "STATUS",
-};
-
-static int running = 1;
-static int pointer_x = UI_SW / 2;
-static int pointer_y = UI_SH / 2;
-static int prev_left;
-static int focused = 1;
-static int dirty;
-static int saved_flash;
-static unsigned int frame;
-static struct ui_scroll list_scroll;
-static char text[INPUT_MAX + 1] = "$upper";
-
-static int item_count(void) {
-    return (int)(sizeof(items) / sizeof(items[0]));
-}
-
-static int list_visible_rows(void) {
-    return ui_visible_rows(LIST_H, ROW_H);
-}
-
-static void append_char(char *dst, char ch, int cap) {
-    int n = (int)strlen(dst);
-    if (n < cap - 1) {
-        dst[n++] = ch;
-        dst[n] = 0;
-    }
-}
-
-static void append_text(char *dst, const char *src, int cap) {
-    int n = (int)strlen(dst);
-    int i = 0;
-    while (src && src[i] && n < cap - 1)
-        dst[n++] = src[i++];
-    dst[n] = 0;
-}
-
-static void append_uint(char *dst, unsigned int v, int cap) {
-    char tmp[12];
-    int n = 0;
-    if (v == 0) {
-        append_char(dst, '0', cap);
-        return;
-    }
-    while (v && n < (int)sizeof(tmp)) {
-        tmp[n++] = (char)('0' + (v % 10u));
-        v /= 10u;
-    }
-    while (n > 0)
-        append_char(dst, tmp[--n], cap);
-}
-
-static void set_text(const char *s) {
-    int i = 0;
-    while (s && s[i] && s[i] != '\n' && s[i] != '\r' && i < INPUT_MAX) {
-        text[i] = s[i];
-        i++;
-    }
-    text[i] = 0;
-}
-
-static void mark_dirty(void) {
-    dirty = 1;
-    saved_flash = 0;
-}
-
-static void save_state(void) {
-    int fd = open(STATE_PATH, O_WRONLY | O_CREAT | O_TRUNC);
-    if (fd < 0)
-        return;
-    write(fd, text, strlen(text));
-    write(fd, "\n", 1);
-    close(fd);
-    dirty = 0;
-    saved_flash = 40;
-}
+static uint8_t pixels[W * H];
+static int click_count;
+static int prev_buttons;
 
 static void load_state(void) {
-    char buf[INPUT_MAX + 2];
-    int fd = open(STATE_PATH, O_RDONLY);
+    char buf[16];
+    int fd = open("/fs/apps/$name.cfg", O_RDONLY);
     if (fd < 0)
         return;
     int n = read(fd, buf, sizeof(buf) - 1);
     close(fd);
-    if (n <= 0)
+    if (n > 0) {
+        buf[n] = 0;
+        click_count = atoi(buf);
+    }
+}
+
+static void save_state(void) {
+    char buf[16] = "";
+    appui_append_int(buf, click_count, sizeof(buf));
+    int fd = open("/fs/apps/$name.cfg", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0)
         return;
-    buf[n] = 0;
-    set_text(buf);
-    dirty = 0;
+    write(fd, buf, strlen(buf));
+    close(fd);
 }
 
-static int read_byte_poll(void) {
-    unsigned char c;
-    int n = read(0, &c, 1);
-    if (n > 0)
-        return c;
-    return -1;
+static struct appui_rect action_button(void) {
+    return (struct appui_rect){24, 126, 150, 38};
 }
 
-static int read_key_poll(void) {
-    int c = read_byte_poll();
-    if (c != KEY_ESC)
-        return c;
+static void render(void) {
+    char count[48] = "Actions: ";
+    appui_append_int(count, click_count, sizeof(count));
+    appui_fill(pixels, W, H, (struct appui_rect){0, 0, W, H}, appui_gray(3));
+    appui_fill(pixels, W, H, (struct appui_rect){16, 16, W - 32, H - 32}, appui_gray(5));
+    appui_border(pixels, W, H, (struct appui_rect){16, 16, W - 32, H - 32},
+                 appui_gray(9), appui_gray(1));
+    appui_text(pixels, W, H, 30, 36, "$upper", 15, -1,
+               (struct appui_rect){24, 24, W - 48, 28});
+    appui_text(pixels, W, H, 30, 78, "Generated BuzzOS desktop app", 15, -1,
+               (struct appui_rect){24, 66, W - 48, 32});
+    appui_button(pixels, W, H, action_button(), "Action", 1);
+    appui_text(pixels, W, H, 30, 190, count, 15, -1,
+               (struct appui_rect){24, 180, W - 48, 32});
+}
 
-    int b = read_byte_poll();
-    if (b < 0 || b != '[')
-        return KEY_ESC;
+static void activate(void) {
+    click_count++;
+    save_state();
+}
 
-    int k = read_byte_poll();
-    if (k == 'A')
-        return KEY_UP;
-    if (k == 'B')
-        return KEY_DOWN;
-    if (k == '3' && read_byte_poll() == '~')
-        return KEY_DELETE;
-    return KEY_ESC;
+static void handle_mouse(int x, int y, int buttons) {
+    int pressed = (buttons & 1) && !(prev_buttons & 1);
+    prev_buttons = buttons;
+    if (pressed && appui_inside(x, y, action_button()))
+        activate();
 }
 
 static void handle_key(int key) {
-    int len;
-    if (key == KEY_ESC || key == CTRL_C) {
-        running = 0;
-        return;
-    }
-    if (key == CTRL_S) {
-        save_state();
-        return;
-    }
-    if (key == KEY_UP || key == KEY_DOWN) {
-        ui_scroll_select_delta(&list_scroll, key == KEY_UP ? -1 : 1,
-                               item_count(), list_visible_rows());
-        return;
-    }
-    if (key == '\t') {
-        focused = !focused;
-        return;
-    }
-    if (!focused)
-        return;
-
-    len = (int)strlen(text);
-    if (key == '\r' || key == '\n') {
-        save_state();
-    } else if (key == '\b' || key == 127) {
-        if (len > 0) {
-            text[len - 1] = 0;
-            mark_dirty();
-        }
-    } else if (key == KEY_DELETE) {
-        set_text("");
-        mark_dirty();
-    } else if (key >= 32 && key <= 126 && len < INPUT_MAX) {
-        text[len] = (char)key;
-        text[len + 1] = 0;
-        mark_dirty();
-    }
+    if (key == '\n' || key == '\r' || key == ' ')
+        activate();
 }
 
-static void click_at(int x, int y) {
-    if (ui_inside(x, y, UI_EXIT_X, UI_EXIT_Y, UI_EXIT_W, UI_EXIT_H)) {
-        running = 0;
-        return;
-    }
-    if (ui_inside(x, y, FIELD_X, FIELD_Y, FIELD_W, FIELD_H)) {
-        focused = 1;
-        return;
-    }
-    if (ui_inside(x, y, LIST_X, LIST_Y, LIST_W, LIST_H)) {
-        int row = (y - LIST_Y) / ROW_H;
-        int selected = list_scroll.first + row;
-        if (selected >= 0 && selected < item_count())
-            ui_scroll_select(&list_scroll, selected, item_count(), list_visible_rows());
-        focused = 0;
-        return;
-    }
-    if (ui_inside(x, y, SAVE_X, BTN_Y, BTN_W, BTN_H)) {
-        save_state();
-        return;
-    }
-    if (ui_inside(x, y, LOAD_X, BTN_Y, BTN_W, BTN_H)) {
-        load_state();
-        return;
-    }
-    if (ui_inside(x, y, CLEAR_X, BTN_Y, BTN_W, BTN_H)) {
-        set_text("");
-        mark_dirty();
-        focused = 1;
-    }
-}
-
-static void handle_mouse(void) {
-    struct mouse_state ms;
-    int wheel;
-    int left;
-    if (mouse_get(&ms) < 0)
-        return;
-
-    pointer_x = ms.x;
-    pointer_y = ms.y;
-
-    wheel = ui_mouse_wheel_delta(&ms, &list_scroll);
-    if (wheel && ui_inside(pointer_x, pointer_y, LIST_X, LIST_Y, LIST_W, LIST_H)) {
-        ui_scroll_select_delta(&list_scroll, ui_wheel_to_rows(wheel),
-                               item_count(), list_visible_rows());
-    }
-
-    left = ms.buttons & 1;
-    if (left && !prev_left)
-        click_at(pointer_x, pointer_y);
-    prev_left = left;
-}
-
-static void draw_list(void) {
-    int visible = list_visible_rows();
-    gfx_text(LIST_X, LIST_Y - 12, "FEATURES", UI_TEXT, -1);
-    for (int row = 0; row < visible; row++) {
-        int index = list_scroll.first + row;
-        int y = LIST_Y + row * ROW_H;
-        if (index >= item_count())
-            break;
-        ui_list_row(LIST_X, y, LIST_W - 6, ROW_H - 2, items[index],
-                    ui_inside(pointer_x, pointer_y, LIST_X, y, LIST_W - 6, ROW_H - 2),
-                    index == list_scroll.selected);
-    }
-    ui_scrollbar(LIST_X + LIST_W - 4, LIST_Y, LIST_H,
-                 item_count(), visible, list_scroll.first);
-}
-
-static void draw_detail(void) {
-    char line[48];
-    ui_panel(138, 42, 166, 78, "DETAIL", UI_ACCENT_ALT);
-    ui_text_clip(146, 60, items[list_scroll.selected], 23, UI_TEXT, -1);
-    line[0] = 0;
-    append_text(line, "ROW ", sizeof(line));
-    append_uint(line, (unsigned int)(list_scroll.selected + 1), sizeof(line));
-    append_text(line, " OF ", sizeof(line));
-    append_uint(line, (unsigned int)item_count(), sizeof(line));
-    ui_text_clip(146, 73, line, 23, UI_TEXT_DIM, -1);
-    ui_text_clip(146, 91, "USE WHEEL OR ARROWS", 23, UI_TEXT, -1);
-    ui_text_clip(146, 104, "CLICK ROWS TO SELECT", 23, UI_TEXT, -1);
-}
-
-static void draw_status(void) {
-    char line[64];
-    line[0] = 0;
-    append_text(line, dirty ? "DIRTY " : "CLEAN ", sizeof(line));
-    append_text(line, STATE_PATH, sizeof(line));
-    ui_text_clip(12, 178, line, 49,
-                 saved_flash > 0 ? UI_OK : (dirty ? UI_DANGER : UI_ACCENT),
-                 -1);
-}
-
-static void draw(void) {
-    gfx_clear(UI_BG);
-    ui_topbar(APP_TITLE,
-              ui_inside(pointer_x, pointer_y, UI_EXIT_X, UI_EXIT_Y,
-                        UI_EXIT_W, UI_EXIT_H));
-    ui_panel(6, 18, 308, 176, "USER GUI APP", UI_ACCENT);
-
-    draw_list();
-    draw_detail();
-
-    ui_textbox(FIELD_X, FIELD_Y, FIELD_W, FIELD_H, "TEXT",
-               text, "TYPE HERE", 22,
-               ui_inside(pointer_x, pointer_y, FIELD_X, FIELD_Y, FIELD_W, FIELD_H),
-               focused, (int)strlen(text), frame);
-    ui_button(SAVE_X, BTN_Y, BTN_W, BTN_H, "SAVE",
-              ui_inside(pointer_x, pointer_y, SAVE_X, BTN_Y, BTN_W, BTN_H), 0);
-    ui_button(LOAD_X, BTN_Y, BTN_W, BTN_H, "LOAD",
-              ui_inside(pointer_x, pointer_y, LOAD_X, BTN_Y, BTN_W, BTN_H), 0);
-    ui_button(CLEAR_X, BTN_Y, BTN_W, BTN_H, "CLR",
-              ui_inside(pointer_x, pointer_y, CLEAR_X, BTN_Y, BTN_W, BTN_H), 0);
-
-    draw_status();
-    ui_pointer(pointer_x, pointer_y);
-}
-
-int main(void) {
-    struct gfx_info info;
-    if (gfx_info(&info) < 0 || info.width == 0 || info.height == 0) {
-        puts("$name: framebuffer unavailable");
-        exit(1);
-    }
+int main(int argc, char **argv) {
+    struct guiapp_ctx ctx;
+    struct guiapp_event ev;
+    if (guiapp_parse_args(argc, argv, &ctx) < 0)
+        return 1;
     load_state();
-    while (running) {
-        int key;
-        handle_mouse();
-        while ((key = read_key_poll()) >= 0)
-            handle_key(key);
-        draw();
-        if (saved_flash > 0)
-            saved_flash--;
-        frame++;
-        sleep_ms(16);
+    for (;;) {
+        if (guiapp_read_event(&ctx, &ev) < 0 || ev.type == GUIAPP_EVT_CLOSE)
+            break;
+        if (ev.type == GUIAPP_EVT_MOUSE)
+            handle_mouse(ev.x, ev.y, ev.buttons);
+        else if (ev.type == GUIAPP_EVT_KEY)
+            handle_key(ev.key);
+        render();
+        if (guiapp_send_frame(&ctx, "$upper", W, H, pixels) < 0)
+            break;
     }
     return 0;
 }
@@ -370,7 +119,7 @@ def write_file(path, content, force):
 def render_manifest(name, summary):
     return (
         f"name={name.upper()}\n"
-        "kind=user-gui\n"
+        "kind=gui\n"
         "version=0.1\n"
         f"summary={summary}\n"
         f"exec=/fs/apps/{name}\n"
@@ -382,10 +131,8 @@ def render_manifest(name, summary):
 
 def render_readme(name, summary):
     return (
-        f"BuzzOS {name.upper()} user GUI app\n"
-        "\n"
-        f"{summary}\n"
-        "\n"
+        f"BuzzOS {name.upper()} desktop app\n\n"
+        f"{summary}\n\n"
         f"Executable: /fs/apps/{name}\n"
         f"Run: apps run {name}\n"
         f"State: /fs/apps/{name}.cfg\n"
@@ -393,17 +140,16 @@ def render_readme(name, summary):
 
 
 def print_next_steps(name):
-    print("")
-    print("Next steps:")
+    print("\nNext steps:")
     print(f"1. Add `{name}` to GUI_APP_NAMES in Makefile.")
     print("2. Optionally add default state to `src/user/bin/" + name + ".seed`.")
     print("3. Run `make app-registry`, `make app-check`, then `make verify`.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Create a BuzzOS user GUI app scaffold")
+    parser = argparse.ArgumentParser(description="Create a BuzzOS desktop app scaffold")
     parser.add_argument("name", help="lowercase app name, for example todo")
-    parser.add_argument("--summary", default="Generated user GUI app", help="manifest summary")
+    parser.add_argument("--summary", default="Generated desktop app", help="manifest summary")
     parser.add_argument("--force", action="store_true", help="overwrite existing scaffold files")
     parser.add_argument("--dry-run", action="store_true", help="show paths without writing files")
     args = parser.parse_args()
@@ -415,7 +161,6 @@ def main():
         ROOT / f"src/user/bin/{name}.app": render_manifest(name, summary),
         ROOT / f"src/user/bin/{name}.readme": render_readme(name, summary),
     }
-
     for path in files:
         print(("would create " if args.dry_run else "create ") + str(path.relative_to(ROOT)))
     if not args.dry_run:

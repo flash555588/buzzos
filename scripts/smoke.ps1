@@ -98,6 +98,24 @@ function Stop-QemuIfRunning {
     }
 }
 
+function Connect-QemuMonitor([int]$Port, [int]$Seconds = 10) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        if ($script:qemuProcess -and $script:qemuProcess.HasExited) {
+            Fail-WithLog "QEMU exited before its monitor became ready (code $($script:qemuProcess.ExitCode))."
+        }
+        $client = [Net.Sockets.TcpClient]::new()
+        try {
+            $client.Connect("127.0.0.1", $Port)
+            return $client
+        } catch [Net.Sockets.SocketException] {
+            $client.Dispose()
+            Start-Sleep -Milliseconds 100
+        }
+    } until ((Get-Date) -gt $deadline)
+    Fail-WithLog "Timed out connecting to QEMU monitor on 127.0.0.1:$Port."
+}
+
 function Start-TcpSmokeServer([int]$Port, [string]$Body, [string]$ReadyPath) {
     Remove-Item -LiteralPath $ReadyPath -ErrorAction SilentlyContinue
     $job = Start-Job -ArgumentList $Port, $Body, $ReadyPath -ScriptBlock {
@@ -181,7 +199,7 @@ Remove-Item -LiteralPath $SerialLog -ErrorAction SilentlyContinue
 
 $monitorPort = Get-FreeTcpPort
 $tcpSmokePort = Get-FreeTcpPort
-$tcpSmokeBody = "BUZZOS_TCP_SMOKE_OK"
+$tcpSmokeBody = ("x" * 3072) + "BUZZOS_TCP_SMOKE_OK"
 $tcpSmokeReady = [IO.Path]::GetFullPath((Join-Path "build" "tcp-smoke.ready"))
 $tcpSmokeJob = Start-TcpSmokeServer $tcpSmokePort $tcpSmokeBody $tcpSmokeReady
 $tcpPairPortA = Get-FreeTcpPort
@@ -209,7 +227,7 @@ $script:writer = $null
 try {
     Wait-ForLog "buzzos:/> " $TimeoutSeconds
 
-    $monitor = [Net.Sockets.TcpClient]::new("127.0.0.1", $monitorPort)
+    $monitor = Connect-QemuMonitor $monitorPort
     $script:writer = [IO.StreamWriter]::new($monitor.GetStream(), [Text.Encoding]::ASCII)
     $script:writer.NewLine = "`n"
     $script:writer.AutoFlush = $true
@@ -249,14 +267,19 @@ try {
         "netstat",
         "syncstat",
         "apps",
-        "apps info forms",
-        "apps info calc",
+        "apps info textedit",
+        "apps info calculator",
         "write /proc/meminfo nope",
         "touch /proc/nope",
         "write /fs/smoke ok",
         "cat /fs/smoke",
         "rm /fs/smoke",
         "elfbadtest",
+        "badptrtest",
+        "exec /bin/faulttest",
+        "threadreusetest",
+        "exec /bin/socketleak",
+        "exec /bin/socketleak",
         "pipetest",
         "pipeedgetest",
         "pipeblocktest",
@@ -288,8 +311,11 @@ try {
 
     Start-Sleep -Seconds 2
     $log = Read-SerialLog
-    if ($log -match "=== EXCEPTION ===") {
-        Fail-WithLog "QEMU reported a CPU exception."
+    if ($log -match "Halted\.") {
+        Fail-WithLog "QEMU halted after a CPU exception."
+    }
+    if ([regex]::Matches($log, "socketleak: opened 8").Count -lt 2) {
+        Fail-WithLog "Socket ownership cleanup did not survive two leaking child processes."
     }
 
     $expected = @(
@@ -328,15 +354,15 @@ try {
         "max_tasks\s+32",
         "max_fd_per_owner\s+32",
         "max_pipes\s+16",
-        "pipe_buf_bytes\s+512",
+        "pipe_buf_bytes\s+8192",
         "max_mounts\s+8",
         "fs_name_len\s+24",
-        "managed_limit_bytes\s+8388608",
-        "minifs_lba_start\s+768",
-        "minifs_sectors\s+512",
+        "managed_limit_bytes\s+67108864",
+        "minifs_lba_start\s+67584",
+        "minifs_sectors\s+4096",
         "minifs_status\s+ok",
         "minifs_inodes\s+128",
-        "minifs_blocks\s+382",
+        "minifs_blocks\s+3959",
         "minifs_max_file_size\s+135168",
         "NAME\s+STATUS\s+ENTRYPOINTS",
         "procfs\s+stable\s+/proc",
@@ -351,8 +377,8 @@ try {
         "/proc procfs",
         "mount\s+/fs",
         "driver\s+minifs",
-        "lba_start\s+768",
-        "sectors\s+512",
+        "lba_start\s+67584",
+        "sectors\s+4096",
         "magic\s+1397113421",
         "inodes_used\s+[0-9]+",
         "inodes_total\s+128",
@@ -360,13 +386,13 @@ try {
         "files\s+[0-9]+",
         "blocks_used\s+[0-9]+",
         "blocks_free\s+[0-9]+",
-        "blocks_total\s+382",
-        "data_lba\s+898",
+        "blocks_total\s+3959",
+        "data_lba\s+67721",
         "max_file_size\s+135168",
         "host_check\s+make fs-check",
         "host_repair\s+make fs-repair",
         "page_size\s+4096",
-        "managed_limit\s+8388608",
+        "managed_limit\s+67108864",
         "OWNER\s+FD\s+OF\s+REFS\s+FLAGS\s+KIND\s+NAME\s+DETAIL",
         "[0-9]+\s+0\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",
         "[0-9]+\s+1\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",
@@ -392,16 +418,15 @@ try {
         "futex_waiters\s+0/32",
         "SLOT\s+TID\s+ADDR\s+WOKEN",
         "TID\s+PID\s+STATE\s+OUT\s+NAME",
-        "guidemo",
-        "notes",
-        "forms",
-        "calc",
+        "textedit",
+        "paint",
+        "calculator",
         "/fs minifs",
         "inodes\s+[0-9]+/128",
-        "blocks\s+[0-9]+/382",
-        "data_lba\s+898",
-        "examples: apps info guidemo; apps run forms",
-        "gui opens App Manager",
+        "blocks\s+[0-9]+/3959",
+        "data_lba\s+67721",
+        "GUI apps are launched through the desktop",
+        "gui opens the desktop",
         "/proc is read-only runtime state",
         "cat /proc/about",
         "cat /proc/fs",
@@ -427,12 +452,12 @@ try {
         "BUZZOS_TCP_TWO_A",
         "tcptwotest: done",
         "APP\s+VERSION\s+SUMMARY",
-        "FORMS\s+1\.0\s+Multi-field form",
-        "state\s+/fs/apps/forms.cfg",
-        "readme\s+/fs/apps/forms.readme",
-        "CALC\s+1\.0\s+Textbox calculator",
-        "state\s+/fs/apps/calc.cfg",
-        "readme\s+/fs/apps/calc.readme",
+        "TextEdit\s+1\s+Plain text editor",
+        "state\s+/fs/textedit.txt",
+        "readme\s+/fs/apps/textedit.readme",
+        "Calculator\s+1\s+Expression calculator",
+        "state\s+/fs/calculator.seed",
+        "readme\s+/fs/apps/calculator.readme",
         "write: open failed",
         "touch: failed",
         "elfbad: vaddr -1",
@@ -440,6 +465,11 @@ try {
         "elfbad: memsz -1",
         "elfbad: entry -1",
         "elfbad: ok",
+        "badptr: rejected -1",
+        "Terminating faulting user task",
+        "\[exec\] exited -14",
+        "threadreuse: joined 40",
+        "socketleak: opened 8",
         "basm",
         "nano",
         "sh",

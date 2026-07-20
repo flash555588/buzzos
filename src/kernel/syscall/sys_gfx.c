@@ -4,7 +4,7 @@
 
 int sys_gfx_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_range_ok(out_arg, sizeof(struct syscall_gfx_info)))
+    if (!user_range_writable(out_arg, sizeof(struct syscall_gfx_info)))
         return -1;
     struct syscall_gfx_info *out = (struct syscall_gfx_info *)(uintptr_t)out_arg;
     struct gfx_info info;
@@ -56,7 +56,7 @@ int sys_fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t pixels_
 
 int sys_mouse_get(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_range_ok(out_arg, sizeof(struct mouse_state)))
+    if (!user_range_writable(out_arg, sizeof(struct mouse_state)))
         return -1;
     struct mouse_state *out = (struct mouse_state *)(uintptr_t)out_arg;
     mouse_get_state(out);

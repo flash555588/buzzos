@@ -1,8 +1,10 @@
 #include "task.h"
 #include "gdt.h"
+#include "irq.h"
 #include "paging.h"
 #include "pmm.h"
 #include "serial.h"
+#include "syscall.h"
 #include "sys_ipc.h"
 #include "timer.h"
 #include "vfs.h"
@@ -95,7 +97,10 @@ static void task_reap_one(int id) {
     }
 
     int owner = task_process_owner(&tasks[id]);
+    if (owner != id)
+        syscall_release_thread(id);
     if (owner == id && !process_has_live_tasks(id)) {
+        syscall_cleanup_process(id);
         uint32_t cr3 = tasks[id].cr3;
         if (cr3 && cr3 != paging_kernel_cr3() && !process_cr3_referenced(cr3, id)) {
             paging_destroy_user_space(cr3);
@@ -258,7 +263,7 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
 /* ------------------------------------------------------------------ */
 
 static void schedule(void) {
-    __asm__ volatile("cli");
+    uint32_t irq_flags = irq_save();
 
     uint32_t now = timer_ticks();
     for (int i = 0; i < num_tasks; i++) {
@@ -284,14 +289,14 @@ static void schedule(void) {
 
     if (next < 0) {
         if (current_task && current_task->state == TASK_RUNNING) {
-            __asm__ volatile("sti");
+            irq_restore(irq_flags);
             return;
         }
         next = 0;
     }
 
     if (next == current_id && current_task->state == TASK_RUNNING) {
-        __asm__ volatile("sti");
+        irq_restore(irq_flags);
         return;
     }
 
@@ -309,7 +314,7 @@ static void schedule(void) {
 
     switch_context(&prev->esp, (uint32_t *)(uintptr_t)task->esp);
 
-    __asm__ volatile("sti");
+    irq_restore(irq_flags);
 }
 
 /* ------------------------------------------------------------------ */
@@ -475,7 +480,7 @@ int task_kill(int id) {
     if (owner < 0 || owner >= MAX_TASKS)
         owner = id;
 
-    __asm__ volatile("cli");
+    uint32_t irq_flags = irq_save();
     for (int i = 1; i < num_tasks; i++) {
         if (task_process_owner(&tasks[i]) == owner || i == id) {
             futex_cancel_task_locked(i);
@@ -491,7 +496,7 @@ int task_kill(int id) {
 
     if (current_task && current_task->state == TASK_DEAD)
         schedule();
-    __asm__ volatile("sti");
+    irq_restore(irq_flags);
     return 0;
 }
 
@@ -642,11 +647,34 @@ void task_exit_code(int code) {
     for (;;) __asm__ volatile("hlt");
 }
 
-void task_sleep_until(uint32_t wake_tick) {
+void task_exit_process_code(int code) {
     __asm__ volatile("cli");
+    int owner = task_process_owner(current_task);
+    if (owner <= 0 || owner >= MAX_TASKS)
+        owner = current_task ? current_task->id : 0;
+
+    for (int i = 1; i < num_tasks; i++) {
+        if (task_process_owner(&tasks[i]) != owner)
+            continue;
+        futex_cancel_task_locked(i);
+        tasks[i].exit_code = code;
+        tasks[i].wake_tick = 0;
+        tasks[i].state = TASK_DEAD;
+    }
+    if (owner > 0 && owner < MAX_TASKS && procs[owner].used) {
+        procs[owner].state = PROC_ZOMBIE;
+        procs[owner].exit_code = code;
+    }
+    schedule();
+    for (;;) __asm__ volatile("hlt");
+}
+
+void task_sleep_until(uint32_t wake_tick) {
+    uint32_t irq_flags = irq_save();
     current_task->wake_tick = wake_tick;
     current_task->state = TASK_SLEEPING;
     schedule();
+    irq_restore(irq_flags);
 }
 
 void task_prepare_block_current(uint32_t wake_tick) {
@@ -659,17 +687,19 @@ void task_prepare_block_current(uint32_t wake_tick) {
 void task_block_current(void) {
     if (!current_task || current_task->id == 0)
         return;
-    __asm__ volatile("cli");
+    uint32_t irq_flags = irq_save();
     task_prepare_block_current(0);
     schedule();
+    irq_restore(irq_flags);
 }
 
 void task_block_current_until(uint32_t wake_tick) {
     if (!current_task || current_task->id == 0)
         return;
-    __asm__ volatile("cli");
+    uint32_t irq_flags = irq_save();
     task_prepare_block_current(wake_tick ? wake_tick : 1);
     schedule();
+    irq_restore(irq_flags);
 }
 
 int task_wake(int id) {

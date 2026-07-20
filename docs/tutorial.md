@@ -232,7 +232,7 @@ build/buzzos.img
 2. `clang --target=i386-none-elf` 编译内核 C 文件。
 3. `ld.lld -m elf_i386 -T linker.ld` 链接 `build/obj/kernel/kernel.elf`。
 4. 编译并链接用户态 ELF 程序。
-5. `tools/mkinitrd.py` 生成 `src/kernel/initrd.h`。
+5. `tools/mkinitrd.py` 生成 `build/generated/initrd.h`。
 6. `tools/mkbootimg.py` 生成 FAT16 boot 分区、写入 `kernel.elf`/`limine.conf`/`limine-bios.sys`，然后调用 `limine.exe bios-install` 安装 BIOS 启动阶段。
 
 用户程序也在这个流程里构建：
@@ -240,7 +240,7 @@ build/buzzos.img
 1. 编译 `src/user/libc/crt0.c`、`src/user/libc/libc.c`。
 2. 编译 `src/user/bin/hello.c`、`shell.c`、`nano.c`、`basm.c`、`gui.c`、`echo.c`、`cat.c`，以及 `textedit.c`、`paint.c`、`calculator.c`。
 3. 链接成 ELF32 用户程序。
-4. `tools/mkinitrd.py` 把 `/hello`、`/bin/sh`、`/bin/nano`、`/bin/basm`、`/bin/gui`、`/bin/echo`、`/bin/cat` 和 GUI app ELF 写进 `src/kernel/initrd.h`。
+4. `tools/mkinitrd.py` 把 `/hello`、`/bin/sh`、`/bin/nano`、`/bin/basm`、`/bin/gui`、`/bin/echo`、`/bin/cat` 和 GUI app ELF 写进 `build/generated/initrd.h`。
 5. 内核构建时把 initrd 作为静态数组编进 kernel。
 
 ### 3.2 常用 make 目标
@@ -1355,7 +1355,7 @@ int mouse_get(struct mouse_state *out);
 
 1. 用户态维护一个 `fb[MAX_SW * MAX_SH]`，当前桌面最大按 `1280x800` 设计。
 2. 所有控件、文字、画布、鼠标光标都先画到这个数组。
-3. 每帧只调用一次：
+3. 有输入、终端输出、app 新帧或状态心跳时调用一次：
 
 ```c
 fb_blit(0, 0, sw, sh, fb);
@@ -1365,7 +1365,7 @@ fb_blit(0, 0, sw, sh, fb);
 
 - 内核接口很小。
 - 用户态绘制逻辑自由。
-- 每帧 syscall 数量低。
+- 空闲桌面不会持续全屏重绘，活跃时每次合成也只有一次 blit syscall。
 - framebuffer 分辨率变动时，用户态可以通过 `gfx_info()` 获取真实宽高。
 
 ### 18.5 鼠标输入路径
@@ -1391,7 +1391,7 @@ struct mouse_state {
 };
 ```
 
-`seq` 是移动/按钮事件序号，`wheel` 是累计滚轮位置，`wheel_seq` 是滚轮事件序号。GUI 每帧调用 `mouse_get()`，如果 `seq` 变了就同步光标位置，如果 `wheel_seq` 变了就用两次 `wheel` 的差值按指针所在区域滚动列表或详情。这样用户态不需要知道 PS/2 packet 细节，也不会因为后续普通移动包覆盖最后一次滚轮 delta 而丢事件。
+`seq` 是移动/按钮事件序号，`wheel` 是累计滚轮位置，`wheel_seq` 是滚轮事件序号。GUI 轮询 `mouse_get()`，仅在状态变化时标记桌面需要重绘；如果 `wheel_seq` 变了，就用两次 `wheel` 的差值按指针所在区域滚动列表或详情。这样用户态不需要知道 PS/2 packet 细节，也不会因为后续普通移动包覆盖最后一次滚轮 delta 而丢事件。
 
 键盘仍然走 `/dev/console`：
 

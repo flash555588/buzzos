@@ -77,8 +77,6 @@ void paging_init(void) {
             }
         }
     }
-    page_table_low[0][0x1FF000u / PAGE_SIZE] |= PAGE_USER;
-
     for (uint32_t t = 0; t < KERNEL_LOW_TABLES; t++)
         page_directory[t] = ((uint32_t)(uintptr_t)page_table_low[t]) |
                             PAGE_PRESENT | PAGE_RW;
@@ -139,7 +137,7 @@ uint32_t paging_create_user_space(void) {
     }
 
     pd[0] = ((uint32_t)(uintptr_t)page_table_low[0]) |
-            PAGE_PRESENT | PAGE_RW | PAGE_USER;
+            PAGE_PRESENT | PAGE_RW;
     for (uint32_t t = 1; t < KERNEL_LOW_TABLES; t++) {
         if (t >= first && t <= last)
             continue;
@@ -180,6 +178,65 @@ int paging_map_user_range(uint32_t va, uint32_t size) {
         if (!phys)
             return -1;
         user_pt[idx] = (uint32_t)phys | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    }
+    flush_tlb();
+    return 0;
+}
+
+int paging_user_range_accessible(uint32_t va, uint32_t size, int write) {
+    if (size == 0)
+        return 1;
+    uint32_t last;
+    if (va < USER_SPACE_START || add_overflows_u32(va, size - 1u, &last) ||
+        last >= USER_SPACE_END)
+        return 0;
+
+    uint32_t *pd = (uint32_t *)(uintptr_t)paging_current_cr3();
+    uint32_t cur = va & ~(PAGE_SIZE - 1u);
+    uint32_t end_page = last & ~(PAGE_SIZE - 1u);
+    for (;;) {
+        uint32_t pde = pd[pde_index(cur)];
+        if (!(pde & PAGE_PRESENT) || !(pde & PAGE_USER) ||
+            (write && !(pde & PAGE_RW)))
+            return 0;
+        uint32_t *pt = (uint32_t *)(uintptr_t)(pde & 0xFFFFF000u);
+        uint32_t pte = pt[pte_index(cur)];
+        if (!(pte & PAGE_PRESENT) || !(pte & PAGE_USER) ||
+            (write && !(pte & PAGE_RW)))
+            return 0;
+        if (cur == end_page)
+            break;
+        cur += PAGE_SIZE;
+    }
+    return 1;
+}
+
+int paging_set_user_range_writable(uint32_t va, uint32_t size, int writable) {
+    if (size == 0)
+        return 0;
+    uint32_t last;
+    if (va < USER_SPACE_START || add_overflows_u32(va, size - 1u, &last) ||
+        last >= USER_SPACE_END)
+        return -1;
+
+    uint32_t *pd = (uint32_t *)(uintptr_t)paging_current_cr3();
+    uint32_t cur = va & ~(PAGE_SIZE - 1u);
+    uint32_t end_page = last & ~(PAGE_SIZE - 1u);
+    for (;;) {
+        uint32_t pde = pd[pde_index(cur)];
+        if (!(pde & PAGE_PRESENT) || !(pde & PAGE_USER))
+            return -1;
+        uint32_t *pt = (uint32_t *)(uintptr_t)(pde & 0xFFFFF000u);
+        uint32_t idx = pte_index(cur);
+        if (!(pt[idx] & PAGE_PRESENT) || !(pt[idx] & PAGE_USER))
+            return -1;
+        if (writable)
+            pt[idx] |= PAGE_RW;
+        else
+            pt[idx] &= ~PAGE_RW;
+        if (cur == end_page)
+            break;
+        cur += PAGE_SIZE;
     }
     flush_tlb();
     return 0;

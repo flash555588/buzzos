@@ -1,0 +1,23 @@
+name: source-check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  consistency:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile host tools
+        run: python -m compileall -q tools
+      - name: Check source consistency
+        run: python tools/check_project.py --source-only
+      - name: Exercise app scaffolder
+        run: python tools/new_app.py ci_sample --dry-run

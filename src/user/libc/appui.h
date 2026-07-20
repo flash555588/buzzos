@@ -24,8 +24,8 @@ static int appui_gray(int n) {
     return 25 + n;
 }
 
-static int appui_min(int a, int b) { return a < b ? a : b; }
-static int appui_max(int a, int b) { return a > b ? a : b; }
+static __attribute__((unused)) int appui_min(int a, int b) { return a < b ? a : b; }
+static __attribute__((unused)) int appui_max(int a, int b) { return a > b ? a : b; }
 
 static int appui_inside(int x, int y, struct appui_rect r) {
     return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
@@ -100,7 +100,7 @@ static void appui_button(uint8_t *fb, int w, int h, struct appui_rect r,
                (struct appui_rect){r.x + 4, r.y + 2, r.w - 8, r.h - 4});
 }
 
-static void appui_copy_text(char *dst, const char *src, int cap) {
+static __attribute__((unused)) void appui_copy_text(char *dst, const char *src, int cap) {
     int i = 0;
     if (cap <= 0)
         return;
@@ -122,7 +122,7 @@ static void appui_append_text(char *dst, const char *src, int cap) {
         dst[n] = 0;
 }
 
-static void appui_append_int(char *dst, int value, int cap) {
+static __attribute__((unused)) void appui_append_int(char *dst, int value, int cap) {
     char tmp[16];
     int n = 0;
     unsigned int v;

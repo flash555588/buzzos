@@ -43,8 +43,8 @@
 - `src/kernel/arch/i386/paging.h`
 
 工作内容：
-- 明确当前内核 direct-map 范围，目前是低 8 MiB。
-- 短期方案：PMM 只把低 8 MiB 中可安全使用的页标记为 free。
+- 明确当前内核 direct-map 范围，目前是低 64 MiB。
+- PMM 只把低 64 MiB 中可安全使用的页标记为 free。
 - 或者长期方案：为内核建立更大的 direct map，再允许 PMM 使用更多物理页。
 - 给 PMM 增加 debug 统计，输出可分配上限和已保留区间。
 
@@ -139,12 +139,12 @@
 
 ## Done/P1: 清理 initrd 生成物漂移
 
-目标：减少 `src/kernel/initrd.h` 因工具链版本变化产生的大型无意义 diff。
+目标：避免生成的 initrd 头文件在源码树中产生大型无意义 diff。
 
 涉及文件：
 - `Makefile`
 - `tools/mkinitrd.py`
-- `src/kernel/initrd.h`
+- `build/generated/initrd.h`
 
 已完成：
 - 用户 ELF 链接后统一执行 `llvm-objcopy --strip-sections`。
@@ -157,7 +157,7 @@
 验收标准：
 - `make` 成功。
 - 用户 ELF 中不再嵌入 LLVM `.comment` 字符串和 section header 表。
-- `src/kernel/initrd.h` 使用紧凑行宽生成。
+- `build/generated/initrd.h` 使用紧凑行宽生成且不再被版本控制跟踪。
 - QEMU 启动和 shell 命令测试通过。
 
 ## Done/P2: TCP per-socket PCB
@@ -296,7 +296,7 @@ TCP 输入 demux 和 per-PCB 接收缓冲。后续重点是乱序/重复包处�
 
 验收标准：
 - 三个种子用户 GUI app 都通过 `guiapp` 协议运行。
-- 默认 app manifest 都能生成到 `src/kernel/app_registry.h`。
+- 默认 app manifest 都能生成到 `build/generated/app_registry.h`。
 - `make check-project` 通过。
 - `make gui-smoke` 仍能生成非空截图。
 

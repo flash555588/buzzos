@@ -7,7 +7,7 @@
  *   - Identity-map 0x00000000 -> 0x00000000 (low managed memory)
  *   - Map 0xC0000000 -> 0x00000000 (low managed memory alias)
  * Then enable paging (CR0.PG) and jump-call to flush the TLB.
- * After this call, virtual == physical for the bottom 8 MiB. */
+ * After this call, virtual == physical for the managed low-memory window. */
 void paging_init(void);
 void paging_set_framebuffer(uintptr_t phys_addr, uint32_t size);
 uint32_t paging_current_cr3(void);
@@ -16,6 +16,8 @@ void paging_switch(uint32_t cr3);
 uint32_t paging_create_user_space(void);
 void paging_destroy_user_space(uint32_t cr3);
 int paging_map_user_range(uint32_t va, uint32_t size);
+int paging_user_range_accessible(uint32_t va, uint32_t size, int write);
+int paging_set_user_range_writable(uint32_t va, uint32_t size, int writable);
 
 /* Page directory and table entry flags */
 enum {

@@ -81,7 +81,7 @@ def check_python(command, no_version=False):
 
 def check_workspace():
     checks = []
-    for rel in ["Makefile", "src/boot/boot.asm", "tools/mkimage.ps1", "scripts/run-local.ps1"]:
+    for rel in ["Makefile", "linker.ld", "tools/mkbootimg.py", "scripts/run-local.ps1"]:
         path = ROOT / rel
         checks.append({
             "name": rel,

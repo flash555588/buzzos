@@ -1,7 +1,7 @@
 BUILD := build
+GENERATED_DIR := $(BUILD)/generated
 OBJDIR := $(BUILD)/obj/kernel
 IMAGE := $(BUILD)/buzzos.img
-KERNEL_SECTORS := 767
 BOOT_PARTITION_START := 2048
 BOOT_PARTITION_SECTORS := 65536
 FS_START_SECTOR := 67584
@@ -79,7 +79,8 @@ KERNEL_INCLUDES := \
 	-Isrc/kernel/fs/minifs \
 	-Isrc/kernel/block \
 	-Isrc/kernel/net \
-	-Isrc/kernel/drv
+	-Isrc/kernel/drv \
+	-I$(GENERATED_DIR)
 
 CFLAGS  := --target=i386-none-elf -std=c11 -ffreestanding -fno-builtin \
 	-fno-stack-protector -fno-pic -mno-sse -mno-mmx -O2 -Wall -Wextra \
@@ -100,15 +101,17 @@ GUI_ELF := $(BUILD)/user/gui.elf
 FUTEXHOLD_ELF := $(BUILD)/user/futexhold.elf
 CAT_ELF := $(BUILD)/user/cat.elf
 ECHO_ELF := $(BUILD)/user/echo.elf
+FAULTTEST_ELF := $(BUILD)/user/faulttest.elf
+SOCKETLEAK_ELF := $(BUILD)/user/socketleak.elf
 GUI_APP_NAMES := textedit paint calculator
 GUI_APP_ELFS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).elf)
 GUI_APP_SRCS := $(foreach app,$(GUI_APP_NAMES),src/user/bin/$(app).c)
-USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(GUI_APP_ELFS)
-USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c $(GUI_APP_SRCS)
+USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(GUI_APP_ELFS)
+USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c $(GUI_APP_SRCS)
 USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c
-USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/appui.h src/user/libc/gui_style.h src/kernel/drv/font_builtin.h
-INITRD_H := src/kernel/initrd.h
-APP_REGISTRY_H := src/kernel/app_registry.h
+USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/appui.h src/kernel/drv/font_builtin.h
+INITRD_H := $(GENERATED_DIR)/initrd.h
+APP_REGISTRY_H := $(GENERATED_DIR)/app_registry.h
 FONT_H := src/kernel/drv/font_builtin.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
@@ -150,14 +153,8 @@ $(OBJDIR)/%.o-asm: src/kernel/%.asm | $(OBJDIR)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force (Split-Path '$@' -Parent) | Out-Null"
 	$(NASM) -f elf32 $< -o $@
 
-$(OBJDIR)/boot.bin: src/boot/boot.asm | $(OBJDIR)
-	$(NASM) -f bin $< -o $@
-
 $(OBJDIR)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(OBJDIR)
 	$(LD) $(LDFLAGS) -o $@ $(KERNEL_OBJS)
-
-$(OBJDIR)/kernel.bin: $(OBJDIR)/kernel.elf
-	$(OBJCOPY) -O binary $< $@
 
 $(IMAGE): $(OBJDIR)/kernel.elf tools/mkbootimg.py
 	$(PYTHON) tools/mkbootimg.py \
@@ -235,12 +232,15 @@ $(BUILD)/user/%.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/gui
 	$(OBJCOPY) --strip-sections $@
 
 $(INITRD_H): $(USER_ELFS) tools/mkinitrd.py
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
 	$(PYTHON) tools/mkinitrd.py /hello $(USER_ELF) /bin/sh $(SHELL_ELF) \
 		/bin/nano $(NANO_ELF) /bin/basm $(BASM_ELF) /bin/gui $(GUI_ELF) \
 		/bin/futexhold $(FUTEXHOLD_ELF) /bin/cat $(CAT_ELF) /bin/echo $(ECHO_ELF) \
+		/bin/faulttest $(FAULTTEST_ELF) /bin/socketleak $(SOCKETLEAK_ELF) \
 		$(foreach app,$(GUI_APP_NAMES),/bin/$(app) $(BUILD)/user/$(app).elf) > $@
 
 $(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META)
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
 	$(PYTHON) tools/gen_app_registry.py --apps "$(GUI_APP_NAMES)" --out $@
 
 .PHONY: user
@@ -317,4 +317,4 @@ new-app:
 
 
 clean:
-	powershell -NoProfile -Command "Remove-Item -Recurse -Force '$(BUILD)' -ErrorAction SilentlyContinue"
+	powershell -NoProfile -Command "if (Test-Path -LiteralPath '$(BUILD)') { Remove-Item -LiteralPath '$(BUILD)' -Recurse -Force }"

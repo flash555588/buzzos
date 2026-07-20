@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "sys_ipc.h"
+#include "irq.h"
 #include "syscall_internal.h"
 #include "task.h"
 #include "timer.h"
@@ -102,12 +103,14 @@ int futex_status_text(char *buf, int cap) {
 
 /* BuzzOS is single-core today; disabling IRQs makes waiter table updates
  * atomic against scheduler preemption without spinning in the wait path. */
+static uint32_t futex_irq_flags;
+
 static void futex_enter(void) {
-    __asm__ volatile("cli" ::: "memory");
+    futex_irq_flags = irq_save();
 }
 
 static void futex_leave(void) {
-    __asm__ volatile("sti" ::: "memory");
+    irq_restore(futex_irq_flags);
 }
 
 static uint32_t futex_ms_to_ticks(uint32_t ms) {
@@ -121,7 +124,7 @@ static int futex_deadline_reached(uint32_t deadline) {
 
 int sys_pipe(uint32_t fds_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_range_ok(fds_arg, sizeof(int) * 2))
+    if (!user_range_writable(fds_arg, sizeof(int) * 2))
         return -1;
     return vfs_pipe((int *)(uintptr_t)fds_arg);
 }

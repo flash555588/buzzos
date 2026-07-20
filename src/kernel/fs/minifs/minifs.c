@@ -1,6 +1,7 @@
 #include "minifs.h"
 #include "block/ata.h"
 #include "block/cache.h"
+#include "irq.h"
 #include "serial.h"
 
 #define MINIFS_MAGIC       0x5346424Du /* MBFS */
@@ -56,16 +57,6 @@ static uint8_t block_used[MINIFS_BLOCKS];
 static int mounted;
 static volatile int minifs_locked;
 static uint32_t minifs_irq_flags;
-
-static uint32_t irq_save(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void irq_restore(uint32_t flags) {
-    __asm__ volatile("push %0; popf" :: "r"(flags) : "memory", "cc");
-}
 
 static void minifs_lock(void) {
     uint32_t flags = irq_save();

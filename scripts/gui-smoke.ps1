@@ -138,6 +138,21 @@ function Press-Many([string]$Key, [int]$Count) {
     }
 }
 
+function Move-MouseRelative([int]$Dx, [int]$Dy) {
+    while ($Dx -ne 0 -or $Dy -ne 0) {
+        $sx = [Math]::Max(-32, [Math]::Min(32, $Dx))
+        $sy = [Math]::Max(-32, [Math]::Min(32, $Dy))
+        Send-Hmp "mouse_move $sx $sy"
+        $Dx -= $sx
+        $Dy -= $sy
+    }
+}
+
+function Click-Left {
+    Send-Hmp "mouse_button 1"
+    Send-Hmp "mouse_button 0"
+}
+
 function Stop-QemuIfRunning {
     if (!$script:qemuProcess) {
         return
@@ -256,73 +271,52 @@ try {
     $script:writer.AutoFlush = $true
 
     Type-Command "gui"
-    Send-Key "4"
     Start-Sleep -Milliseconds 900
     $appsPpm = (Join-Path $OutDir "app-center.ppm")
     $screens += Capture-Screen "app-center" $appsPpm (Join-Path $OutDir "app-center.png")
-    Send-Key "esc"
-    Start-Sleep -Milliseconds 250
+
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 900
+    $texteditPpm = (Join-Path $OutDir "textedit.ppm")
+    $screens += Capture-Screen "textedit" $texteditPpm (Join-Path $OutDir "textedit.png")
+    # The pointer starts at 640,400. TextEdit opens at 80,74 with its
+    # maximize control centered near 629,88.
+    Move-MouseRelative -11 -312
+    Click-Left
+    Start-Sleep -Milliseconds 900
+    $texteditMaxPpm = (Join-Path $OutDir "textedit-maximized.ppm")
+    $screens += Capture-Screen "textedit-maximized" $texteditMaxPpm (Join-Path $OutDir "textedit-maximized.png")
     Send-Key "esc"
     Wait-ForLog "\[gui\] exited" 10
 
-    Type-Command "forms"
-    Press-Many "backspace" 24
-    Type-Text "abc"
-    Send-Key "home"
-    Type-Text "x"
-    Send-Key "end"
-    Type-Text "z"
-    Send-Key "left"
-    Send-Key "left"
-    Send-Key "delete"
+    Type-Command "gui"
+    Send-Key "down"
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 900
+    $paintPpm = (Join-Path $OutDir "paint.ppm")
+    $screens += Capture-Screen "paint" $paintPpm (Join-Path $OutDir "paint.png")
+    Send-Key "esc"
+    Wait-ForLog "\[gui\] exited" 10
+
+    Type-Command "gui"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 900
+    $calculatorPpm = (Join-Path $OutDir "calculator.ppm")
+    $screens += Capture-Screen "calculator" $calculatorPpm (Join-Path $OutDir "calculator.png")
+    Send-Key "esc"
+    Wait-ForLog "\[gui\] exited" 10
+
+    Type-Command "gui"
     Send-Key "tab"
-    Press-Many "backspace" 24
-    Type-Text "gui smoke"
-    Start-Sleep -Milliseconds 800
-    $formsPpm = (Join-Path $OutDir "forms-edit.ppm")
-    $screens += Capture-Screen "forms-edit" $formsPpm (Join-Path $OutDir "forms-edit.png")
-    Send-Key "esc"
-    Wait-ForLog "\[forms\] exited" 10
-
-    Type-Command "calc"
-    Press-Many "backspace" 24
-    Type-Text "12"
-    Send-Key "tab"
-    Press-Many "backspace" 24
-    Type-Text "7"
+    Type-Text "about"
     Send-Key "ret"
-    Start-Sleep -Milliseconds 800
-    $calcPpm = (Join-Path $OutDir "calc-edit.ppm")
-    $screens += Capture-Screen "calc-edit" $calcPpm (Join-Path $OutDir "calc-edit.png")
+    Start-Sleep -Milliseconds 900
+    $terminalPpm = (Join-Path $OutDir "terminal-about.ppm")
+    $screens += Capture-Screen "terminal-about" $terminalPpm (Join-Path $OutDir "terminal-about.png")
     Send-Key "esc"
-    Wait-ForLog "\[calc\] exited" 10
-
-    Type-Command "notes"
-    Press-Many "backspace" 120
-    Type-Text "gui smoke notes"
-    Send-Key "ret"
-    Type-Text "saved"
-    Start-Sleep -Milliseconds 800
-    $notesPpm = (Join-Path $OutDir "notes-edit.ppm")
-    $screens += Capture-Screen "notes-edit" $notesPpm (Join-Path $OutDir "notes-edit.png")
-    Send-Key "esc"
-    Wait-ForLog "\[notes\] exited" 10
-
-    Type-Command "guidemo"
-    Send-Key "i"
-    Press-Many "backspace" 32
-    Type-Text "box"
-    Send-Key "home"
-    Type-Text "x"
-    Send-Key "end"
-    Type-Text "z"
-    Send-Key "ret"
-    Send-Key "s"
-    Start-Sleep -Milliseconds 800
-    $demoPpm = (Join-Path $OutDir "guidemo-edit.ppm")
-    $screens += Capture-Screen "guidemo-edit" $demoPpm (Join-Path $OutDir "guidemo-edit.png")
-    Send-Key "esc"
-    Wait-ForLog "\[guidemo\] exited" 10
+    Wait-ForLog "\[gui\] exited" 10
 
     $log = Read-SerialLog
     if ($log -match "=== EXCEPTION ===") {

@@ -1,4 +1,5 @@
 #include "vfs_internal.h"
+#include "irq.h"
 
 struct vfs_mount {
     int used;
@@ -13,16 +14,6 @@ int fd_used[MAX_TASKS][MAX_FD];
 static struct vfs_mount mounts[MAX_MOUNTS];
 static volatile int vfs_locked;
 static uint32_t vfs_irq_flags;
-
-static uint32_t irq_save(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void irq_restore(uint32_t flags) {
-    __asm__ volatile("push %0; popf" :: "r"(flags) : "memory", "cc");
-}
 
 void vfs_lock(void) {
     uint32_t flags = irq_save();

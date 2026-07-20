@@ -3,6 +3,7 @@
 #include "io.h"
 #include "serial.h"
 #include "syscall.h"
+#include "task.h"
 
 enum {
     IDT_ENTRY_COUNT = 256,
@@ -62,6 +63,16 @@ void exception_handler(uint32_t vector, uint32_t error, const uint32_t *frame) {
         serial_puts(" EAX=");
         serial_puthex(frame[7]);
     }
+    if (vector == 14) {
+        uint32_t fault_addr;
+        GNU_ASM("mov %%cr2, %0" : "=r"(fault_addr));
+        serial_puts("\nCR2=");
+        serial_puthex(fault_addr);
+    }
+    if (frame && (frame[11] & 3u) == 3u && current_task && current_task->id > 0) {
+        serial_puts("\nTerminating faulting user task.\n");
+        task_exit_process_code(vector ? -(int)vector : -1);
+    }
     serial_puts("\nHalted.\n");
     for (;;) { GNU_ASM("hlt"); }
 }
@@ -103,8 +114,8 @@ static const struct idt_gate_init early_gates[] = {
     {32, irq_stub_32, IDT_GATE_INT},
     {33, irq_stub_33, IDT_GATE_INT},
     {44, irq_stub_44, IDT_GATE_INT},
-    {SYSCALL_VECTOR_LEGACY, syscall_stub, IDT_GATE_INT_USER},
-    {SYSCALL_VECTOR, syscall_stub, IDT_GATE_INT_USER},
+    {SYSCALL_VECTOR_LEGACY, syscall_stub, IDT_GATE_TRAP_USER},
+    {SYSCALL_VECTOR, syscall_stub, IDT_GATE_TRAP_USER},
 };
 
 static void idt_fill_default_gates(void) {

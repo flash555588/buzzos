@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "exec.h"
+#include "irq.h"
 #include "paging.h"
 #include "reboot.h"
 #include "serial.h"
@@ -74,7 +75,10 @@ int sys_exit(uint32_t code, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
         serial_puts("\n");
     }
 
-    task_exit_code((int)code);
+    if (task_get_tid() == task_get_pid())
+        task_exit_process_code((int)code);
+    else
+        task_exit_code((int)code);
     for (;;) { __asm__ volatile("hlt"); }
     return 0;
 }
@@ -131,7 +135,7 @@ int sys_spawn_proc_args(uint32_t path_arg, uint32_t argv_arg, uint32_t argc_arg,
 
 int sys_ps(uint32_t buf, uint32_t size, uint32_t show_dead, uint32_t d, uint32_t e) {
     (void)d; (void)e;
-    if (!user_range_ok(buf, size))
+    if (!user_range_writable(buf, size))
         return -1;
     return task_dump_text((char *)(uintptr_t)buf, (int)size, (int)show_dead);
 }
@@ -144,15 +148,39 @@ int sys_reboot(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
 struct thread_info {
     uint32_t func_addr;
     uint32_t stack_top;
+    int owner;
+    int stack_slot;
+    int used;
 };
 
 static struct thread_info thread_infos[MAX_TASKS];
-static int process_thread_count[MAX_TASKS];
+static uint32_t process_thread_slots[MAX_TASKS];
 
 void syscall_reset_process(int task_id) {
     if (task_id < 0 || task_id >= MAX_TASKS)
         return;
-    process_thread_count[task_id] = 0;
+    process_thread_slots[task_id] = 0;
+}
+
+void syscall_cleanup_process(int task_id) {
+    if (task_id < 0 || task_id >= MAX_TASKS)
+        return;
+    sys_net_cleanup_owner(task_id);
+    process_thread_slots[task_id] = 0;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (thread_infos[i].used && thread_infos[i].owner == task_id)
+            thread_infos[i].used = 0;
+    }
+}
+
+void syscall_release_thread(int task_id) {
+    if (task_id < 0 || task_id >= MAX_TASKS || !thread_infos[task_id].used)
+        return;
+    int owner = thread_infos[task_id].owner;
+    int slot = thread_infos[task_id].stack_slot;
+    if (owner >= 0 && owner < MAX_TASKS && slot >= 0 && slot < (int)USER_THREAD_STACK_SLOTS)
+        process_thread_slots[owner] &= ~(1u << (uint32_t)slot);
+    thread_infos[task_id].used = 0;
 }
 
 static void thread_trampoline(void) {
@@ -171,26 +199,42 @@ int sys_spawn(uint32_t func_addr, uint32_t b, uint32_t c, uint32_t d, uint32_t e
     if (owner < 0 || owner >= MAX_TASKS)
         return -1;
 
-    int slot = ++process_thread_count[owner];
-    uint32_t user_stack = USER_DEFAULT_STACK_TOP - (uint32_t)(slot * 0x4000);
-    if (user_stack < USER_SPACE_START + 4)
+    int slot = -1;
+    for (int i = 0; i < (int)USER_THREAD_STACK_SLOTS; i++) {
+        if (!(process_thread_slots[owner] & (1u << (uint32_t)i))) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0)
         return -1;
-    if (paging_map_user_range(user_stack - 0x4000u, 0x4000u) < 0)
+    process_thread_slots[owner] |= 1u << (uint32_t)slot;
+    uint32_t user_stack = USER_DEFAULT_STACK_TOP - USER_MAIN_STACK_SIZE -
+                          (uint32_t)slot * USER_THREAD_STACK_SIZE;
+    if (user_stack < USER_LOAD_END + USER_THREAD_STACK_SIZE ||
+        paging_map_user_range(user_stack - USER_THREAD_STACK_SIZE,
+                              USER_THREAD_STACK_SIZE) < 0) {
+        process_thread_slots[owner] &= ~(1u << (uint32_t)slot);
         return -1;
+    }
     user_stack -= 4;
     *(uint32_t *)(uintptr_t)user_stack = return_addr;
 
-    __asm__ volatile("cli");
+    uint32_t irq_flags = irq_save();
     int id = task_create(thread_trampoline, "user_thread");
     if (id < 0) {
-        __asm__ volatile("sti");
+        process_thread_slots[owner] &= ~(1u << (uint32_t)slot);
+        irq_restore(irq_flags);
         return -1;
     }
 
     thread_infos[id].func_addr = func_addr;
     thread_infos[id].stack_top = user_stack;
+    thread_infos[id].owner = owner;
+    thread_infos[id].stack_slot = slot;
+    thread_infos[id].used = 1;
     task_set_fd_owner(id, owner);
-    __asm__ volatile("sti");
+    irq_restore(irq_flags);
     return id;
 }
 
@@ -245,14 +289,14 @@ int sys_chdir(uint32_t path, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
 
 int sys_getcwd(uint32_t buf, uint32_t size, uint32_t c, uint32_t d, uint32_t e) {
     (void)c; (void)d; (void)e;
-    if (!user_range_ok(buf, size))
+    if (!user_range_writable(buf, size))
         return -1;
     return vfs_getcwd((char *)(uintptr_t)buf, (size_t)size);
 }
 
 int sys_waitpid(uint32_t pid, uint32_t status, uint32_t options, uint32_t d, uint32_t e) {
     (void)d; (void)e;
-    if (status && !user_range_ok(status, sizeof(int)))
+    if (status && !user_range_writable(status, sizeof(int)))
         return -1;
     return task_wait_pid((int)pid, (int *)(uintptr_t)status, (int)options);
 }

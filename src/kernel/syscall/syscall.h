@@ -37,4 +37,6 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);
 void syscall_reset_process(int task_id);
+void syscall_cleanup_process(int task_id);
+void syscall_release_thread(int task_id);
 #endif

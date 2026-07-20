@@ -221,6 +221,8 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     ramfs_register("/bin/futexhold", initrd_bin_futexhold_data, INITRD_BIN_FUTEXHOLD_SIZE);
     ramfs_register("/bin/cat", initrd_bin_cat_data, INITRD_BIN_CAT_SIZE);
     ramfs_register("/bin/echo", initrd_bin_echo_data, INITRD_BIN_ECHO_SIZE);
+    ramfs_register("/bin/faulttest", initrd_bin_faulttest_data, INITRD_BIN_FAULTTEST_SIZE);
+    ramfs_register("/bin/socketleak", initrd_bin_socketleak_data, INITRD_BIN_SOCKETLEAK_SIZE);
     serial_puts("[boot] initrd files registered\n");
     seed_user_apps();
     serial_puts("[boot] user apps seeded\n");

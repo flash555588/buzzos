@@ -8,6 +8,7 @@
 typedef int (*syscall_handler_fn)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 
 int user_range_ok(uint32_t ptr, uint32_t len);
+int user_range_writable(uint32_t ptr, uint32_t len);
 int user_string_ok(const char *s);
 
 int sys_open_console_aware(uint32_t path_arg, uint32_t flags, uint32_t c, uint32_t d, uint32_t e);
@@ -53,6 +54,7 @@ int sys_recvfrom(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t addr_arg,
 int sys_closesocket(uint32_t sd_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_dns_resolve(uint32_t host_arg, uint32_t ip_out_arg, uint32_t c, uint32_t d, uint32_t e);
 int sys_netinfo(uint32_t mac_arg, uint32_t ip_arg, uint32_t c, uint32_t d, uint32_t e);
+void sys_net_cleanup_owner(int owner);
 
 int sys_pipe(uint32_t fds_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_futex_wait(uint32_t addr_arg, uint32_t expected, uint32_t c, uint32_t d, uint32_t e);

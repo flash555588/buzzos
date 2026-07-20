@@ -65,6 +65,18 @@ static struct socket_entry *socket_get(int sd) {
     return &sockets[sd];
 }
 
+static void socket_clear(struct socket_entry *s) {
+    s->used = 0;
+    s->owner = -1;
+    s->domain = 0;
+    s->type = 0;
+    s->protocol = 0;
+    s->local_port = 0;
+    s->peer_ip = 0;
+    s->peer_port = 0;
+    s->connected = 0;
+}
+
 int sys_socket(uint32_t domain, uint32_t type, uint32_t protocol, uint32_t d, uint32_t e) {
     (void)d; (void)e;
     if ((int)domain != AF_INET_K)
@@ -177,7 +189,7 @@ int sys_send(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32
 
 int sys_recv(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32_t e) {
     (void)flags; (void)e;
-    if (!user_range_ok(buf, len))
+    if (!user_range_writable(buf, len))
         return -1;
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
@@ -247,10 +259,10 @@ int sys_sendto(uint32_t sd_arg, uint32_t buf, uint32_t len,
 
 int sys_recvfrom(uint32_t sd_arg, uint32_t buf, uint32_t len,
                  uint32_t addr_arg, uint32_t addrlen) {
-    if (!user_range_ok(buf, len))
+    if (!user_range_writable(buf, len))
         return -1;
     if (addr_arg && (addrlen < sizeof(struct k_sockaddr_in) ||
-        !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in))))
+        !user_range_writable(addr_arg, sizeof(struct k_sockaddr_in))))
         return -1;
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
@@ -302,32 +314,55 @@ int sys_closesocket(uint32_t sd_arg, uint32_t b, uint32_t c, uint32_t d, uint32_
     socket_lock();
     if ((int)sd_arg >= 0 && (int)sd_arg < MAX_SOCKETS &&
         sockets[sd_arg].used == 2 && &sockets[sd_arg].tcp == tcp) {
-        sockets[sd_arg].used = 0;
-        sockets[sd_arg].domain = 0;
-        sockets[sd_arg].type = 0;
-        sockets[sd_arg].protocol = 0;
-        sockets[sd_arg].local_port = 0;
-        sockets[sd_arg].peer_ip = 0;
-        sockets[sd_arg].peer_port = 0;
+        socket_clear(&sockets[sd_arg]);
     }
     socket_unlock();
     return 0;
+}
+
+void sys_net_cleanup_owner(int owner) {
+    if (owner < 0 || owner >= MAX_TASKS)
+        return;
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        socket_lock();
+        struct socket_entry *s = &sockets[i];
+        if (s->used != 1 || s->owner != owner) {
+            socket_unlock();
+            continue;
+        }
+        int close_tcp = s->type == SOCK_STREAM_K &&
+                        (s->tcp.state != 0 || s->tcp.registered);
+        struct net_tcp_pcb *tcp = &s->tcp;
+        s->used = 2;
+        s->owner = -1;
+        s->connected = 0;
+        socket_unlock();
+
+        if (close_tcp)
+            net_tcp_close_pcb(tcp);
+        net_tcp_pcb_init(tcp);
+
+        socket_lock();
+        if (s->used == 2)
+            socket_clear(s);
+        socket_unlock();
+    }
 }
 
 int sys_dns_resolve(uint32_t host_arg, uint32_t ip_out_arg, uint32_t c,
                     uint32_t d, uint32_t e) {
     (void)c; (void)d; (void)e;
     const char *host = (const char *)(uintptr_t)host_arg;
-    if (!user_string_ok(host) || !user_range_ok(ip_out_arg, sizeof(uint32_t)))
+    if (!user_string_ok(host) || !user_range_writable(ip_out_arg, sizeof(uint32_t)))
         return -1;
     return net_dns_resolve(host, (uint32_t *)(uintptr_t)ip_out_arg);
 }
 
 int sys_netinfo(uint32_t mac_arg, uint32_t ip_arg, uint32_t c, uint32_t d, uint32_t e) {
     (void)c; (void)d; (void)e;
-    if (mac_arg && !user_range_ok(mac_arg, 6))
+    if (mac_arg && !user_range_writable(mac_arg, 6))
         return -1;
-    if (ip_arg && !user_range_ok(ip_arg, sizeof(uint32_t)))
+    if (ip_arg && !user_range_writable(ip_arg, sizeof(uint32_t)))
         return -1;
     if (mac_arg) {
         uint8_t *mac = (uint8_t *)(uintptr_t)mac_arg;

@@ -33,7 +33,7 @@ filesystem, and a user-space GUI app manager.
   controls and `src/user/libc/guiapp.h` for the desktop-hosted app protocol.
 - App packaging: optional `.app` manifests provide `name`, `kind`, `version`,
   `summary`, `state`, `source`, and `readme` metadata for the App Manager.
-- App registry: `tools/gen_app_registry.py` generates `src/kernel/app_registry.h`
+- App registry: `tools/gen_app_registry.py` generates `build/generated/app_registry.h`
   from app sidecar metadata so kernel seeding stays data-driven.
 - Host tooling: `make help` / `tools/workflow.py` lists the recommended local
   workflow, `make run-gui` opens the desktop directly, and `make doctor` /
@@ -251,5 +251,5 @@ make image-reset-fs
 
 ## Next Maturity Targets
 
-- Add stronger TCP regression coverage, retransmission, window tracking, and
-  larger receive-flow behavior.
+- Extend TCP beyond bounded retransmission and cumulative ACKs with congestion
+  control, selective acknowledgements, and longer-lived connection tests.

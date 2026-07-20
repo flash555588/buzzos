@@ -59,11 +59,19 @@ limine-tool-windows-x86/limine.exe
 
 如果路径不同，构建时传 `LIMINE_DIR=...`。
 
+查看推荐的本地工作流：
+
+```sh
+make help
+```
+
 检查本机环境：
 
 ```sh
 make doctor QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
 ```
+
+该目标调用 `tools/doctor.py`，也可以给脚本传 `--soft` 只报告问题而不中止。
 
 构建并运行：
 
@@ -281,10 +289,10 @@ make verify QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
 BuzzOS 仍然是教学和实验系统，不是完整 Unix：
 
 - 没有 `fork/execve`、权限模型、信号、动态链接和成熟设备模型。
-- 网络栈是轻量 client 实现，TCP 超时、重传、窗口和长期连接能力仍有限。
+- 网络栈是轻量 client 实现；TCP 已有累计 ACK、接收窗口和有限重传，但还没有拥塞控制、选择确认和成熟的长期连接管理。
 - minifs 是固定区域、无日志的小文件系统。
 - 桌面是用户态窗口管理器，不是独立 GUI server；app 协议已经拆出来，后续可以继续演进。
-- syscall 用户指针校验仍是范围检查，不是完整页级权限验证。
+- syscall 用户指针会逐页校验 present/user/read-write 权限，但还没有完整的 `mmap`/按需分页模型。
 
 ## 代码入口
 

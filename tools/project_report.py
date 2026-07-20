@@ -161,7 +161,7 @@ def collect_user_elves():
 
 
 def collect_initrd_status():
-    initrd = ROOT / "src" / "kernel" / "initrd.h"
+    initrd = ROOT / "build" / "generated" / "initrd.h"
     mkinitrd = read_text_if_exists("tools/mkinitrd.py")
     bytes_per_line = "-"
     m = re.search(r"BYTES_PER_LINE\s*=\s*(\d+)", mkinitrd)
@@ -210,11 +210,10 @@ def collect_apps():
 def collect_gui_style():
     makefile = read_text_if_exists("Makefile")
     apps = parse_make_words(makefile, "GUI_APP_NAMES")
-    header = read_text_if_exists("src/user/libc/gui_style.h")
-    helpers = ["ui_topbar", "ui_panel", "ui_button", "ui_textbox",
-               "ui_list_row", "ui_scrollbar", "ui_pointer"]
+    header = read_text_if_exists("src/user/libc/appui.h")
+    helpers = ["appui_fill", "appui_border", "appui_text", "appui_button"]
     rows = [{
-        "item": "src/user/libc/gui_style.h",
+        "item": "src/user/libc/appui.h",
         "status": "present" if header else "missing",
         "evidence": "/".join(helpers)
                     if all(name in header for name in helpers)
@@ -224,7 +223,7 @@ def collect_gui_style():
         source = read_text_if_exists(f"src/user/bin/{app}.c")
         rows.append({
             "item": app,
-            "status": "yes" if '#include "gui_style.h"' in source else "no",
+            "status": "yes" if '#include "appui.h"' in source else "no",
             "evidence": ",".join(name for name in helpers if name in source) or "-",
         })
     return rows
@@ -455,7 +454,7 @@ def collect_ipc_status():
 
 
 def collect_screenshots():
-    names = ["app-center", "forms-edit", "calc-edit", "notes-edit", "guidemo-edit"]
+    names = ["app-center", "textedit", "textedit-maximized", "paint", "calculator", "terminal-about"]
     rows = []
     for name in names:
         path = ROOT / "build" / "gui-smoke" / f"{name}.png"
@@ -491,13 +490,13 @@ def table(headers, rows):
 
 def build_report(python_cmd="python", make_cmd="make", qemu_cmd="qemu-system-i386"):
     makefile = read_text_if_exists("Makefile")
-    kernel_sectors = parse_make_int("KERNEL_SECTORS", 0)
+    boot_sectors = parse_make_int("BOOT_PARTITION_SECTORS", 0)
     fs_start = parse_make_int("FS_START_SECTOR", 512)
     fs_sectors = parse_make_int("FS_SECTORS", 512)
-    kernel_path = ROOT / "build" / "obj" / "kernel" / "kernel.bin"
+    kernel_path = ROOT / "build" / "obj" / "kernel" / "kernel.elf"
     image_path = ROOT / "build" / "buzzos.img"
     kernel_size = file_size(kernel_path)
-    kernel_limit = kernel_sectors * 512 if kernel_sectors else None
+    kernel_limit = boot_sectors * 512 if boot_sectors else None
     kernel_headroom = kernel_limit - kernel_size if kernel_limit is not None and kernel_size is not None else None
     headroom_status = "ok"
     if kernel_headroom is None:
@@ -532,9 +531,9 @@ def build_report(python_cmd="python", make_cmd="make", qemu_cmd="qemu-system-i38
     lines.extend(table(["item", "value"], [
         {"item": "image", "value": f"{rel(image_path)} ({bytes_text(file_size(image_path))})"},
         {"item": "kernel", "value": bytes_text(kernel_size)},
-        {"item": "kernel limit", "value": bytes_text(kernel_limit)},
-        {"item": "kernel headroom", "value": f"{bytes_text(kernel_headroom)} [{headroom_status}]"},
-        {"item": "kernel sectors", "value": str(kernel_sectors)},
+        {"item": "boot partition capacity", "value": bytes_text(kernel_limit)},
+        {"item": "boot partition headroom", "value": f"{bytes_text(kernel_headroom)} [{headroom_status}]"},
+        {"item": "boot partition sectors", "value": str(boot_sectors)},
         {"item": "fs region", "value": f"LBA {fs_start}..{fs_start + fs_sectors - 1} ({fs_sectors} sectors)"},
     ]))
     lines.append("")
@@ -646,12 +645,12 @@ def build_report(python_cmd="python", make_cmd="make", qemu_cmd="qemu-system-i38
     lines.append("- `make fs-repair` writes a conservatively repaired minifs image copy instead of overwriting the current image.")
     lines.append("- `make fs-check-repair` verifies conservative minifs repair on disposable corrupted image copies.")
     lines.append("- `make help` prints the recommended local workflow without building the image.")
-    lines.append("- `make run-gui` and the `make run-*` GUI demo shortcuts open seeded GUI examples in visible QEMU.")
+    lines.append("- `make run-gui` opens the desktop and seeded GUI applications in visible QEMU.")
     lines.append("- `make doctor` checks the host build/run tools before a user spends time on a failing build.")
     lines.append("- `docs/boot-guide.md` and `docs/user-guide.md` cover local startup, QEMU input, shell, GUI, diagnostics, and troubleshooting.")
     lines.append("- `make report` writes this summary to `build/project-report.md`.")
     if headroom_status == "low":
-        lines.append("- Kernel headroom is low; prefer user-space features or increase/reshape boot layout before adding kernel payload.")
+        lines.append("- Boot partition headroom is low; increase or reshape the image layout before adding kernel payload.")
     lines.append("")
     return "\n".join(lines)
 

@@ -9,6 +9,8 @@
 enum {
     NET_TCP_CONNECT_TIMEOUT_MS = 5000,
     NET_TCP_RECV_TIMEOUT_MS = 15000,
+    NET_TCP_RETRY_MS = 350,
+    NET_TCP_RETRIES = 4,
 };
 
 static void *memset(void *d, int c, size_t n) { for (size_t i=0;i<n;i++) ((uint8_t*)d)[i]=(uint8_t)c; return d; }
@@ -647,6 +649,13 @@ static void net_tcp_mark_closed(struct net_tcp_pcb *pcb) {
     net_tcp_unregister_pcb(pcb);
 }
 
+static uint16_t net_tcp_receive_window(const struct net_tcp_pcb *pcb) {
+    if (!pcb || pcb->rx_len >= NET_TCP_RX_CAP)
+        return 0;
+    size_t space = NET_TCP_RX_CAP - pcb->rx_len;
+    return (uint16_t)(space > 0xFFFFu ? 0xFFFFu : space);
+}
+
 static int net_tcp_send_ack(struct net_tcp_pcb *pcb) {
     uint8_t ak[sizeof(struct tcp_hdr)];
     struct tcp_hdr *ah = (struct tcp_hdr *)ak;
@@ -659,7 +668,7 @@ static int net_tcp_send_ack(struct net_tcp_pcb *pcb) {
     ah->ack      = bswap32(pcb->ack);
     ah->data_off = (uint8_t)(sizeof(*ah) / 4) << 4;
     ah->flags    = TCP_ACK;
-    ah->window   = bswap16(1460);
+    ah->window   = bswap16(net_tcp_receive_window(pcb));
     ah->checksum = trans_checksum(net_ip, pcb->dst_ip, 6, ah, sizeof(*ah));
     return ip_send(pcb->dst_ip, 6, ah, sizeof(*ah));
 }
@@ -676,10 +685,10 @@ static struct net_tcp_pcb *net_tcp_match_pcb(uint32_t src_ip, uint16_t src_port,
     return 0;
 }
 
-static void net_tcp_queue_rx(struct net_tcp_pcb *pcb, const uint8_t *payload,
-                             size_t plen) {
+static size_t net_tcp_queue_rx(struct net_tcp_pcb *pcb, const uint8_t *payload,
+                               size_t plen) {
     if (!pcb || !payload || plen == 0)
-        return;
+        return 0;
     size_t space = NET_TCP_RX_CAP - pcb->rx_len;
     size_t copy = plen < space ? plen : space;
     if (copy > 0) {
@@ -689,6 +698,7 @@ static void net_tcp_queue_rx(struct net_tcp_pcb *pcb, const uint8_t *payload,
     }
     if (copy < plen)
         net_tcp_rx_dropped += (uint32_t)(plen - copy);
+    return copy;
 }
 
 static int net_tcp_take_rx(struct net_tcp_pcb *pcb, void *buf, size_t max) {
@@ -703,6 +713,8 @@ static int net_tcp_take_rx(struct net_tcp_pcb *pcb, void *buf, size_t max) {
         net_tcp_rx_buffered -= (uint32_t)take;
     else
         net_tcp_rx_buffered = 0;
+    if (pcb->state == TCP_STATE_ESTABLISHED)
+        (void)net_tcp_send_ack(pcb);
     return (int)take;
 }
 
@@ -749,8 +761,13 @@ static int net_tcp_dispatch_frame(const void *frame, size_t len) {
     if (pcb->state == TCP_STATE_SYN_SENT) {
         if ((tcp->flags & (TCP_SYN | TCP_ACK)) != (TCP_SYN | TCP_ACK))
             return 1;
+        uint32_t peer_ack = bswap32(tcp->ack);
+        if (peer_ack != pcb->seq + 1u)
+            return 1;
         pcb->ack = bswap32(tcp->seq) + 1;
-        pcb->seq++;
+        pcb->seq = peer_ack;
+        pcb->snd_una = peer_ack;
+        pcb->peer_window = bswap16(tcp->window);
         net_tcp_send_ack(pcb);
         pcb->state = TCP_STATE_ESTABLISHED;
         net_tcp_open_pcbs++;
@@ -771,26 +788,63 @@ static int net_tcp_dispatch_frame(const void *frame, size_t len) {
     const uint8_t *payload = ((const uint8_t *)tcp) + doff;
     size_t plen = tcp_len - doff;
     uint32_t peer_seq = bswap32(tcp->seq);
-    if (plen > 0)
-        net_tcp_queue_rx(pcb, payload, plen);
-
-    if (plen > 0 || (tcp->flags & TCP_FIN)) {
-        pcb->ack = peer_seq + (uint32_t)plen;
-        if (tcp->flags & TCP_FIN)
-            pcb->ack++;
-        net_tcp_send_ack(pcb);
+    uint32_t fin_seq = peer_seq + (uint32_t)plen;
+    if (tcp->flags & TCP_ACK) {
+        uint32_t peer_ack = bswap32(tcp->ack);
+        if ((int32_t)(peer_ack - pcb->snd_una) >= 0 &&
+            (int32_t)(pcb->seq - peer_ack) >= 0)
+            pcb->snd_una = peer_ack;
+        pcb->peer_window = bswap16(tcp->window);
     }
 
-    if (plen > 0) {
+    if ((int32_t)(peer_seq - pcb->ack) < 0) {
+        uint32_t skip = pcb->ack - peer_seq;
+        if (skip >= plen) {
+            payload += plen;
+            plen = 0;
+        } else {
+            payload += skip;
+            plen -= skip;
+        }
+        peer_seq = pcb->ack;
+    }
+
+    size_t queued = 0;
+    if (peer_seq == pcb->ack && plen > 0) {
+        queued = net_tcp_queue_rx(pcb, payload, plen);
+        pcb->ack += (uint32_t)queued;
+    }
+
+    int accepted_fin = (tcp->flags & TCP_FIN) && pcb->ack == fin_seq;
+    if (accepted_fin)
+        pcb->ack++;
+    if (plen > 0 || (tcp->flags & TCP_FIN))
+        (void)net_tcp_send_ack(pcb);
+
+    if (queued > 0) {
         serial_puts("[tcp] queued rx len=");
-        serial_puthex((uint32_t)plen);
+        serial_puthex((uint32_t)queued);
         serial_puts("\n");
     }
-    if (tcp->flags & TCP_FIN) {
+    if (accepted_fin) {
         pcb->rx_closed = 1;
         net_tcp_mark_closed(pcb);
     }
     return 1;
+}
+
+static int net_tcp_send_syn(struct net_tcp_pcb *pcb) {
+    uint8_t pkt[sizeof(struct tcp_hdr)];
+    struct tcp_hdr *th = (struct tcp_hdr *)pkt;
+    memset(th, 0, sizeof(*th));
+    th->src_port = bswap16(pcb->src_port);
+    th->dst_port = bswap16(pcb->dst_port);
+    th->seq      = bswap32(pcb->seq);
+    th->data_off = (uint8_t)(sizeof(*th) / 4) << 4;
+    th->flags    = TCP_SYN;
+    th->window   = bswap16(net_tcp_receive_window(pcb));
+    th->checksum = trans_checksum(net_ip, pcb->dst_ip, 6, th, sizeof(*th));
+    return ip_send(pcb->dst_ip, 6, th, sizeof(*th));
 }
 
 int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
@@ -807,27 +861,16 @@ int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
     pcb->seq      = tcp_next_seq;
     tcp_next_seq += 0x01010101;
     pcb->ack      = 0;
+    pcb->snd_una  = pcb->seq;
+    pcb->peer_window = 0;
     pcb->rx_closed = 0;
     pcb->rx_reset = 0;
     pcb->state    = TCP_STATE_SYN_SENT;
     net_tcp_register_pcb(pcb);
 
-    /* Send SYN */
-    {
-        uint8_t pkt[sizeof(struct tcp_hdr)];
-        struct tcp_hdr *th = (struct tcp_hdr *)pkt;
-        memset(th, 0, sizeof(*th));
-        th->src_port = bswap16(pcb->src_port);
-        th->dst_port = bswap16(pcb->dst_port);
-        th->seq      = bswap32(pcb->seq);
-        th->data_off = (uint8_t)(sizeof(*th) / 4) << 4;
-        th->flags    = TCP_SYN;
-        th->window   = bswap16(1460);
-        th->checksum = trans_checksum(net_ip, pcb->dst_ip, 6, th, sizeof(*th));
-        if (ip_send(pcb->dst_ip, 6, th, sizeof(*th)) < 0) {
-            net_tcp_mark_closed(pcb);
-            dbg("tcp: syn send failed\n"); return -1;
-        }
+    if (net_tcp_send_syn(pcb) < 0) {
+        net_tcp_mark_closed(pcb);
+        dbg("tcp: syn send failed\n"); return -1;
     }
     dbg("tcp: syn sent\n");
 
@@ -836,6 +879,9 @@ int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
      * have a chance to arrive. */
     uint32_t deadline = net_timer_ready() ?
         net_deadline_after_ms(NET_TCP_CONNECT_TIMEOUT_MS) : 0;
+    uint32_t retry_deadline = net_timer_ready() ?
+        net_deadline_after_ms(NET_TCP_RETRY_MS) : 0;
+    int retries = 0;
     for (int tries = 0;; tries++) {
         net_tcp_poll_once();
         if (pcb->state == TCP_STATE_ESTABLISHED)
@@ -845,6 +891,11 @@ int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
         if (deadline) {
             if (net_deadline_expired(deadline))
                 break;
+            if (net_deadline_expired(retry_deadline) && retries < NET_TCP_RETRIES) {
+                (void)net_tcp_send_syn(pcb);
+                retries++;
+                retry_deadline = net_deadline_after_ms(NET_TCP_RETRY_MS);
+            }
         } else if (tries >= 200) {
             break;
         }
@@ -865,20 +916,42 @@ int net_tcp_send_pcb(struct net_tcp_pcb *pcb, const void *data, size_t len) {
         size_t chunk = left > 1200 ? 1200 : left;
         uint8_t pkt[sizeof(struct tcp_hdr) + 1200];
         struct tcp_hdr *th = (struct tcp_hdr *)pkt;
+        uint32_t send_seq = pcb->seq;
+        uint32_t want_ack = send_seq + (uint32_t)chunk;
         memset(th, 0, sizeof(*th));
         th->src_port = bswap16(pcb->src_port);
         th->dst_port = bswap16(pcb->dst_port);
-        th->seq      = bswap32(pcb->seq);
+        th->seq      = bswap32(send_seq);
         th->ack      = bswap32(pcb->ack);
         th->data_off = (uint8_t)(sizeof(*th) / 4) << 4;
         th->flags    = TCP_PSH | TCP_ACK;
-        th->window   = bswap16(1460);
+        th->window   = bswap16(net_tcp_receive_window(pcb));
         memcpy(pkt + sizeof(*th), p, chunk);
         th->checksum = trans_checksum(net_ip, pcb->dst_ip, 6, pkt, sizeof(*th) + chunk);
 
-        if (ip_send(pcb->dst_ip, 6, pkt, sizeof(*th) + chunk) < 0)
+        pcb->seq = want_ack;
+        int acknowledged = 0;
+        for (int attempt = 0; attempt <= NET_TCP_RETRIES && !acknowledged; attempt++) {
+            if (ip_send(pcb->dst_ip, 6, pkt, sizeof(*th) + chunk) < 0)
+                return -1;
+            uint32_t deadline = net_timer_ready() ?
+                net_deadline_after_ms(NET_TCP_RETRY_MS) : 0;
+            for (int polls = 0;; polls++) {
+                net_tcp_poll_once();
+                if ((int32_t)(pcb->snd_una - want_ack) >= 0) {
+                    acknowledged = 1;
+                    break;
+                }
+                if (pcb->rx_reset || pcb->state == TCP_STATE_CLOSED)
+                    return -1;
+                if ((deadline && net_deadline_expired(deadline)) ||
+                    (!deadline && polls >= 200))
+                    break;
+                net_poll_backoff();
+            }
+        }
+        if (!acknowledged)
             return -1;
-        pcb->seq += (uint32_t)chunk;
         p += chunk;
         left -= chunk;
     }
@@ -934,7 +1007,7 @@ void net_tcp_close_pcb(struct net_tcp_pcb *pcb) {
         fh->ack      = bswap32(pcb->ack);
         fh->data_off = (uint8_t)(sizeof(*fh) / 4) << 4;
         fh->flags    = TCP_FIN | TCP_ACK;
-        fh->window   = bswap16(1460);
+        fh->window   = bswap16(net_tcp_receive_window(pcb));
         fh->checksum = trans_checksum(net_ip, pcb->dst_ip, 6, fh, sizeof(*fh));
         ip_send(pcb->dst_ip, 6, fh, sizeof(*fh));
     }

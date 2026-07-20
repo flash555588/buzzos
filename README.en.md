@@ -59,11 +59,20 @@ limine-tool-windows-x86/limine.exe
 
 If the path differs, pass `LIMINE_DIR=...` during build.
 
+Show the recommended local workflow:
+
+```sh
+make help
+```
+
 Check your local environment:
 
 ```sh
 make doctor QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
 ```
+
+This target runs `tools/doctor.py`; pass `--soft` to that script when you only
+want a report without a failing exit status.
 
 Build and run:
 
@@ -281,10 +290,10 @@ make verify QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
 BuzzOS remains a teaching and experimentation system, not a complete Unix:
 
 - No `fork/execve`, permission model, signals, dynamic linking, or mature device model.
-- The network stack is a lightweight client implementation; TCP timeout, retransmission, windowing, and long-lived connections are still limited.
+- The network stack is a lightweight client implementation. TCP has cumulative ACKs, receive-window advertisement, and bounded retransmission, but no congestion control, selective ACKs, or mature long-lived connection management.
 - minifs is a fixed-region, non-journaled small file system.
 - The desktop is a user-mode window manager, not a standalone GUI server; the app protocol is already decoupled and can continue to evolve.
-- Syscall user-pointer validation is still range checking, not full page-level permission verification.
+- Syscall user pointers are checked page by page for present/user/read-write permissions, but there is no complete `mmap` or demand-paging model.
 
 ## Code Entry Points
 

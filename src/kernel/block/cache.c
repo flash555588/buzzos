@@ -1,5 +1,6 @@
 #include "block/cache.h"
 #include "block/ata.h"
+#include "irq.h"
 
 #define CACHE_BLOCKS 16
 #define SECTOR_SIZE 512
@@ -15,16 +16,6 @@ static struct cache_entry cache[CACHE_BLOCKS];
 static uint32_t cache_clock;
 static volatile int cache_locked;
 static uint32_t cache_irq_flags;
-
-static uint32_t irq_save(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
-
-static void irq_restore(uint32_t flags) {
-    __asm__ volatile("push %0; popf" :: "r"(flags) : "memory", "cc");
-}
 
 static void cache_lock(void) {
     uint32_t flags = irq_save();
