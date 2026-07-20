@@ -122,6 +122,8 @@ Window features:
 - Drag edges or corners to resize.
 - Minimize, maximize, close.
 - Mouse wheel and scrollbars.
+- Dock tasks use app-declared window titles; More expands the full task list and hover shows the complete title.
+- The desktop supports up to 10 concurrent external GUI app windows in addition to Apps, Terminal, and System.
 
 Default user GUI apps:
 
@@ -130,6 +132,7 @@ Default user GUI apps:
 | TextEdit | Text editor with editing area resizing with window, supports Enter, cursor movement, horizontal/vertical scrollbars, saves to `/fs/textedit.txt` |
 | Paint | Bitmap drawing tool with canvas and toolbar resizing with window, supports pen, eraser, line, rectangle, fill, and continuous strokes |
 | Calculator | Expression calculator supporting parentheses, decimals, and common arithmetic expressions |
+| Files | File manager with directory navigation, create, rename, delete, and Open in TextEdit |
 
 View app information in the text shell:
 
@@ -138,6 +141,7 @@ apps
 apps info textedit
 apps info paint
 apps info calculator
+apps info filemanager
 ```
 
 GUI apps are launched from the desktop and are not meant to be run directly from the text shell.

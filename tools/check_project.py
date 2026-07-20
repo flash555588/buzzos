@@ -321,7 +321,9 @@ def check_runtime_lifecycle():
     for snippet in ["threadreusetest", "socketleak: opened 8", "3072"]:
         if snippet not in smoke:
             fail(f"resource/TCP smoke coverage is missing: {snippet}")
-    for snippet in ["textedit-maximized", "Move-MouseRelative", "Click-Left"]:
+    for snippet in ["textedit-maximized", "filemanager", "filemanager-textedit",
+                    "many-windows", "dock-expanded",
+                    "Move-MouseRelative", "Click-Left"]:
         if snippet not in gui_smoke:
             fail(f"live TextEdit resize coverage is missing: {snippet}")
 
@@ -1309,6 +1311,25 @@ def check_gui_style():
     for snippet in ["guiapp_event", "GUIAPP_EVT_CLOSE", "guiapp_send_frame", "guiapp_send_dirty"]:
         if snippet not in guiapp_h:
             fail(f"guiapp.h is missing desktop protocol feature: {snippet}")
+    for snippet in ["GUIAPP_FRAME_LAUNCH", "GUIAPP_PATH_MAX", "guiapp_request_launch"]:
+        if snippet not in guiapp_h:
+            fail(f"guiapp.h is missing cross-app launch feature: {snippet}")
+    gui_c = read_text("src/user/bin/gui.c")
+    textedit_c = read_text("src/user/bin/textedit.c")
+    files_c = read_text("src/user/bin/filemanager.c")
+    for snippet in ["app_target_allowed", "run_app_with_arg", "GUIAPP_FRAME_LAUNCH"]:
+        if snippet not in gui_c:
+            fail(f"desktop is missing cross-app launch handling: {snippet}")
+    for snippet in ["MAX_GUI_APPS = 10", "dock_expanded", "collect_open_apps",
+                    "draw_dock_tooltip", "activate_next_visible"]:
+        if snippet not in gui_c:
+            fail(f"desktop is missing scalable task switcher feature: {snippet}")
+    for snippet in ["set_document_path", "argc > 4", "file_path"]:
+        if snippet not in textedit_c:
+            fail(f"TextEdit is missing document argument support: {snippet}")
+    for snippet in ["getdents", "guiapp_request_launch", "MODE_DELETE", "scan_directory"]:
+        if snippet not in files_c:
+            fail(f"filemanager is missing required feature: {snippet}")
 
     for app in parse_make_words(makefile, "GUI_APP_NAMES"):
         source = read_text(f"src/user/bin/{app}.c")

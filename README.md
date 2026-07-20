@@ -121,6 +121,8 @@ gui
 - 拖动边缘或角落调整大小。
 - 最小化、最大化、关闭。
 - 鼠标滚轮和滚动条。
+- Dock 使用 app 声明的窗口标题；应用较多时可通过 More 展开完整任务列表，悬停可查看完整标题。
+- 桌面最多同时承载 10 个外部 GUI app 窗口，另有 Apps、Terminal 和 System 三个系统窗口。
 
 默认用户 GUI app：
 
@@ -129,6 +131,7 @@ gui
 | TextEdit | 文本编辑器，编辑区随窗口大小变化，支持回车、光标移动、水平/垂直滚动条，保存到 `/fs/textedit.txt` |
 | Paint | 位图绘图工具，画布和工具栏随窗口大小变化，支持画笔、橡皮、直线、矩形、填充和连续笔画 |
 | Calculator | 表达式计算器，支持括号、小数和常见四则表达式 |
+| Files | 文件管理器，支持目录导航、新建、重命名、删除，以及用 TextEdit 打开普通文件 |
 
 Text shell 里可以查看 app 信息：
 
@@ -137,6 +140,7 @@ apps
 apps info textedit
 apps info paint
 apps info calculator
+apps info filemanager
 ```
 
 GUI app 由桌面启动，不再从文本 shell 里直接运行图形 app。

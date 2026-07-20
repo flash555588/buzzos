@@ -30,6 +30,16 @@ short log for reviewers and contributors; deeper design notes live under
   - `paint`: a mouse-driven canvas with color/tool controls and saved artwork.
   - `calculator`: a compact four-function calculator with keyboard and mouse
     input.
+  - filemanager: a graphical file browser with navigation history, common
+    locations, create/rename/delete operations, and keyboard/mouse controls.
+- Extended the desktop app protocol with validated cross-app launch requests
+  and document arguments; Files now opens regular files in TextEdit, and
+  TextEdit loads and saves the requested path.
+- Expanded desktop capacity to 10 external app windows, doubled the isolated
+  user address range to 16 MiB, and replaced fixed App1/App2/App3 Dock labels
+  with app-declared titles, hover tooltips, and an expandable task list.
+- Made Files toolbar widths derive from the active font metrics so labels and
+  click targets remain aligned without text clipping.
 - Added source-side app metadata and registry generation so GUI apps can ship
   with `.app` manifests, readmes, optional seed files, and generated kernel
   seed data.

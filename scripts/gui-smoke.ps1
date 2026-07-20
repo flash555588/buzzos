@@ -309,6 +309,47 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 900
+    $filesPpm = (Join-Path $OutDir "filemanager.ppm")
+    $screens += Capture-Screen "filemanager" $filesPpm (Join-Path $OutDir "filemanager.png")
+    # Files starts at /fs with the apps directory selected. Enter it, select
+    # calculator.readme, and verify a parameterized TextEdit window opens.
+    Send-Key "ret"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 900
+    $filesTextPpm = (Join-Path $OutDir "filemanager-textedit.ppm")
+    $screens += Capture-Screen "filemanager-textedit" $filesTextPpm (Join-Path $OutDir "filemanager-textedit.png")
+    # Cycle back to Files and launch six more document windows. Together with
+    # Files this exercises eight external windows, beyond the old six-window
+    # total (three built-ins plus three app slots).
+    for ($i = 0; $i -lt 6; $i++) {
+        Send-Key "tab"
+        Send-Key "tab"
+        Send-Key "tab"
+        Send-Key "tab"
+        Send-Key "ret"
+    }
+    Start-Sleep -Milliseconds 900
+    $manyPpm = (Join-Path $OutDir "many-windows.ppm")
+    $screens += Capture-Screen "many-windows" $manyPpm (Join-Path $OutDir "many-windows.png")
+    # Normalize the pointer to the top-left, then click the More task button
+    # near the bottom-right of the 1280x800 smoke desktop.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative 1086 752
+    Click-Left
+    Start-Sleep -Milliseconds 500
+    $expandedPpm = (Join-Path $OutDir "dock-expanded.ppm")
+    $screens += Capture-Screen "dock-expanded" $expandedPpm (Join-Path $OutDir "dock-expanded.png")
+    Send-Key "esc"
+    Wait-ForLog "\[gui\] exited" 10
+
+    Type-Command "gui"
     Send-Key "tab"
     Type-Text "about"
     Send-Key "ret"

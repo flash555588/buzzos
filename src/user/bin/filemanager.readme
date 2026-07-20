@@ -1,0 +1,5 @@
+Files is the BuzzOS graphical file manager.
+
+Browse system locations, open folders, and launch regular files in TextEdit.
+It supports creating files and folders, renaming, deletion with confirmation,
+keyboard navigation, double-click opening, and mouse-wheel scrolling.

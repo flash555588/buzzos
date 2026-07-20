@@ -14,7 +14,7 @@ enum {
     WIN_TERMINAL = 1,
     WIN_STATUS = 2,
     WIN_APP_BASE = 3,
-    MAX_GUI_APPS = 3,
+    MAX_GUI_APPS = 10,
     WIN_COUNT = WIN_APP_BASE + MAX_GUI_APPS,
 
     MAX_APPS = 16,
@@ -81,6 +81,7 @@ static int app_selected;
 static int app_last_click = -1;
 static unsigned int app_last_click_tick;
 static int dock_hover = -1;
+static int dock_expanded;
 static int pointer_x;
 static int pointer_y;
 static int prev_buttons;
@@ -160,6 +161,25 @@ static void copy_text(char *dst, const char *src, size_t cap) {
         i++;
     }
     dst[i] = 0;
+}
+
+static int app_target_allowed(const char *path) {
+    static const char prefix[] = "/fs/apps/";
+    int i = 0;
+    while (prefix[i]) {
+        if (path[i] != prefix[i])
+            return 0;
+        i++;
+    }
+    if (!path[i])
+        return 0;
+    for (; path[i]; i++) {
+        char ch = path[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-'))
+            return 0;
+    }
+    return 1;
 }
 
 static void append_text(char *dst, const char *src, size_t cap) {
@@ -368,6 +388,7 @@ static struct rect content_rect(int id);
 static void close_window(int id);
 static void clamp_scroll(int id);
 static void activate(int id);
+static void run_app_with_arg(const char *path, const char *argument);
 
 static void term_lock_enter(void) {
     while (__sync_lock_test_and_set(&term_lock, 1))
@@ -590,9 +611,20 @@ static int app_read_frame(int slot) {
     if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used)
         return -1;
     struct guiapp_frame frame;
-    if (read_full(app_sessions[slot].from_fd, &frame, (int)sizeof(frame)) < 0)
-        return -1;
-    if (frame.magic != GUIAPP_MAGIC || frame.width <= 0 || frame.height <= 0 ||
+    for (;;) {
+        if (read_full(app_sessions[slot].from_fd, &frame, (int)sizeof(frame)) < 0)
+            return -1;
+        if (frame.magic != GUIAPP_MAGIC)
+            return -1;
+        frame.target[GUIAPP_PATH_MAX - 1] = 0;
+        frame.argument[GUIAPP_PATH_MAX - 1] = 0;
+        if (frame.type != GUIAPP_FRAME_LAUNCH)
+            break;
+        if (!app_target_allowed(frame.target))
+            return -1;
+        run_app_with_arg(frame.target, frame.argument[0] ? frame.argument : 0);
+    }
+    if (frame.width <= 0 || frame.height <= 0 ||
         frame.width > APP_SURFACE_MAX_W || frame.height > APP_SURFACE_MAX_H)
         return -1;
     if (frame.type == GUIAPP_FRAME_DIRTY) {
@@ -660,7 +692,7 @@ static int sync_app_size(int id) {
     return app_sessions[slot].resize_dirty ? -1 : 0;
 }
 
-static void run_app(const char *path) {
+static void run_app_with_arg(const char *path, const char *argument) {
     char msg[96];
     int slot = -1;
     for (int i = 0; i < MAX_GUI_APPS; i++) {
@@ -685,16 +717,18 @@ static void run_app(const char *path) {
     char frame_fd[12];
     int_to_dec(ev_pipe[0], ev_fd, sizeof(ev_fd));
     int_to_dec(frame_pipe[1], frame_fd, sizeof(frame_fd));
-    char *argv[4];
+    char *argv[5];
     argv[0] = (char *)path;
     argv[1] = "--buzz-gui";
     argv[2] = ev_fd;
     argv[3] = frame_fd;
+    argv[4] = (char *)argument;
+    int argc = argument && argument[0] ? 5 : 4;
 
     copy_text(msg, "launch ", sizeof(msg));
     append_text(msg, path, sizeof(msg));
     term_log(msg);
-    int pid = spawn_process_args(path, argv, 4,
+    int pid = spawn_process_args(path, argv, argc,
                                  SPAWN_FLAG_SILENT | SPAWN_FLAG_INHERIT_FDS);
     close(ev_pipe[0]);
     close(frame_pipe[1]);
@@ -738,6 +772,10 @@ static void run_app(const char *path) {
     append_uint(msg, (unsigned int)pid, sizeof(msg));
     term_log(msg);
     activate(id);
+}
+
+static void run_app(const char *path) {
+    run_app_with_arg(path, 0);
 }
 
 static void activate(int id) {
@@ -1070,21 +1108,86 @@ static void draw_app_window(int id) {
     }
 }
 
+static int collect_open_apps(int ids[MAX_GUI_APPS]) {
+    int count = 0;
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
+        int id = WIN_APP_BASE + slot;
+        if (app_sessions[slot].used && windows[id].visible)
+            ids[count++] = id;
+    }
+    return count;
+}
+
+static void dock_geometry(int *x, int *y, int *dock_w, int *task_cap) {
+    *dock_w = min_i(980, sw - 40);
+    if (*dock_w < 420)
+        *dock_w = sw - 12;
+    *x = (sw - *dock_w) / 2;
+    *y = sh - 66;
+    int available = *dock_w - 36 - 3 * 70 - 70;
+    *task_cap = max_i(1, available / 118);
+}
+
+static void draw_dock_tooltip(void) {
+    if (dock_hover < WIN_APP_BASE || dock_hover >= WIN_COUNT ||
+        !windows[dock_hover].visible)
+        return;
+    const char *title = windows[dock_hover].title;
+    int tw = min_i(sw - 16, (int)strlen(title) * KFONT_WIDTH + 20);
+    int tx = clamp_i(pointer_x - tw / 2, 8, sw - tw - 8);
+    int ty = sh - 96;
+    struct rect tip = {tx, ty, tw, 26};
+    fill(tip, gray(1));
+    border(tip, gray(9), 0);
+    text_clip(tip.x + 10, tip.y + 5, title, 15, -1,
+              (struct rect){tip.x + 5, tip.y + 2, tip.w - 10, tip.h - 4});
+}
+
 static void draw_dock(void) {
-    int dock_w = min_i(18 + WIN_COUNT * 92 + 18, sw - 80);
-    int dock_h = 54;
-    int x = (sw - dock_w) / 2;
-    int y = sh - dock_h - 12;
-    struct rect r = {x, y, dock_w, dock_h};
+    int ids[MAX_GUI_APPS];
+    int app_total = collect_open_apps(ids);
+    int x, y, dock_w, task_cap;
+    dock_geometry(&x, &y, &dock_w, &task_cap);
+    struct rect r = {x, y, dock_w, 54};
     fill(r, gray(3));
     border(r, gray(8), gray(1));
-    const char *labels[WIN_COUNT] = {"Apps", "Term", "Sys", "App1", "App2", "App3"};
-    for (int i = 0; i < WIN_COUNT; i++) {
-        struct rect b = {x + 18 + i * 92, y + 9, 76, 36};
-        if (i >= WIN_APP_BASE && !windows[i].visible)
-            continue;
-        button(b, labels[i], windows[i].active || dock_hover == i);
+
+    static const char *system_labels[] = {"Apps", "Term", "Sys"};
+    for (int i = 0; i < WIN_APP_BASE; i++) {
+        struct rect b = {x + 12 + i * 70, y + 9, 64, 36};
+        button(b, system_labels[i], windows[i].active || dock_hover == i);
     }
+
+    int shown = min_i(app_total, task_cap);
+    int task_x = x + 12 + WIN_APP_BASE * 70;
+    for (int i = 0; i < shown; i++) {
+        int id = ids[i];
+        struct rect b = {task_x + i * 118, y + 9, 112, 36};
+        button(b, windows[id].title, windows[id].active || dock_hover == id);
+    }
+    if (app_total > 0) {
+        int more_x = x + dock_w - 76;
+        button((struct rect){more_x, y + 9, 64, 36},
+               dock_expanded ? "Hide" : "More", dock_hover == WIN_COUNT);
+    }
+
+    if (dock_expanded && app_total > 0) {
+        int panel_w = min_i(380, sw - 24);
+        int panel_h = 14 + app_total * 30;
+        int panel_x = x + dock_w - panel_w;
+        int panel_y = y - panel_h - 6;
+        struct rect panel = {panel_x, panel_y, panel_w, panel_h};
+        fill(panel, gray(3));
+        border(panel, gray(9), gray(1));
+        for (int i = 0; i < app_total; i++) {
+            int id = ids[i];
+            struct rect item = {panel_x + 7, panel_y + 7 + i * 30,
+                                panel_w - 14, 26};
+            button(item, windows[id].title,
+                   windows[id].active || dock_hover == id);
+        }
+    }
+    draw_dock_tooltip();
 }
 
 static void draw_pointer(void) {
@@ -1346,17 +1449,35 @@ static int hit_scrollbar(int x, int y, int *axis_out) {
 }
 
 static int hit_dock(int x, int y) {
-    int dock_w = min_i(18 + WIN_COUNT * 92 + 18, sw - 80);
-    int dock_h = 54;
-    int dx = (sw - dock_w) / 2;
-    int dy = sh - dock_h - 12;
-    for (int i = 0; i < WIN_COUNT; i++) {
-        if (i >= WIN_APP_BASE && !windows[i].visible)
-            continue;
-        struct rect b = {dx + 18 + i * 92, dy + 9, 76, 36};
-        if (inside(x, y, b))
+    int ids[MAX_GUI_APPS];
+    int app_total = collect_open_apps(ids);
+    int dx, dy, dock_w, task_cap;
+    dock_geometry(&dx, &dy, &dock_w, &task_cap);
+    if (dock_expanded && app_total > 0) {
+        int panel_w = min_i(380, sw - 24);
+        int panel_h = 14 + app_total * 30;
+        int panel_x = dx + dock_w - panel_w;
+        int panel_y = dy - panel_h - 6;
+        for (int i = 0; i < app_total; i++) {
+            struct rect item = {panel_x + 7, panel_y + 7 + i * 30,
+                                panel_w - 14, 26};
+            if (inside(x, y, item))
+                return ids[i];
+        }
+    }
+    for (int i = 0; i < WIN_APP_BASE; i++) {
+        if (inside(x, y, (struct rect){dx + 12 + i * 70, dy + 9, 64, 36}))
             return i;
     }
+    int shown = min_i(app_total, task_cap);
+    int task_x = dx + 12 + WIN_APP_BASE * 70;
+    for (int i = 0; i < shown; i++) {
+        if (inside(x, y, (struct rect){task_x + i * 118, dy + 9, 112, 36}))
+            return ids[i];
+    }
+    if (app_total > 0 &&
+        inside(x, y, (struct rect){dx + dock_w - 76, dy + 9, 64, 36}))
+        return WIN_COUNT;
     return -1;
 }
 
@@ -1406,13 +1527,25 @@ static void terminal_send_key(int k) {
     }
 }
 
+static void activate_next_visible(void) {
+    for (int step = 1; step <= WIN_COUNT; step++) {
+        int id = (focus + step) % WIN_COUNT;
+        if (!windows[id].visible || windows[id].minimized)
+            continue;
+        if (id >= WIN_APP_BASE && !app_sessions[id - WIN_APP_BASE].used)
+            continue;
+        activate(id);
+        return;
+    }
+}
+
 static void handle_key(int k) {
     if (k == KEY_ESC) {
         running = 0;
         return;
     }
     if (k == '\t') {
-        activate((focus + 1) % WIN_COUNT);
+        activate_next_visible();
         return;
     }
     if (focus == WIN_LAUNCHER) {
@@ -1466,8 +1599,12 @@ static void handle_mouse(void) {
     }
 
     if (left && !prev_buttons) {
-        if (dock_hover >= 0) {
+        if (dock_hover == WIN_COUNT) {
+            dock_expanded = !dock_expanded;
+            desktop_dirty = 1;
+        } else if (dock_hover >= 0) {
             activate(dock_hover);
+            dock_expanded = 0;
         } else {
             int control = -1;
             int ctl_win = hit_control(pointer_x, pointer_y, &control);

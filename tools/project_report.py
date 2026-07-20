@@ -454,7 +454,9 @@ def collect_ipc_status():
 
 
 def collect_screenshots():
-    names = ["app-center", "textedit", "textedit-maximized", "paint", "calculator", "terminal-about"]
+    names = ["app-center", "textedit", "textedit-maximized", "paint", "calculator",
+             "filemanager", "filemanager-textedit", "terminal-about"]
+    names += ["many-windows", "dock-expanded"]
     rows = []
     for name in names:
         path = ROOT / "build" / "gui-smoke" / f"{name}.png"

@@ -7,6 +7,7 @@
 #define GUIAPP_MAX_W 1280
 #define GUIAPP_MAX_H 800
 #define GUIAPP_TITLE_MAX 32
+#define GUIAPP_PATH_MAX 128
 
 enum {
     GUIAPP_EVT_INIT = 1,
@@ -47,11 +48,14 @@ struct guiapp_frame {
     int32_t dirty_w;
     int32_t dirty_h;
     char title[GUIAPP_TITLE_MAX];
+    char target[GUIAPP_PATH_MAX];
+    char argument[GUIAPP_PATH_MAX];
 };
 
 enum {
     GUIAPP_FRAME_FULL = 1,
     GUIAPP_FRAME_DIRTY = 2,
+    GUIAPP_FRAME_LAUNCH = 3,
 };
 
 struct guiapp_ctx {
@@ -66,5 +70,7 @@ int guiapp_send_frame(struct guiapp_ctx *ctx, const char *title,
 int guiapp_send_dirty(struct guiapp_ctx *ctx, const char *title,
                       int width, int height, int x, int y, int dirty_w, int dirty_h,
                       const uint8_t *pixels, int stride);
+int guiapp_request_launch(struct guiapp_ctx *ctx, const char *target,
+                          const char *argument);
 
 #endif

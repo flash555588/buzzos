@@ -17,6 +17,8 @@ static int drag_scroll_axis = -1;
 static int drag_mouse_start;
 static int drag_scroll_start;
 static char status[64] = "Ready";
+static char file_path[GUIAPP_PATH_MAX] = "/fs/textedit.txt";
+static char window_title[GUIAPP_TITLE_MAX] = "TextEdit";
 
 static int clamp_int(int v, int lo, int hi) {
     if (v < lo) return lo;
@@ -26,6 +28,23 @@ static int clamp_int(int v, int lo, int hi) {
 
 static void set_status(const char *s) {
     appui_copy_text(status, s, sizeof(status));
+}
+
+static void set_path_status(const char *prefix) {
+    appui_copy_text(status, prefix, sizeof(status));
+    appui_append_text(status, file_path, sizeof(status));
+}
+
+static void set_document_path(const char *path) {
+    if (!path || path[0] != '/')
+        return;
+    appui_copy_text(file_path, path, sizeof(file_path));
+    const char *name = file_path;
+    for (int i = 0; file_path[i]; i++)
+        if (file_path[i] == '/' && file_path[i + 1])
+            name = file_path + i + 1;
+    appui_copy_text(window_title, "TextEdit - ", sizeof(window_title));
+    appui_append_text(window_title, name, sizeof(window_title));
 }
 
 static struct appui_rect editor_rect(void) {
@@ -38,9 +57,9 @@ static struct appui_rect text_clip_rect(void) {
 }
 
 static void load_file(void) {
-    int fd = open("/fs/textedit.txt", O_RDONLY);
+    int fd = open(file_path, O_RDONLY);
     if (fd < 0) {
-        set_status("No /fs/textedit.txt");
+        set_path_status("New ");
         return;
     }
     int n = read(fd, textbuf, TEXT_CAP - 1);
@@ -50,18 +69,21 @@ static void load_file(void) {
     textbuf[n] = 0;
     text_len = n;
     cursor = text_len;
-    set_status("Opened /fs/textedit.txt");
+    set_path_status("Opened ");
 }
 
 static void save_file(void) {
-    int fd = open("/fs/textedit.txt", O_WRONLY | O_CREAT | O_TRUNC);
+    int fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0) {
         set_status("Save failed");
         return;
     }
     int n = write(fd, textbuf, (size_t)text_len);
     close(fd);
-    set_status(n == text_len ? "Saved /fs/textedit.txt" : "Save failed");
+    if (n == text_len)
+        set_path_status("Saved ");
+    else
+        set_status("Save failed");
 }
 
 static void insert_char(char ch) {
@@ -358,6 +380,8 @@ int main(int argc, char **argv) {
     struct guiapp_event ev;
     if (guiapp_parse_args(argc, argv, &ctx) < 0)
         return 1;
+    if (argc > 4)
+        set_document_path(argv[4]);
     load_file();
     for (;;) {
         if (guiapp_read_event(&ctx, &ev) < 0 || ev.type == GUIAPP_EVT_CLOSE)
@@ -372,7 +396,7 @@ int main(int argc, char **argv) {
             mouse(ev.x, ev.y, ev.buttons, ev.wheel);
         }
         render();
-        if (guiapp_send_frame(&ctx, "TextEdit", w, h, pixels) < 0)
+        if (guiapp_send_frame(&ctx, window_title, w, h, pixels) < 0)
             break;
     }
     return 0;

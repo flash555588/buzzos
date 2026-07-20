@@ -17,6 +17,9 @@ The build seeds these apps into `/fs/apps`:
 /fs/apps/calculator
 /fs/apps/calculator.app
 /fs/apps/calculator.readme
+/fs/apps/filemanager
+/fs/apps/filemanager.app
+/fs/apps/filemanager.readme
 ```
 
 Current default apps:
@@ -26,12 +29,18 @@ Current default apps:
 | TextEdit | Plain text editor. The editing area resizes with the window, supports Enter, cursor movement, horizontal and vertical scrollbars, and saves to `/fs/textedit.txt`. |
 | Paint | Bitmap drawing tool. The canvas and toolbar resize with the window, with brush, eraser, line, rectangle, fill, and continuous strokes. |
 | Calculator | Expression calculator with decimals, parentheses, and normal arithmetic precedence. |
+| Files | File manager with location shortcuts, navigation history, file operations, and desktop-mediated opening in TextEdit. |
 
 ## Window Behavior
 
 The desktop supports click-to-focus and raise, title-bar dragging, edge and
 corner resizing, minimize, maximize, close, mouse wheel scrolling, draggable
 scrollbars, and app resize events.
+
+The task Dock displays titles declared by each app frame. It shows several
+tasks inline, exposes all open app windows through More, and displays the full
+title while hovering a task. The desktop supports 10 concurrent external app
+windows; the expandable Dock is independent of that capacity.
 
 ## Run It
 
@@ -48,6 +57,7 @@ apps
 apps info textedit
 apps info paint
 apps info calculator
+apps info filemanager
 help apps
 help gui
 help edit
@@ -75,6 +85,18 @@ The default apps use `/fs` for persistent state:
 
 TextEdit writes normal text to `/fs/textedit.txt`. Paint and Calculator ship
 seed files so the manifest detail panel can show state paths consistently.
+
+## Files And Cross-App Open
+
+Files starts in /fs. Use Back and Up for navigation, the Places sidebar for
+common roots, Enter or a second click to open an item, and the toolbar for
+create, rename, and confirmed delete operations. Executables in /fs/apps
+launch as GUI apps. Other regular files are opened in TextEdit.
+
+Cross-app opening uses GUIAPP_FRAME_LAUNCH. The desktop validates the target,
+creates a managed app window, and passes the document path after the GUI
+transport arguments. This keeps process creation and window ownership in the
+desktop instead of allowing apps to bypass the window manager.
 
 ## App Manifest
 
