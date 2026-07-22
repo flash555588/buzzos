@@ -1,6 +1,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "serial.h"
+#include "task.h"
 #include "user_bounds.h"
 
 __attribute__((aligned(4096))) static uint32_t page_directory[1024];
@@ -9,6 +10,16 @@ __attribute__((aligned(4096))) static uint32_t page_table_fb[KERNEL_FB_TABLES][1
 
 static uintptr_t kernel_fb_phys = 0xE0000000u;
 static uint32_t kernel_fb_size = KERNEL_FB_SIZE;
+static volatile int paging_locked;
+
+static void paging_lock(void) {
+    while (__sync_lock_test_and_set(&paging_locked, 1))
+        task_yield();
+}
+
+static void paging_unlock(void) {
+    __sync_lock_release(&paging_locked);
+}
 
 void paging_set_framebuffer(uintptr_t phys_addr, uint32_t size) {
     if (!phys_addr || !size)
@@ -28,6 +39,22 @@ static void flush_tlb(void) {
     __asm__ volatile("mov %%cr3, %%eax\nmov %%eax, %%cr3" ::: "eax", "memory");
 }
 
+static int configure_framebuffer_write_combining(void) {
+    uint32_t eax = 1, ebx, ecx, edx;
+    __asm__ volatile("cpuid"
+                     : "+a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx));
+    if (!(edx & (1u << 16)))
+        return 0;
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277u));
+    /* PWT|PCD selects PAT entry 3 for a 4 KiB PTE.  Reserve that entry for
+     * write-combining; the kernel uses this combination only for framebuffer
+     * pages. */
+    lo = (lo & 0x00FFFFFFu) | (1u << 24);
+    __asm__ volatile("wrmsr" : : "c"(0x277u), "a"(lo), "d"(hi));
+    return 1;
+}
+
 static uint32_t user_pde_first(void) {
     return USER_SPACE_START >> 22;
 }
@@ -44,6 +71,25 @@ static uint32_t pte_index(uint32_t va) {
     return (va >> 12) & 0x3FFu;
 }
 
+static uint32_t *space_page_directory(uint32_t cr3) {
+    return cr3 ? (uint32_t *)(uintptr_t)(cr3 & 0xFFFFF000u) : 0;
+}
+
+static uint32_t *ensure_user_page_table(uint32_t *pd, uint32_t pde) {
+    if (pd[pde] & PAGE_PRESENT) {
+        if (!(pd[pde] & PAGE_USER))
+            return 0;
+        return (uint32_t *)(uintptr_t)(pd[pde] & 0xFFFFF000u);
+    }
+    uintptr_t phys = pmm_alloc_pages(1);
+    if (!phys)
+        return 0;
+    uint32_t *pt = (uint32_t *)(uintptr_t)phys;
+    zero_page(pt);
+    pd[pde] = (uint32_t)phys | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    return pt;
+}
+
 static int add_overflows_u32(uint32_t a, uint32_t b, uint32_t *out) {
     if (b > 0xFFFFFFFFu - a)
         return 1;
@@ -53,6 +99,7 @@ static int add_overflows_u32(uint32_t a, uint32_t b, uint32_t *out) {
 
 void paging_init(void) {
     serial_puts("[page] setting up paging...\n");
+    int framebuffer_wc = configure_framebuffer_write_combining();
 
     for (int i = 0; i < 1024; i++) {
         page_directory[i] = 0;
@@ -73,7 +120,8 @@ void paging_init(void) {
             uint32_t fb_offset = (t * 1024u + (uint32_t)i) * PAGE_SIZE;
             if (fb_offset < kernel_fb_size) {
                 page_table_fb[t][i] = (uint32_t)(kernel_fb_phys + fb_offset) |
-                                      PAGE_PRESENT | PAGE_RW | PAGE_WT | PAGE_CD;
+                                      PAGE_PRESENT | PAGE_RW |
+                                      PAGE_WT | PAGE_CD;
             }
         }
     }
@@ -95,6 +143,8 @@ void paging_init(void) {
     __asm__ volatile("jmp 1f; 1:");
 
     serial_puts("[page] paging enabled (user accessible)\n");
+    if (framebuffer_wc)
+        serial_puts("[page] framebuffer PAT write-combining enabled\n");
 }
 
 uint32_t paging_current_cr3(void) {
@@ -121,21 +171,6 @@ uint32_t paging_create_user_space(void) {
 
     uint32_t first = user_pde_first();
     uint32_t last = user_pde_last();
-    for (uint32_t pde = first; pde <= last; pde++) {
-        uint32_t *user_pt = (uint32_t *)(uintptr_t)pmm_alloc_pages(1);
-        if (!user_pt) {
-            for (uint32_t prev = first; prev < pde; prev++) {
-                if (pd[prev] & PAGE_PRESENT)
-                    pmm_free_pages((uintptr_t)(pd[prev] & 0xFFFFF000u), 1);
-            }
-            pmm_free_pages((uintptr_t)pd, 1);
-            return 0;
-        }
-        zero_page(user_pt);
-        pd[pde] = ((uint32_t)(uintptr_t)user_pt) |
-                  PAGE_PRESENT | PAGE_RW | PAGE_USER;
-    }
-
     pd[0] = ((uint32_t)(uintptr_t)page_table_low[0]) |
             PAGE_PRESENT | PAGE_RW;
     for (uint32_t t = 1; t < KERNEL_LOW_TABLES; t++) {
@@ -150,11 +185,10 @@ uint32_t paging_create_user_space(void) {
         pd[768 + t] = ((uint32_t)(uintptr_t)page_table_low[t]) |
                       PAGE_PRESENT | PAGE_RW;
 
-    flush_tlb();
     return (uint32_t)(uintptr_t)pd;
 }
 
-int paging_map_user_range(uint32_t va, uint32_t size) {
+int paging_map_user_range_in_space(uint32_t cr3, uint32_t va, uint32_t size) {
     uint32_t end;
     if (size == 0)
         return 0;
@@ -165,25 +199,38 @@ int paging_map_user_range(uint32_t va, uint32_t size) {
 
     uint32_t start = va & ~(PAGE_SIZE - 1u);
     end = (end + PAGE_SIZE - 1u) & ~(PAGE_SIZE - 1u);
-    uint32_t *pd = (uint32_t *)(uintptr_t)paging_current_cr3();
+    uint32_t *pd = space_page_directory(cr3);
+    if (!pd)
+        return -1;
+    paging_lock();
     for (uint32_t cur = start; cur < end; cur += PAGE_SIZE) {
         uint32_t pde = pde_index(cur);
-        if (!(pd[pde] & PAGE_PRESENT))
+        uint32_t *user_pt = ensure_user_page_table(pd, pde);
+        if (!user_pt) {
+            paging_unlock();
             return -1;
-        uint32_t *user_pt = (uint32_t *)(uintptr_t)(pd[pde] & 0xFFFFF000u);
+        }
         uint32_t idx = pte_index(cur);
         if (user_pt[idx] & PAGE_PRESENT)
             continue;
         uintptr_t phys = pmm_alloc_pages(1);
-        if (!phys)
+        if (!phys) {
+            paging_unlock();
             return -1;
+        }
         uint8_t *page = (uint8_t *)phys;
         for (uint32_t i = 0; i < PAGE_SIZE; i++)
             page[i] = 0;
         user_pt[idx] = (uint32_t)phys | PAGE_PRESENT | PAGE_RW | PAGE_USER;
     }
-    flush_tlb();
+    if (paging_current_cr3() == cr3)
+        flush_tlb();
+    paging_unlock();
     return 0;
+}
+
+int paging_map_user_range(uint32_t va, uint32_t size) {
+    return paging_map_user_range_in_space(paging_current_cr3(), va, size);
 }
 
 int paging_user_range_accessible(uint32_t va, uint32_t size, int write) {
@@ -214,7 +261,8 @@ int paging_user_range_accessible(uint32_t va, uint32_t size, int write) {
     return 1;
 }
 
-int paging_set_user_range_writable(uint32_t va, uint32_t size, int writable) {
+int paging_set_user_range_writable_in_space(uint32_t cr3, uint32_t va,
+                                            uint32_t size, int writable) {
     if (size == 0)
         return 0;
     uint32_t last;
@@ -222,17 +270,24 @@ int paging_set_user_range_writable(uint32_t va, uint32_t size, int writable) {
         last >= USER_SPACE_END)
         return -1;
 
-    uint32_t *pd = (uint32_t *)(uintptr_t)paging_current_cr3();
+    uint32_t *pd = space_page_directory(cr3);
+    if (!pd)
+        return -1;
+    paging_lock();
     uint32_t cur = va & ~(PAGE_SIZE - 1u);
     uint32_t end_page = last & ~(PAGE_SIZE - 1u);
     for (;;) {
         uint32_t pde = pd[pde_index(cur)];
-        if (!(pde & PAGE_PRESENT) || !(pde & PAGE_USER))
+        if (!(pde & PAGE_PRESENT) || !(pde & PAGE_USER)) {
+            paging_unlock();
             return -1;
+        }
         uint32_t *pt = (uint32_t *)(uintptr_t)(pde & 0xFFFFF000u);
         uint32_t idx = pte_index(cur);
-        if (!(pt[idx] & PAGE_PRESENT) || !(pt[idx] & PAGE_USER))
+        if (!(pt[idx] & PAGE_PRESENT) || !(pt[idx] & PAGE_USER)) {
+            paging_unlock();
             return -1;
+        }
         if (writable)
             pt[idx] |= PAGE_RW;
         else
@@ -241,7 +296,92 @@ int paging_set_user_range_writable(uint32_t va, uint32_t size, int writable) {
             break;
         cur += PAGE_SIZE;
     }
-    flush_tlb();
+    if (paging_current_cr3() == cr3)
+        flush_tlb();
+    paging_unlock();
+    return 0;
+}
+
+int paging_set_user_range_writable(uint32_t va, uint32_t size, int writable) {
+    return paging_set_user_range_writable_in_space(
+        paging_current_cr3(), va, size, writable);
+}
+
+int paging_copy_to_user_space(uint32_t cr3, uint32_t va,
+                              const void *src_ptr, uint32_t size) {
+    if (size == 0)
+        return 0;
+    uint32_t last;
+    if (!src_ptr || va < USER_SPACE_START ||
+        add_overflows_u32(va, size - 1u, &last) || last >= USER_SPACE_END)
+        return -1;
+    uint32_t *pd = space_page_directory(cr3);
+    if (!pd)
+        return -1;
+    const uint8_t *src = (const uint8_t *)src_ptr;
+    paging_lock();
+    uint32_t done = 0;
+    while (done < size) {
+        uint32_t cur = va + done;
+        uint32_t pde = pd[pde_index(cur)];
+        if (!(pde & PAGE_PRESENT) || !(pde & PAGE_USER)) {
+            paging_unlock();
+            return -1;
+        }
+        uint32_t *pt = (uint32_t *)(uintptr_t)(pde & 0xFFFFF000u);
+        uint32_t pte = pt[pte_index(cur)];
+        if (!(pte & PAGE_PRESENT) || !(pte & PAGE_USER)) {
+            paging_unlock();
+            return -1;
+        }
+        uint32_t offset = cur & (PAGE_SIZE - 1u);
+        uint32_t chunk = PAGE_SIZE - offset;
+        if (chunk > size - done)
+            chunk = size - done;
+        uint8_t *dst = (uint8_t *)(uintptr_t)(pte & 0xFFFFF000u) + offset;
+        for (uint32_t i = 0; i < chunk; i++)
+            dst[i] = src[done + i];
+        done += chunk;
+    }
+    paging_unlock();
+    return 0;
+}
+
+int paging_zero_user_space(uint32_t cr3, uint32_t va, uint32_t size) {
+    if (size == 0)
+        return 0;
+    uint32_t last;
+    if (va < USER_SPACE_START ||
+        add_overflows_u32(va, size - 1u, &last) || last >= USER_SPACE_END)
+        return -1;
+    uint32_t *pd = space_page_directory(cr3);
+    if (!pd)
+        return -1;
+    paging_lock();
+    uint32_t done = 0;
+    while (done < size) {
+        uint32_t cur = va + done;
+        uint32_t pde = pd[pde_index(cur)];
+        if (!(pde & PAGE_PRESENT) || !(pde & PAGE_USER)) {
+            paging_unlock();
+            return -1;
+        }
+        uint32_t *pt = (uint32_t *)(uintptr_t)(pde & 0xFFFFF000u);
+        uint32_t pte = pt[pte_index(cur)];
+        if (!(pte & PAGE_PRESENT) || !(pte & PAGE_USER)) {
+            paging_unlock();
+            return -1;
+        }
+        uint32_t offset = cur & (PAGE_SIZE - 1u);
+        uint32_t chunk = PAGE_SIZE - offset;
+        if (chunk > size - done)
+            chunk = size - done;
+        uint8_t *dst = (uint8_t *)(uintptr_t)(pte & 0xFFFFF000u) + offset;
+        for (uint32_t i = 0; i < chunk; i++)
+            dst[i] = 0;
+        done += chunk;
+    }
+    paging_unlock();
     return 0;
 }
 
@@ -250,6 +390,7 @@ void paging_destroy_user_space(uint32_t cr3) {
         return;
 
     uint32_t *pd = (uint32_t *)(uintptr_t)cr3;
+    paging_lock();
     uint32_t first = user_pde_first();
     uint32_t last = user_pde_last();
     for (uint32_t pde = first; pde <= last; pde++) {
@@ -268,6 +409,7 @@ void paging_destroy_user_space(uint32_t cr3) {
     }
 
     pmm_free_pages((uintptr_t)pd, 1);
+    paging_unlock();
 }
 
 int paging_map_shared_pages(uint32_t va, const uintptr_t *pages, uint32_t count) {
@@ -277,13 +419,13 @@ int paging_map_shared_pages(uint32_t va, const uintptr_t *pages, uint32_t count)
     if (va < USER_SHM_START || bytes > USER_SHM_END - va)
         return -1;
     uint32_t *pd = (uint32_t *)(uintptr_t)paging_current_cr3();
+    paging_lock();
     uint32_t mapped = 0;
     for (; mapped < count; mapped++) {
         uint32_t cur = va + mapped * PAGE_SIZE;
-        uint32_t pde = pd[pde_index(cur)];
-        if (!(pde & PAGE_PRESENT) || !(pde & PAGE_USER))
+        uint32_t *pt = ensure_user_page_table(pd, pde_index(cur));
+        if (!pt)
             break;
-        uint32_t *pt = (uint32_t *)(uintptr_t)(pde & 0xFFFFF000u);
         uint32_t idx = pte_index(cur);
         if (pt[idx] & PAGE_PRESENT)
             break;
@@ -298,9 +440,11 @@ int paging_map_shared_pages(uint32_t va, const uintptr_t *pages, uint32_t count)
             pt[pte_index(cur)] = 0;
         }
         flush_tlb();
+        paging_unlock();
         return -1;
     }
     flush_tlb();
+    paging_unlock();
     return 0;
 }
 
@@ -308,18 +452,24 @@ int paging_unmap_shared_pages(uint32_t cr3, uint32_t va, uint32_t count) {
     if (!cr3 || !count || (va & (PAGE_SIZE - 1u)))
         return -1;
     uint32_t *pd = (uint32_t *)(uintptr_t)cr3;
+    paging_lock();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cur = va + i * PAGE_SIZE;
         uint32_t pde = pd[pde_index(cur)];
-        if (!(pde & PAGE_PRESENT))
+        if (!(pde & PAGE_PRESENT)) {
+            paging_unlock();
             return -1;
+        }
         uint32_t *pt = (uint32_t *)(uintptr_t)(pde & 0xFFFFF000u);
         uint32_t idx = pte_index(cur);
-        if (!(pt[idx] & PAGE_PRESENT) || !(pt[idx] & PAGE_SHARED))
+        if (!(pt[idx] & PAGE_PRESENT) || !(pt[idx] & PAGE_SHARED)) {
+            paging_unlock();
             return -1;
+        }
         pt[idx] = 0;
     }
     if (paging_current_cr3() == cr3)
         flush_tlb();
+    paging_unlock();
     return 0;
 }

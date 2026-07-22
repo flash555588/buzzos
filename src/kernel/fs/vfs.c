@@ -15,15 +15,12 @@ static struct vfs_mount mounts[MAX_MOUNTS];
 static volatile int vfs_locked;
 
 void vfs_lock(void) {
-    task_preempt_disable();
-    while (__sync_lock_test_and_set(&vfs_locked, 1)) {
-        __asm__ volatile("pause");
-    }
+    while (__sync_lock_test_and_set(&vfs_locked, 1))
+        task_yield();
 }
 
 void vfs_unlock(void) {
     __sync_lock_release(&vfs_locked);
-    task_preempt_enable();
 }
 
 int nameeq(const char *name, const char *part, int len) {

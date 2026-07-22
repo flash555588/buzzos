@@ -112,6 +112,7 @@ CAT_ELF := $(BUILD)/user/cat.elf
 ECHO_ELF := $(BUILD)/user/echo.elf
 FAULTTEST_ELF := $(BUILD)/user/faulttest.elf
 SOCKETLEAK_ELF := $(BUILD)/user/socketleak.elf
+NETSTRESS_ELF := $(BUILD)/user/netstress.elf
 HEAPTEST_ELF := $(BUILD)/user/heaptest.elf
 AUDIOTEST_ELF := $(BUILD)/user/audiotest.elf
 NSPORTTEST_ELF := $(BUILD)/user/nsporttest.elf
@@ -137,8 +138,8 @@ BINJGB_FLAGS := -I$(BINJGB_DIR) -include stdbool.h -DNDEBUG \
 	-Wno-unused-function -Wno-unused-variable -Wno-unused-parameter
 BINJGB_OBJS := $(BUILD)/user/binjgb_common.o $(BUILD)/user/binjgb_emulator.o
 DEMO_WAV := $(BUILD)/assets/buzzos-demo.wav
-USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(GUI_APP_ELFS)
-USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
+USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(NETSTRESS_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(GUI_APP_ELFS)
+USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/netstress.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
 USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c
 USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/appui.h src/kernel/drv/font_builtin.h
 INITRD_H := $(GENERATED_DIR)/initrd.h
@@ -150,7 +151,7 @@ FONT_H := src/kernel/drv/font_builtin.h
 UNICODE_FONT_H := src/kernel/drv/font_unicode_data.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
-.PHONY: all clean help doctor run run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke gui-smoke report verify image-reset-fs new-app doom-install gameboy-install
+.PHONY: all clean help doctor run run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify image-reset-fs new-app doom-install gameboy-install
 
 # These objects are prerequisites of pattern-built user ELFs, not disposable
 # intermediates. Keeping them makes source timestamp changes rebuild reliably.
@@ -159,7 +160,7 @@ GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).ap
 	$(BUILD)/user/faulttest.o $(BUILD)/user/socketleak.o $(BUILD)/user/heaptest.o \
 	$(BUILD)/user/audiotest.o \
 	$(BUILD)/user/nsporttest.o $(NETSURF_PORT_OBJ) \
-	$(LODEPNG_OBJ) $(BINJGB_OBJS)
+	$(LODEPNG_OBJ) $(BINJGB_OBJS) $(BUILD)/user/netstress.o
 
 all: $(IMAGE)
 
@@ -391,7 +392,7 @@ $(DEMO_WAV): tools/gen_demo_wav.py
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)/assets' | Out-Null"
 	$(PYTHON) tools/gen_demo_wav.py --out $@
 
-$(INITRD_H): $(USER_ELFS) $(DEMO_WAV) tools/mkinitrd.py
+$(INITRD_H): Makefile $(USER_ELFS) $(DEMO_WAV) tools/mkinitrd.py
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
 	$(PYTHON) tools/mkinitrd.py /hello $(USER_ELF) /bin/sh $(SHELL_ELF) \
 		/bin/nano $(NANO_ELF) /bin/basm $(BASM_ELF) /bin/gui $(GUI_ELF) \
@@ -404,7 +405,7 @@ $(INITRD_H): $(USER_ELFS) $(DEMO_WAV) tools/mkinitrd.py
 		/bin/netsurf $(NETSURF_ELF) \
 		/bin/browser $(NETSURF_ELF) \
 		/share/buzzos-demo.wav $(DEMO_WAV) \
-		$(foreach app,$(filter-out browser,$(GUI_APP_NAMES)),/bin/$(app) $(BUILD)/user/$(app).elf) > $@
+		/bin/netstress $(NETSTRESS_ELF) $(foreach app,$(filter-out browser,$(GUI_APP_NAMES)),/bin/$(app) $(BUILD)/user/$(app).elf) > $@
 
 $(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META) $(BASM_EXAMPLE) $(BCC_EXAMPLE) $(UTF8_EXAMPLE)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
@@ -453,6 +454,9 @@ fs-repair: $(IMAGE)
 
 smoke: $(IMAGE)
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)"
+
+net-stress: $(IMAGE)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/net-stress.ps1 -Image $(IMAGE) -Qemu "$(QEMU)"
 
 fs-check-smoke: smoke
 	$(PYTHON) tools/check_minifs.py --image "$(FS_TEST_IMAGE)"

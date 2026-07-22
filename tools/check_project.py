@@ -236,9 +236,9 @@ def check_user_fault_isolation():
         if snippet not in bounds_h + "\n" + user_c:
             fail(f"private user trampoline support is missing: {snippet}")
     for snippet in [
-        "paging_map_user_range(USER_TRAMPOLINE_BASE",
-        "user_install_trampoline()",
-        "paging_set_user_range_writable(USER_TRAMPOLINE_BASE",
+        "paging_map_user_range_in_space(",
+        "user_install_trampoline_in_space(cr3)",
+        "paging_set_user_range_writable_in_space(",
     ]:
         if snippet not in exec_c:
             fail(f"exec trampoline setup is missing: {snippet}")
@@ -343,7 +343,7 @@ def check_elf_loader_hardening():
     smoke_ps1 = read_text("scripts/smoke.ps1")
 
     for snippet in [
-        "uint32_t elf_load(const uint8_t *buf, size_t size, uint32_t *image_end_out)",
+        "uint32_t elf_load_into_space(uint32_t cr3",
         "static int add_overflows_u32",
         "static int file_range_ok",
         "static int user_range_ok",
@@ -360,11 +360,16 @@ def check_elf_loader_hardening():
         if snippet not in elf_c:
             fail(f"ELF loader hardening is missing: {snippet}")
 
-    if "uint32_t elf_load(const uint8_t *buf, size_t size, uint32_t *image_end_out);" not in elf_h:
-        fail("elf.h does not expose the size-aware elf_load signature")
+    for snippet in [
+        "uint32_t elf_load_into_space(uint32_t cr3",
+        "uint32_t elf_load_file_into_space(uint32_t cr3",
+    ]:
+        if snippet not in elf_h:
+            fail(f"elf.h does not expose the address-space ELF loader: {snippet}")
 
     for snippet in [
-        "elf_load(elf_data, elf_size, &image_end)",
+        "elf_load_into_space(",
+        "elf_load_file_into_space(",
         "paging_destroy_user_space(proc_cr3)",
         'serial_puts("[exec] bad ELF\\n")',
     ]:
@@ -1078,7 +1083,7 @@ def check_shell_pipeline():
         "flags & 2u",
         "flags & 4u",
         "current_fd_owner()",
-        "exec_start_args_with_fds",
+        "exec_start_file_args_with_fds",
         "inherit_stdio && !inherit_all",
     ]:
         if snippet not in sys_proc:

@@ -248,6 +248,7 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     ramfs_register("/bin/echo", initrd_bin_echo_data, INITRD_BIN_ECHO_SIZE);
     ramfs_register("/bin/faulttest", initrd_bin_faulttest_data, INITRD_BIN_FAULTTEST_SIZE);
     ramfs_register("/bin/socketleak", initrd_bin_socketleak_data, INITRD_BIN_SOCKETLEAK_SIZE);
+    ramfs_register("/bin/netstress", initrd_bin_netstress_data, INITRD_BIN_NETSTRESS_SIZE);
     ramfs_register("/bin/heaptest", initrd_bin_heaptest_data, INITRD_BIN_HEAPTEST_SIZE);
     ramfs_register("/bin/audiotest", initrd_bin_audiotest_data, INITRD_BIN_AUDIOTEST_SIZE);
     ramfs_register("/bin/nsporttest", initrd_bin_nsporttest_data, INITRD_BIN_NSPORTTEST_SIZE);

@@ -16,8 +16,14 @@ void paging_switch(uint32_t cr3);
 uint32_t paging_create_user_space(void);
 void paging_destroy_user_space(uint32_t cr3);
 int paging_map_user_range(uint32_t va, uint32_t size);
+int paging_map_user_range_in_space(uint32_t cr3, uint32_t va, uint32_t size);
 int paging_user_range_accessible(uint32_t va, uint32_t size, int write);
 int paging_set_user_range_writable(uint32_t va, uint32_t size, int writable);
+int paging_set_user_range_writable_in_space(uint32_t cr3, uint32_t va,
+                                            uint32_t size, int writable);
+int paging_copy_to_user_space(uint32_t cr3, uint32_t va,
+                              const void *src, uint32_t size);
+int paging_zero_user_space(uint32_t cr3, uint32_t va, uint32_t size);
 int paging_map_shared_pages(uint32_t va, const uintptr_t *pages, uint32_t count);
 int paging_unmap_shared_pages(uint32_t cr3, uint32_t va, uint32_t count);
 

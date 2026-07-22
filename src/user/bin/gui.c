@@ -78,7 +78,10 @@ struct app_session {
     volatile int closing;
     uint32_t shm_token;
     struct guiapp_shared_surface *shared;
-    int front_buffer;
+    volatile int dirty_lock;
+    int dirty_valid;
+    struct rect dirty_rect;
+    uint32_t last_sequence;
     uint16_t xmap[APP_SURFACE_MAX_W];
     uint16_t ymap[APP_SURFACE_MAX_H];
     char title[GUIAPP_TITLE_MAX];
@@ -139,8 +142,10 @@ static unsigned int tick;
 static unsigned int last_render_tick;
 static volatile int desktop_dirty = 1;
 static volatile uint32_t app_frame_dirty_mask;
-static int partial_app_render;
 static uint8_t scaled_scanline[APP_SURFACE_MAX_W];
+static struct rect compose_clip = {0, 0, MAX_SW, MAX_SH};
+static struct rect pending_damage;
+static int pending_damage_valid;
 static uint32_t last_wheel_seq;
 static int last_wheel_value;
 static int ime_enabled;
@@ -185,6 +190,67 @@ static struct rect intersect_rect(struct rect a, struct rect b) {
     if (x2 <= x1 || y2 <= y1)
         return (struct rect){0, 0, 0, 0};
     return (struct rect){x1, y1, x2 - x1, y2 - y1};
+}
+
+static struct rect union_rect(struct rect a, struct rect b) {
+    if (a.w <= 0 || a.h <= 0) return b;
+    if (b.w <= 0 || b.h <= 0) return a;
+    int x1 = min_i(a.x, b.x);
+    int y1 = min_i(a.y, b.y);
+    int x2 = max_i(a.x + a.w, b.x + b.w);
+    int y2 = max_i(a.y + a.h, b.y + b.h);
+    return (struct rect){x1, y1, x2 - x1, y2 - y1};
+}
+
+static void queue_damage(struct rect area) {
+    area = intersect_rect(area, (struct rect){0, 0, sw, sh});
+    if (area.w <= 0 || area.h <= 0)
+        return;
+    pending_damage = pending_damage_valid
+        ? union_rect(pending_damage, area) : area;
+    pending_damage_valid = 1;
+}
+
+static int take_damage(struct rect *out) {
+    if (!pending_damage_valid)
+        return 0;
+    *out = pending_damage;
+    pending_damage_valid = 0;
+    pending_damage = (struct rect){0, 0, 0, 0};
+    return 1;
+}
+
+static void app_dirty_lock(int slot) {
+    while (__sync_lock_test_and_set(&app_sessions[slot].dirty_lock, 1))
+        yield();
+}
+
+static void app_dirty_unlock(int slot) {
+    __sync_lock_release(&app_sessions[slot].dirty_lock);
+}
+
+static void app_note_dirty(int slot, struct rect area) {
+    if (slot < 0 || slot >= MAX_GUI_APPS || area.w <= 0 || area.h <= 0)
+        return;
+    app_dirty_lock(slot);
+    app_sessions[slot].dirty_rect = app_sessions[slot].dirty_valid
+        ? union_rect(app_sessions[slot].dirty_rect, area) : area;
+    app_sessions[slot].dirty_valid = 1;
+    app_dirty_unlock(slot);
+    __sync_fetch_and_or(&app_frame_dirty_mask, 1u << slot);
+}
+
+static int app_take_dirty(int slot, struct rect *out) {
+    int valid;
+    app_dirty_lock(slot);
+    valid = app_sessions[slot].dirty_valid;
+    if (valid) {
+        *out = app_sessions[slot].dirty_rect;
+        app_sessions[slot].dirty_valid = 0;
+        app_sessions[slot].dirty_rect = (struct rect){0, 0, 0, 0};
+    }
+    app_dirty_unlock(slot);
+    return valid;
 }
 
 static void copy_text(char *dst, const char *src, size_t cap) {
@@ -299,6 +365,7 @@ static void fill(struct rect r, int color) {
     if (r.y < 0) { r.h += r.y; r.y = 0; }
     if (r.x + r.w > sw) r.w = sw - r.x;
     if (r.y + r.h > sh) r.h = sh - r.y;
+    r = intersect_rect(r, compose_clip);
     if (r.w <= 0 || r.h <= 0)
         return;
     for (int yy = 0; yy < r.h; yy++) {
@@ -308,7 +375,8 @@ static void fill(struct rect r, int color) {
 }
 
 static void pixel(int x, int y, int color) {
-    if (x >= 0 && y >= 0 && x < sw && y < sh)
+    if (x >= 0 && y >= 0 && x < sw && y < sh &&
+        inside(x, y, compose_clip))
         fb[y * sw + x] = (uint8_t)color;
 }
 
@@ -756,37 +824,61 @@ static int app_read_frame(int slot) {
     if (frame.width <= 0 || frame.height <= 0 ||
         frame.width > APP_SURFACE_MAX_W || frame.height > APP_SURFACE_MAX_H)
         return -1;
-    if ((frame.type != GUIAPP_FRAME_SHARED && frame.type != GUIAPP_FRAME_SCALED) ||
-        frame.buffer_index < 0 || frame.buffer_index >= GUIAPP_SHARED_BUFFERS ||
+    if ((frame.type != GUIAPP_FRAME_FULL &&
+         frame.type != GUIAPP_FRAME_DIRTY &&
+         frame.type != GUIAPP_FRAME_SCALED) ||
         !app_sessions[slot].shared)
         return -1;
-    if (frame.type == GUIAPP_FRAME_SCALED &&
+    frame.title[GUIAPP_TITLE_MAX - 1] = 0;
+    if ((frame.type == GUIAPP_FRAME_SCALED ||
+         frame.type == GUIAPP_FRAME_DIRTY) &&
         (frame.dirty_w <= 0 || frame.dirty_h <= 0 ||
          frame.dirty_w > APP_SURFACE_MAX_W || frame.dirty_h > APP_SURFACE_MAX_H))
         return -1;
     int scaled = frame.type == GUIAPP_FRAME_SCALED;
     int source_w = scaled ? frame.dirty_w : frame.width;
     int source_h = scaled ? frame.dirty_h : frame.height;
+    if ((uint32_t)source_w >
+        app_sessions[slot].shared->capacity_pixels / (uint32_t)source_h)
+        return -1;
+    uint32_t shared_sequence = app_sessions[slot].shared->sequence;
+    if ((shared_sequence & 1u) || shared_sequence != frame.sequence)
+        return 0; /* A newer notification in the pipe describes the surface. */
+    if (app_sessions[slot].shared->width != (uint32_t)source_w ||
+        app_sessions[slot].shared->height != (uint32_t)source_h)
+        return -1;
+    if (frame.type == GUIAPP_FRAME_DIRTY &&
+        (app_sessions[slot].scaled_surface ||
+         app_sessions[slot].surface_w != frame.width ||
+         app_sessions[slot].surface_h != frame.height ||
+         frame.x < 0 || frame.y < 0 ||
+         frame.x + frame.dirty_w > frame.width ||
+         frame.y + frame.dirty_h > frame.height))
+        return -1;
     int full_change = app_sessions[slot].surface_w != frame.width ||
         app_sessions[slot].surface_h != frame.height ||
         app_sessions[slot].scaled_surface != scaled ||
         app_sessions[slot].source_w != source_w ||
         app_sessions[slot].source_h != source_h ||
         strcmp(app_sessions[slot].title, frame.title) != 0;
-    app_sessions[slot].front_buffer = frame.buffer_index;
     app_sessions[slot].surface_w = frame.width;
     app_sessions[slot].surface_h = frame.height;
     app_sessions[slot].scaled_surface = scaled;
     app_sessions[slot].source_w = source_w;
     app_sessions[slot].source_h = source_h;
+    app_sessions[slot].last_sequence = frame.sequence;
     copy_text(app_sessions[slot].title, frame.title, sizeof(app_sessions[slot].title));
     windows[WIN_APP_BASE + slot].title = app_sessions[slot].title[0]
         ? app_sessions[slot].title : "Application";
     clamp_scroll(WIN_APP_BASE + slot);
-    if (full_change)
+    if (full_change) {
         desktop_dirty = 1;
-    else
-        __sync_fetch_and_or(&app_frame_dirty_mask, 1u << slot);
+    } else {
+        struct rect dirty = frame.type == GUIAPP_FRAME_DIRTY
+            ? (struct rect){frame.x, frame.y, frame.dirty_w, frame.dirty_h}
+            : (struct rect){0, 0, source_w, source_h};
+        app_note_dirty(slot, dirty);
+    }
     return 0;
 }
 
@@ -859,15 +951,17 @@ static void run_app_with_arg(const char *path, const char *argument) {
     }
 
     struct shm_mapping mapping;
-    if (shm_create(GUIAPP_SHARED_SIZE, &mapping) < 0) {
+    uint32_t surface_pixels = (uint32_t)sw * (uint32_t)sh;
+    if (shm_create(GUIAPP_SHARED_SIZE_FOR_PIXELS(surface_pixels), &mapping) < 0) {
         term_log("shared surface failed");
         return;
     }
     struct guiapp_shared_surface *shared =
         (struct guiapp_shared_surface *)mapping.address;
-    shared->front = 0;
-    shared->reader = 0xFFFFFFFFu;
     shared->sequence = 0;
+    shared->capacity_pixels = surface_pixels;
+    shared->width = 0;
+    shared->height = 0;
 
     int ev_pipe[2] = {-1, -1};
     int frame_pipe[2] = {-1, -1};
@@ -933,7 +1027,10 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].closing = 0;
     app_sessions[slot].shm_token = mapping.token;
     app_sessions[slot].shared = shared;
-    app_sessions[slot].front_buffer = 0;
+    app_sessions[slot].dirty_lock = 0;
+    app_sessions[slot].dirty_valid = 0;
+    app_sessions[slot].dirty_rect = (struct rect){0, 0, 0, 0};
+    app_sessions[slot].last_sequence = 0;
     copy_text(app_sessions[slot].title, "Application", sizeof(app_sessions[slot].title));
 
     app_sessions[slot].reader_tid = spawn(app_reader_functions[slot]);
@@ -1359,8 +1456,7 @@ static void draw_app_window(int id) {
     if (slot < 0 || !app_sessions[slot].used ||
         !windows[id].visible || windows[id].minimized)
         return;
-    if (!partial_app_render)
-        draw_window_frame(id);
+    draw_window_frame(id);
     struct rect c = content_rect(id);
     if (!app_sessions[slot].scaled_surface)
         fill(c, gray(2));
@@ -1374,33 +1470,25 @@ static void draw_app_window(int id) {
     struct guiapp_shared_surface *shared = app_sessions[slot].shared;
     if (!shared || aw <= 0 || ah <= 0)
         return;
-    uint32_t front = shared->front;
-    if (front >= GUIAPP_SHARED_BUFFERS)
+    uint32_t sequence = shared->sequence;
+    if (sequence & 1u)
         return;
-    shared->reader = front;
     __sync_synchronize();
-    if (shared->front != front) {
-        front = shared->front;
-        shared->reader = front;
-        __sync_synchronize();
-    }
     const uint8_t *pixels = (const uint8_t *)shared +
-        GUIAPP_SHARED_HEADER_SIZE + front * GUIAPP_SHARED_PIXELS;
+        GUIAPP_SHARED_HEADER_SIZE;
     if (app_sessions[slot].scaled_surface && source_w > 0 && source_h > 0) {
         struct rect view = scaled_view_rect(id, slot);
         int vw = view.w;
         int vh = view.h;
         int dx = view.x;
         int dy = view.y;
-        if (!partial_app_render) {
-            int right = ox + aw;
-            int bottom = oy + ah;
-            fill((struct rect){ox, oy, aw, dy - oy}, gray(0));
-            fill((struct rect){ox, dy + vh, aw, bottom - (dy + vh)}, gray(0));
-            fill((struct rect){ox, dy, dx - ox, vh}, gray(0));
-            fill((struct rect){dx + vw, dy, right - (dx + vw), vh}, gray(0));
-        }
-        struct rect visible = intersect_rect(view, clip);
+        int right = ox + aw;
+        int bottom = oy + ah;
+        fill((struct rect){ox, oy, aw, dy - oy}, gray(0));
+        fill((struct rect){ox, dy + vh, aw, bottom - (dy + vh)}, gray(0));
+        fill((struct rect){ox, dy, dx - ox, vh}, gray(0));
+        fill((struct rect){dx + vw, dy, right - (dx + vw), vh}, gray(0));
+        struct rect visible = intersect_rect(intersect_rect(view, clip), compose_clip);
         if (app_sessions[slot].scale_map_w != vw ||
             app_sessions[slot].scale_map_h != vh ||
             app_sessions[slot].scale_source_w != source_w ||
@@ -1458,10 +1546,12 @@ static void draw_app_window(int id) {
             }
         }
         __sync_synchronize();
-        shared->reader = 0xFFFFFFFFu;
+        if (shared->sequence != sequence)
+            app_note_dirty(slot, (struct rect){0, 0, source_w, source_h});
         return;
     }
-    struct rect visible = intersect_rect((struct rect){ox, oy, aw, ah}, clip);
+    struct rect visible = intersect_rect(
+        intersect_rect((struct rect){ox, oy, aw, ah}, clip), compose_clip);
     if (visible.w > 0 && visible.h > 0) {
         int sx = visible.x - ox;
         int sy = visible.y - oy;
@@ -1470,7 +1560,8 @@ static void draw_app_window(int id) {
                    pixels + (sy + y) * aw + sx, (size_t)visible.w);
     }
     __sync_synchronize();
-    shared->reader = 0xFFFFFFFFu;
+    if (shared->sequence != sequence)
+        app_note_dirty(slot, (struct rect){0, 0, aw, ah});
 }
 
 static int collect_open_apps(int ids[MAX_GUI_APPS]) {
@@ -1642,7 +1733,7 @@ static void draw_pointer(void) {
     }
 }
 
-static void render(void) {
+static void compose_scene(void) {
     draw_background();
     draw_topbar();
     for (int i = 0; i < WIN_COUNT; i++) {
@@ -1660,43 +1751,53 @@ static void render(void) {
     draw_ime();
     draw_context_menu();
     draw_pointer();
-    fb_blit(0, 0, sw, sh, fb);
 }
 
-static int render_app_partial(int slot) {
+static int render_region(struct rect area) {
+    area = intersect_rect(area, (struct rect){0, 0, sw, sh});
+    if (area.w <= 0 || area.h <= 0)
+        return 0;
+    compose_clip = area;
+    compose_scene();
+    compose_clip = (struct rect){0, 0, sw, sh};
+    return fb_blit_stride(area.x, area.y, area.w, area.h,
+                          fb + area.y * sw + area.x, sw);
+}
+
+static void render(void) {
+    (void)render_region((struct rect){0, 0, sw, sh});
+}
+
+static struct rect app_damage_to_screen(int slot, struct rect dirty) {
     int id = WIN_APP_BASE + slot;
     if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used ||
         !windows[id].visible || windows[id].minimized)
-        return -1;
-    /* Partial composition is safe only for the uppermost window. Covered
-     * applications fall back to normal z-ordered desktop composition. */
-    int top = -1;
-    for (int zi = WIN_COUNT - 1; zi >= 0; zi--) {
-        int candidate = z_order[zi];
-        if (windows[candidate].visible && !windows[candidate].minimized) {
-            top = candidate;
-            break;
-        }
+        return (struct rect){0, 0, 0, 0};
+    struct rect content = content_rect(id);
+    if (!app_sessions[slot].scaled_surface) {
+        struct rect area = {
+            content.x + dirty.x, content.y + dirty.y, dirty.w, dirty.h
+        };
+        return intersect_rect(area,
+            intersect_rect(content, (struct rect){0, 0, sw, sh}));
     }
-    if (top != id) return -1;
-    partial_app_render = 1;
-    draw_app_window(id);
-    partial_app_render = 0;
-    draw_dock();
-    draw_ime();
-    draw_context_menu();
-    draw_pointer();
-    /* The frame and title bar are unchanged for an ordinary app frame.  Only
-     * move the content pixels; mouse/window operations request a full desktop
-     * redraw separately. */
-    struct rect area = app_sessions[slot].scaled_surface
-        ? intersect_rect(scaled_view_rect(id, slot),
-                         intersect_rect(content_rect(id),
-                                        (struct rect){0, 0, sw, sh}))
-        : intersect_rect(content_rect(id), (struct rect){0, 0, sw, sh});
-    if (area.w <= 0 || area.h <= 0) return 0;
-    return fb_blit_stride(area.x, area.y, area.w, area.h,
-                          fb + area.y * sw + area.x, sw);
+    int source_w = app_sessions[slot].source_w;
+    int source_h = app_sessions[slot].source_h;
+    if (source_w <= 0 || source_h <= 0)
+        return (struct rect){0, 0, 0, 0};
+    dirty = intersect_rect(dirty, (struct rect){0, 0, source_w, source_h});
+    if (dirty.w <= 0 || dirty.h <= 0)
+        return (struct rect){0, 0, 0, 0};
+    struct rect view = scaled_view_rect(id, slot);
+    int x1 = view.x + dirty.x * view.w / source_w;
+    int y1 = view.y + dirty.y * view.h / source_h;
+    int x2 = view.x +
+        ((dirty.x + dirty.w) * view.w + source_w - 1) / source_w;
+    int y2 = view.y +
+        ((dirty.y + dirty.h) * view.h + source_h - 1) / source_h;
+    struct rect area = {x1 - 1, y1 - 1, x2 - x1 + 2, y2 - y1 + 2};
+    return intersect_rect(area,
+        intersect_rect(view, (struct rect){0, 0, sw, sh}));
 }
 
 static int top_window_at(int x, int y) {
@@ -2234,14 +2335,23 @@ static void handle_mouse(void) {
     struct mouse_state ms;
     if (mouse_get(&ms) < 0)
         return;
-    if (ms.x != pointer_x || ms.y != pointer_y ||
-        ms.buttons != prev_buttons || ms.wheel_seq != last_wheel_seq)
+    int old_pointer_x = pointer_x;
+    int old_pointer_y = pointer_y;
+    int old_dock_hover = dock_hover;
+    int pointer_moved = ms.x != pointer_x || ms.y != pointer_y;
+    if (ms.buttons != prev_buttons || ms.wheel_seq != last_wheel_seq)
         desktop_dirty = 1;
     pointer_x = ms.x;
     pointer_y = ms.y;
+    if (pointer_moved) {
+        queue_damage((struct rect){old_pointer_x - 1, old_pointer_y - 1, 18, 18});
+        queue_damage((struct rect){pointer_x - 1, pointer_y - 1, 18, 18});
+    }
     int left = ms.buttons & 1;
     int right = ms.buttons & 2;
     dock_hover = hit_dock(pointer_x, pointer_y);
+    if (dock_hover != old_dock_hover)
+        desktop_dirty = 1;
 
     if (right && !(prev_buttons & 2)) {
         int target = hit_window(pointer_x, pointer_y);
@@ -2410,11 +2520,17 @@ static void handle_mouse(void) {
     }
     if (left && term_selecting) {
         terminal_position_at(pointer_x, pointer_y, &term_select_row, &term_select_pos);
+        queue_damage(windows[WIN_TERMINAL].r);
         prev_buttons = ms.buttons;
         return;
     }
     if (left && resize_win >= 0) {
+        struct rect old = windows[resize_win].r;
         apply_resize(resize_win, pointer_x, pointer_y);
+        struct rect now = windows[resize_win].r;
+        queue_damage(union_rect(
+            (struct rect){old.x, old.y, old.w + 6, old.h + 6},
+            (struct rect){now.x, now.y, now.w + 6, now.h + 6}));
         prev_buttons = ms.buttons;
         return;
     }
@@ -2434,11 +2550,13 @@ static void handle_mouse(void) {
             scroll_x[id] = scroll_drag_value + delta * max_scroll_x(id) / span;
         }
         clamp_scroll(id);
+        queue_damage(windows[id].r);
         prev_buttons = ms.buttons;
         return;
     }
     if (left && drag_win >= 0) {
         struct rect *r = &windows[drag_win].r;
+        struct rect old = *r;
         if (windows[drag_win].maximized) {
             windows[drag_win].maximized = 0;
             windows[drag_win].restore = *r;
@@ -2449,6 +2567,9 @@ static void handle_mouse(void) {
         if (r->y < 30) r->y = 30;
         if (r->x + r->w > sw) r->x = sw - r->w;
         if (r->y + r->h > sh - 12) r->y = sh - 12 - r->h;
+        queue_damage(union_rect(
+            (struct rect){old.x, old.y, old.w + 6, old.h + 6},
+            (struct rect){r->x, r->y, r->w + 6, r->h + 6}));
         prev_buttons = ms.buttons;
         return;
     }
@@ -2473,6 +2594,7 @@ static void init_desktop(void) {
         sw = MAX_SW;
     if (sh > MAX_SH)
         sh = MAX_SH;
+    compose_clip = (struct rect){0, 0, sw, sh};
     gfx_set_origin(0, 0);
     pointer_x = sw / 2;
     pointer_y = sh / 2;
@@ -2534,22 +2656,26 @@ int main(int argc, char **argv) {
         handle_mouse();
         flush_pending_app_resizes();
         uint32_t app_dirty = __sync_lock_test_and_set(&app_frame_dirty_mask, 0);
-        if (desktop_dirty || tick - last_render_tick >= 60u) {
-            desktop_dirty = 0;
+        struct rect damage = {0, 0, 0, 0};
+        int have_damage = take_damage(&damage);
+        for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
+            if (!(app_dirty & (1u << slot)))
+                continue;
+            struct rect dirty;
+            if (!app_take_dirty(slot, &dirty))
+                continue;
+            struct rect area = app_damage_to_screen(slot, dirty);
+            if (area.w <= 0 || area.h <= 0)
+                continue;
+            damage = have_damage ? union_rect(damage, area) : area;
+            have_damage = 1;
+        }
+        int full_dirty = __sync_lock_test_and_set(&desktop_dirty, 0);
+        if (full_dirty || tick - last_render_tick >= 60u) {
             render();
             last_render_tick = tick;
-        } else if (app_dirty) {
-            if ((app_dirty & (app_dirty - 1u)) != 0) {
-                render();
-                last_render_tick = tick;
-            } else {
-                int slot = 0;
-                while (!(app_dirty & (1u << slot))) slot++;
-                if (render_app_partial(slot) < 0) {
-                    render();
-                    last_render_tick = tick;
-                }
-            }
+        } else if (have_damage) {
+            (void)render_region(damage);
         }
         tick++;
         if (app_mouse_capture >= 0) {

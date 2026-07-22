@@ -2,7 +2,7 @@
 #include "vfs_internal.h"
 
 static int minifs_vn_open(vnode_t *vn) { (void)vn; return 0; }
-static int minifs_vn_close(vnode_t *vn) { (void)vn; return 0; }
+static int minifs_vn_close(vnode_t *vn) { (void)vn; return minifs_sync(); }
 
 static int minifs_vn_read(vnode_t *vn, void *buf, size_t count) {
     struct file_stream *s = (struct file_stream *)vn->data;

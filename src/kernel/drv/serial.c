@@ -12,10 +12,10 @@ void serial_init(void) {
     /* Disable interrupts while we configure. */
     outb(COM1 + 1, 0x00);
 
-    /* Enable DLAB, set baud divisor (low byte). 0x03 = 38400 baud from
-     * 115200 base on most emulators. */
+    /* Enable DLAB, set divisor 1 = 115200 baud.  Boot logging remains
+     * synchronous, so the higher standard rate directly shortens stalls. */
     outb(COM1 + 3, 0x80);
-    outb(COM1 + 0, 0x03);
+    outb(COM1 + 0, 0x01);
     outb(COM1 + 1, 0x00);
 
     /* 8 bits, no parity, one stop bit; clear DLAB. */

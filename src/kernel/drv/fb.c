@@ -410,6 +410,22 @@ int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
     if (w <= 0 || h <= 0)
         return 0;
     uint32_t rgb = palette_rgb(color);
+    if (fb_info.bpp == 32) {
+        for (int yy = 0; yy < h; yy++) {
+            volatile uint32_t *dst = (volatile uint32_t *)(fb_mem +
+                (uint32_t)(y + yy) * fb_info.pitch) + x;
+            int xx = 0;
+            for (; xx + 4 <= w; xx += 4) {
+                dst[xx] = rgb;
+                dst[xx + 1] = rgb;
+                dst[xx + 2] = rgb;
+                dst[xx + 3] = rgb;
+            }
+            for (; xx < w; xx++)
+                dst[xx] = rgb;
+        }
+        return 0;
+    }
     for (int yy = 0; yy < h; yy++)
         for (int xx = 0; xx < w; xx++)
             fb_store_rgb(x + xx, y + yy, rgb);

@@ -50,27 +50,9 @@ static int spawn_proc_common_locked(const char *path, int flags, int argc, const
         st.st_size > USER_LOAD_END - USER_LOAD_START)
         return -1;
 
-    size_t elf_pages = ((size_t)st.st_size + PAGE_SIZE - 1u) / PAGE_SIZE;
-    uint8_t *elf_buf = (uint8_t *)(uintptr_t)pmm_alloc_pages(elf_pages);
-    if (!elf_buf)
-        return -1;
-
     int fd = vfs_open_flags(path, O_RDONLY);
-    if (fd < 0) {
-        pmm_free_pages((uintptr_t)elf_buf, elf_pages);
+    if (fd < 0)
         return -1;
-    }
-
-    size_t total = 0;
-    int n = 0;
-    while (total < st.st_size &&
-           (n = vfs_read(fd, elf_buf + total, (size_t)st.st_size - total)) > 0)
-        total += (size_t)n;
-    vfs_close(fd);
-    if (n < 0 || total != st.st_size) {
-        pmm_free_pages((uintptr_t)elf_buf, elf_pages);
-        return -1;
-    }
 
     const char *name = path;
     for (int i = 0; path && path[i]; i++)
@@ -80,11 +62,9 @@ static int spawn_proc_common_locked(const char *path, int flags, int argc, const
     int inherit_all = (flags & 2u) ? 1 : 0;
     int inherit_stdio = (flags & 4u) ? 1 : 0;
     int inherit_owner = (inherit_all || inherit_stdio) ? current_fd_owner() : -1;
-    int pid = exec_start_args_with_fds(elf_buf, (size_t)total, name, silent,
-                                       argc, argv, inherit_owner,
-                                       inherit_stdio && !inherit_all);
-    pmm_free_pages((uintptr_t)elf_buf, elf_pages);
-    return pid;
+    return exec_start_file_args_with_fds(
+        fd, (size_t)st.st_size, name, silent, argc, argv, inherit_owner,
+        inherit_stdio && !inherit_all);
 }
 
 int sys_exit(uint32_t code, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {

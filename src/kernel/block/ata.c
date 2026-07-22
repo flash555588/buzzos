@@ -20,6 +20,7 @@
 
 #define ATA_CMD_READ   0x20
 #define ATA_CMD_WRITE  0x30
+#define ATA_CMD_FLUSH  0xE7
 
 static int ata_wait_ready(void) {
     for (int i = 0; i < 100000; i++) {
@@ -43,9 +44,9 @@ static int ata_wait_drq(void) {
     return -1;
 }
 
-static void ata_select_lba(uint32_t lba) {
+static void ata_select_lba(uint32_t lba, uint8_t count) {
     outb(ATA_DRIVE, (uint8_t)(0xE0 | ((lba >> 24) & 0x0F)));
-    outb(ATA_SECCOUNT, 1);
+    outb(ATA_SECCOUNT, count);
     outb(ATA_LBA0, (uint8_t)(lba & 0xFF));
     outb(ATA_LBA1, (uint8_t)((lba >> 8) & 0xFF));
     outb(ATA_LBA2, (uint8_t)((lba >> 16) & 0xFF));
@@ -62,32 +63,48 @@ int ata_init(void) {
 }
 
 int ata_read_sector(uint32_t lba, void *buf) {
+    return ata_read_sectors(lba, buf, 1);
+}
+
+int ata_read_sectors(uint32_t lba, void *buf, uint8_t count) {
+    if (!buf || !count || lba > 0x0FFFFFFFu - (uint32_t)(count - 1u))
+        return -1;
     if (ata_wait_ready() < 0)
         return -1;
-    ata_select_lba(lba);
+    ata_select_lba(lba, count);
     outb(ATA_COMMAND, ATA_CMD_READ);
-    if (ata_wait_drq() < 0)
-        return -1;
-
     uint16_t *out = (uint16_t *)buf;
-    for (int i = 0; i < 256; i++)
-        out[i] = inw(ATA_DATA);
+    for (uint32_t sector = 0; sector < count; sector++) {
+        if (ata_wait_drq() < 0)
+            return -1;
+        io_insw(ATA_DATA, out + sector * 256u, 256);
+    }
     return 0;
 }
 
 int ata_write_sector(uint32_t lba, const void *buf) {
+    return ata_write_sectors(lba, buf, 1);
+}
+
+int ata_write_sectors(uint32_t lba, const void *buf, uint8_t count) {
+    if (!buf || !count || lba > 0x0FFFFFFFu - (uint32_t)(count - 1u))
+        return -1;
     if (ata_wait_ready() < 0)
         return -1;
-    ata_select_lba(lba);
+    ata_select_lba(lba, count);
     outb(ATA_COMMAND, ATA_CMD_WRITE);
-    if (ata_wait_drq() < 0)
-        return -1;
-
     const uint16_t *in = (const uint16_t *)buf;
-    for (int i = 0; i < 256; i++)
-        outw(ATA_DATA, in[i]);
+    for (uint32_t sector = 0; sector < count; sector++) {
+        if (ata_wait_drq() < 0)
+            return -1;
+        io_outsw(ATA_DATA, in + sector * 256u, 256);
+    }
+    return ata_wait_ready();
+}
 
-    outb(ATA_COMMAND, 0xE7);
-    ata_wait_ready();
-    return 0;
+int ata_flush_cache(void) {
+    if (ata_wait_ready() < 0)
+        return -1;
+    outb(ATA_COMMAND, ATA_CMD_FLUSH);
+    return ata_wait_ready();
 }

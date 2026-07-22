@@ -723,6 +723,13 @@ void task_prepare_block_current(uint32_t wake_tick) {
     current_task->state = TASK_BLOCKED;
 }
 
+void task_block_current_prepared(void) {
+    if (!current_task || current_task->id == 0 ||
+        current_task->state != TASK_BLOCKED)
+        return;
+    schedule();
+}
+
 void task_block_current(void) {
     if (!current_task || current_task->id == 0)
         return;

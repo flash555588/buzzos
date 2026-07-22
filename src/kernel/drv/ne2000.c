@@ -1,9 +1,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "netdev.h"
+#include "net.h"
 #include "io.h"
 #include "irq.h"
 #include "serial.h"
+#include "task.h"
+#include "timer.h"
 
 #define IO 0x300
 
@@ -67,6 +70,7 @@
 #define RXSTOP       0x80   /* RX ring end page (end of 16 KiB NIC RAM) */
 
 #define RX_QUEUE_SLOTS 32
+#define RX_IRQ_BUDGET 8
 struct rx_slot {
     uint16_t len;
     uint8_t data[1514];
@@ -75,6 +79,10 @@ static struct rx_slot rx_queue[RX_QUEUE_SLOTS];
 static volatile uint8_t rx_queue_head;
 static volatile uint8_t rx_queue_tail;
 static uint32_t rx_queue_dropped;
+static volatile int tx_locked;
+static volatile int tx_complete;
+static volatile int tx_waiter = -1;
+static uint8_t tx_staging[1516] __attribute__((aligned(2)));
 
 static size_t ne2000_recv_hw(void *buf, size_t max);
 
@@ -84,9 +92,41 @@ static void sel(int page) {
     outb(IO + CR, (cr & 0x3F) | ((page & 3) << 6));
 }
 
-static int wait_isr(uint8_t mask) {
-    for (int i = 0; i < 100000; i++) {
-        if (inb(IO + ISR) & mask) return 0;
+static void tx_lock(void) {
+    while (__sync_lock_test_and_set(&tx_locked, 1))
+        task_yield();
+}
+
+static void tx_unlock(void) {
+    __sync_lock_release(&tx_locked);
+}
+
+static int wait_tx_complete(void) {
+    uint32_t deadline = timer_ticks() + TIMER_HZ / 4u + 1u;
+    for (int spins = 0; spins < 100000; spins++) {
+        uint32_t irq_flags = irq_save();
+        uint8_t status = inb(IO + ISR);
+        if (status & ISR_PTX) {
+            outb(IO + ISR, ISR_PTX);
+            tx_complete = 1;
+        }
+        if (tx_complete) {
+            tx_waiter = -1;
+            irq_restore(irq_flags);
+            return 0;
+        }
+        if (current_task && task_get_tid() > 0) {
+            tx_waiter = task_get_tid();
+            task_prepare_block_current(deadline);
+            task_block_current_prepared();
+            tx_waiter = -1;
+            irq_restore(irq_flags);
+            if ((int32_t)(timer_ticks() - deadline) >= 0)
+                return -1;
+        } else {
+            irq_restore(irq_flags);
+            io_wait();
+        }
     }
     return -1;
 }
@@ -139,6 +179,9 @@ static int ne2000_init(struct netdev *dev) {
         dev->mac[i] = inb(IO + RDMA);
     }
     outb(IO + CR, CR_PAGE0 | CR_START | CR_NODMA);
+    /* PROM access above is byte-wide. Normal packet DMA uses the NE2000's
+     * 16-bit datapath. */
+    outb(IO + DCR, DCR_FIFO8 | DCR_WTS | DCR_NOLPBK | DCR_ARM);
 
     /* Program MAC into page 1 PAR registers */
     sel(1);
@@ -155,7 +198,7 @@ static int ne2000_init(struct netdev *dev) {
     outb(0x21, (uint8_t)(inb(0x21) & ~(1u << 2)));
     outb(0xA1, (uint8_t)(inb(0xA1) & ~(1u << 2)));
     outb(IO + ISR, 0xFF);
-    outb(IO + IMR, ISR_PRX | ISR_RXE | ISR_OVW);
+    outb(IO + IMR, ISR_PRX | ISR_PTX | ISR_RXE | ISR_OVW);
 
     serial_puts("[ne2000] MAC=");
     for (int i = 0; i < 6; i++) {
@@ -169,36 +212,31 @@ static int ne2000_init(struct netdev *dev) {
 /* ── Send ── */
 static int ne2000_send(struct netdev *dev, const void *data, size_t len) {
     (void)dev;
-    uint32_t irq_flags = irq_save();
     uint16_t data_len = (uint16_t)len;
     uint16_t length = data_len;
 
     if (length < 60) length = 60;
-    if (length > 1514) {
-        irq_restore(irq_flags);
+    if (!data || length > 1514)
         return -1;
-    }
+    uint16_t dma_length = (uint16_t)((length + 1u) & ~1u);
+    tx_lock();
+    for (uint16_t i = 0; i < data_len; i++)
+        tx_staging[i] = ((const uint8_t *)data)[i];
+    for (uint16_t i = data_len; i < dma_length; i++)
+        tx_staging[i] = 0;
 
-    /* Wait for any in-progress transmission */
-    for (int i = 0; i < 50000; i++) {
-        if (!(inb(IO + CR) & CR_TRANSMIT)) break;
-    }
-
+    uint32_t irq_flags = irq_save();
     /* Abort any running remote DMA */
     outb(IO + CR, CR_PAGE0 | CR_START | CR_NODMA);
 
     /* Set up remote DMA write to TX buffer */
-    outb(IO + RBCR0, (uint8_t)length);
-    outb(IO + RBCR1, (uint8_t)(length >> 8));
+    outb(IO + RBCR0, (uint8_t)dma_length);
+    outb(IO + RBCR1, (uint8_t)(dma_length >> 8));
     outb(IO + RSAR0, 0);
     outb(IO + RSAR1, TXSTART);
     outb(IO + CR, CR_PAGE0 | CR_START | CR_DMAWRITE);
 
-    /* Write packet data byte by byte */
-    for (uint16_t i = 0; i < data_len; i++)
-        outb(IO + RDMA, ((const uint8_t *)data)[i]);
-    for (uint16_t i = data_len; i < length; i++)
-        outb(IO + RDMA, 0);
+    io_outsw(IO + RDMA, tx_staging, dma_length / 2u);
 
     /* Complete DMA */
     outb(IO + CR, CR_PAGE0 | CR_START | CR_NODMA);
@@ -209,17 +247,15 @@ static int ne2000_send(struct netdev *dev, const void *data, size_t len) {
     outb(IO + TPSR, TXSTART);
 
     /* Fire transmit */
+    tx_complete = 0;
     outb(IO + CR, CR_PAGE0 | CR_START | CR_TRANSMIT);
-
-    /* Wait for transmit complete — avoids Slirp race where response arrives
-     * before TX finishes and gets dropped with "Failed to send packet" */
-    if (wait_isr(ISR_PTX) < 0) {
-        serial_puts("[ne2000] tx timeout\n");
-    }
-    outb(IO + ISR, ISR_PTX);
-
     irq_restore(irq_flags);
-    return 0;
+
+    int ret = wait_tx_complete();
+    if (ret < 0)
+        serial_puts("[ne2000] tx timeout\n");
+    tx_unlock();
+    return ret;
 }
 
 /* ── Receive ── */
@@ -261,20 +297,23 @@ static size_t ne2000_recv_hw(void *buf, size_t max) {
     outb(IO + RSAR1, packet_page);
     outb(IO + CR, CR_PAGE0 | CR_START | CR_DMAREAD);
 
-    /* Read 4-byte header: status (skip), next-page, length */
-    inb(IO + RDMA);                    /* status — discard */
-    next_page = inb(IO + RDMA);         /* next packet page pointer */
+    /* Read 4-byte header in two word transfers. */
+    uint16_t header0 = inw(IO + RDMA);
+    uint16_t header1 = inw(IO + RDMA);
+    next_page = (uint8_t)(header0 >> 8);
     if (next_page < RXSTART || next_page >= RXSTOP) next_page = RXSTART;
-    pkt_len  = inb(IO + RDMA);        /* length low */
-    pkt_len |= (uint16_t)inb(IO + RDMA) << 8;  /* length high */
+    pkt_len = header1;
 
     /* pkt_len from QEMU includes 4-byte NE2000 header; subtract it */
     uint16_t frame_len = (pkt_len >= 4) ? (pkt_len - 4) : 0;
     if (frame_len > max) frame_len = (uint16_t)max;
 
-    /* Read packet payload */
-    for (uint16_t i = 0; i < frame_len; i++)
-        ((uint8_t *)buf)[i] = inb(IO + RDMA);
+    /* Read packet payload through the 16-bit remote-DMA port. */
+    uint16_t words = frame_len / 2u;
+    if (words)
+        io_insw(IO + RDMA, buf, words);
+    if (frame_len & 1u)
+        ((uint8_t *)buf)[frame_len - 1u] = (uint8_t)inw(IO + RDMA);
 
     /* End DMA, update boundary */
     outb(IO + CR, CR_PAGE0 | CR_START | CR_NODMA);
@@ -305,7 +344,13 @@ static size_t ne2000_recv(struct netdev *dev, void *buf, size_t max) {
 
 void ne2000_irq_handler(void) {
     uint8_t status = inb(IO + ISR);
-    for (;;) {
+    if (status & ISR_PTX) {
+        tx_complete = 1;
+        if (tx_waiter > 0)
+            (void)task_wake(tx_waiter);
+    }
+    int queued = 0;
+    for (int packets = 0; packets < RX_IRQ_BUDGET; packets++) {
         uint8_t next = (uint8_t)((rx_queue_head + 1) % RX_QUEUE_SLOTS);
         if (next == rx_queue_tail) {
             rx_queue_dropped++;
@@ -317,10 +362,13 @@ void ne2000_irq_handler(void) {
             break;
         slot->len = (uint16_t)n;
         rx_queue_head = next;
+        queued = 1;
     }
     /* Acknowledge every condition observed on entry. New arrivals will
      * assert PRX again after this write. */
     outb(IO + ISR, status | ISR_PRX | ISR_RXE | ISR_OVW);
+    if (queued || (status & (ISR_PRX | ISR_RXE | ISR_OVW)))
+        net_rx_interrupt_notify();
 }
 
 static struct netdev ne_dev = {

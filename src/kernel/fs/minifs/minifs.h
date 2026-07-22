@@ -24,6 +24,7 @@ struct fs_info {
 };
 
 int minifs_mount(void);
+int minifs_sync(void);
 int minifs_info(struct fs_info *out);
 int minifs_open(const char *path, uint16_t *ino_out);
 int minifs_create(const char *path);

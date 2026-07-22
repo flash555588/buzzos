@@ -37,6 +37,20 @@ static inline uint32_t inl(uint16_t port) {
     return ret;
 }
 
+static inline void io_insw(uint16_t port, void *buf, uint32_t words) {
+    __asm__ volatile("cld; rep insw"
+                     : "+D"(buf), "+c"(words)
+                     : "d"(port)
+                     : "memory");
+}
+
+static inline void io_outsw(uint16_t port, const void *buf, uint32_t words) {
+    __asm__ volatile("cld; rep outsw"
+                     : "+S"(buf), "+c"(words)
+                     : "d"(port)
+                     : "memory");
+}
+
 /* Tiny pause used between I/O port operations. Writing to an unused port
  * (0x80 on POST code) gives older peripherals time to settle. */
 static inline void io_wait(void) {

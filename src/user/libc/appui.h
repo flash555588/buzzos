@@ -46,8 +46,7 @@ static void appui_fill(uint8_t *fb, int w, int h, struct appui_rect r, int color
         return;
     for (int yy = 0; yy < r.h; yy++) {
         uint8_t *row = fb + (r.y + yy) * w + r.x;
-        for (int xx = 0; xx < r.w; xx++)
-            row[xx] = (uint8_t)color;
+        memset(row, color, (size_t)r.w);
     }
 }
 

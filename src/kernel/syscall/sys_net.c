@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "net.h"
+#include "serial.h"
 #include "syscall_internal.h"
 #include "task.h"
 
@@ -110,17 +111,22 @@ int sys_connect(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen,
                 uint32_t d, uint32_t e) {
     (void)d; (void)e;
     if (addrlen < sizeof(struct k_sockaddr_in) ||
-        !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in)))
+        !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in))) {
+        serial_puts("[net] connect: bad address\n");
         return -1;
+    }
     struct k_sockaddr_in *addr = (struct k_sockaddr_in *)(uintptr_t)addr_arg;
-    if (addr->sin_family != AF_INET_K)
+    if (addr->sin_family != AF_INET_K) {
+        serial_puts("[net] connect: bad family\n");
         return -1;
+    }
     uint32_t peer_ip = addr->sin_addr;
     uint16_t peer_port = ntoh16(addr->sin_port);
 
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
     if (!s) {
+        serial_puts("[net] connect: bad socket\n");
         socket_unlock();
         return -1;
     }
@@ -132,6 +138,7 @@ int sys_connect(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen,
         return 0;
     }
     if (s->type != SOCK_STREAM_K || s->connected) {
+        serial_puts("[net] connect: invalid state\n");
         socket_unlock();
         return -1;
     }

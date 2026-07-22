@@ -81,14 +81,12 @@ static int mounted;
 static volatile int minifs_locked;
 
 static void minifs_lock(void) {
-    task_preempt_disable();
     while (__sync_lock_test_and_set(&minifs_locked, 1))
-        __asm__ volatile("pause");
+        task_yield();
 }
 
 static void minifs_unlock(void) {
     __sync_lock_release(&minifs_locked);
-    task_preempt_enable();
 }
 
 static int nameeq(const char *name, const char *part, int len) {
@@ -203,16 +201,18 @@ static int alloc_inode(uint8_t type, uint16_t parent) {
     return -1;
 }
 
-static int alloc_block(void) {
+static int alloc_block(int clear_data) {
     uint8_t zero_sector[512];
-    zero(zero_sector, sizeof(zero_sector));
+    if (clear_data)
+        zero(zero_sector, sizeof(zero_sector));
     for (int scanned = 0; scanned < MINIFS_BLOCKS; scanned++) {
         int i = alloc_cursor + scanned;
         if (i >= MINIFS_BLOCKS)
             i -= MINIFS_BLOCKS;
         if (!block_used[i]) {
             block_used[i] = 1;
-            if (flush_bitmap_entry(i) < 0 || write_block(i, zero_sector) < 0) {
+            if (flush_bitmap_entry(i) < 0 ||
+                (clear_data && write_block(i, zero_sector) < 0)) {
                 block_used[i] = 0;
                 (void)flush_bitmap_entry(i);
                 return -1;
@@ -378,12 +378,12 @@ static int migrate_v1_layout(void) {
     return 0;
 }
 
-static int ensure_block(int ino, int logical) {
+static int ensure_block(int ino, int logical, int clear_data) {
     if (logical < 0 || logical >= MINIFS_MAX_FILE_BLOCKS)
         return -1;
     if (logical < MINIFS_DIRECT) {
         if (!inodes[ino].block[logical]) {
-            int b = alloc_block();
+            int b = alloc_block(clear_data);
             if (b < 0)
                 return -1;
             inodes[ino].block[logical] = (uint16_t)(b + 1);
@@ -393,7 +393,7 @@ static int ensure_block(int ino, int logical) {
     }
 
     if (logical < MINIFS_SINGLE_BLOCKS && !inodes[ino].indirect) {
-        int table = alloc_block();
+        int table = alloc_block(1);
         if (table < 0)
             return -1;
         inodes[ino].indirect = (uint16_t)(table + 1);
@@ -407,7 +407,7 @@ static int ensure_block(int ino, int logical) {
         uint16_t *entries = (uint16_t *)sector;
         int index = logical - MINIFS_DIRECT;
         if (!entries[index]) {
-            int b = alloc_block();
+            int b = alloc_block(clear_data);
             if (b < 0)
                 return -1;
             entries[index] = (uint16_t)(b + 1);
@@ -418,7 +418,7 @@ static int ensure_block(int ino, int logical) {
     }
 
     if (!inodes[ino].double_indirect) {
-        int table = alloc_block();
+        int table = alloc_block(1);
         if (table < 0)
             return -1;
         inodes[ino].double_indirect = (uint16_t)(table + 1);
@@ -433,7 +433,7 @@ static int ensure_block(int ino, int logical) {
         return -1;
     uint16_t *outer = (uint16_t *)outer_sector;
     if (!outer[outer_index]) {
-        int inner_block = alloc_block();
+        int inner_block = alloc_block(1);
         if (inner_block < 0)
             return -1;
         outer[outer_index] = (uint16_t)(inner_block + 1);
@@ -445,7 +445,7 @@ static int ensure_block(int ino, int logical) {
         return -1;
     uint16_t *inner = (uint16_t *)inner_sector;
     if (!inner[inner_index]) {
-        int data_block = alloc_block();
+        int data_block = alloc_block(clear_data);
         if (data_block < 0)
             return -1;
         inner[inner_index] = (uint16_t)(data_block + 1);
@@ -478,7 +478,7 @@ static int dir_write_entry(int dir_ino, int index, const struct minifs_dirent_di
     size_t off = (size_t)index * sizeof(*de);
     int logical = (int)(off / MINIFS_BLOCK_SIZE);
     int within = (int)(off % MINIFS_BLOCK_SIZE);
-    int block = ensure_block(dir_ino, logical);
+    int block = ensure_block(dir_ino, logical, 1);
     if (block < 0)
         return -1;
     if (read_block(block, sector) < 0)
@@ -981,24 +981,32 @@ int minifs_write(uint16_t ino, size_t *pos, const void *buf, size_t count) {
         size_t off = *pos + done;
         int logical = (int)(off / MINIFS_BLOCK_SIZE);
         int within = (int)(off % MINIFS_BLOCK_SIZE);
-        int block = ensure_block(ino, logical);
+        size_t n = MINIFS_BLOCK_SIZE - (size_t)within;
+        if (n > count - done)
+            n = count - done;
+        int full_sector = within == 0 && n == MINIFS_BLOCK_SIZE;
+        int block = ensure_block(ino, logical, !full_sector);
         if (block < 0) {
             int ret = done ? (int)done : -1;
             minifs_unlock();
             return ret;
         }
-        if (read_block(block, sector) < 0) {
-            minifs_unlock();
-            return -1;
-        }
-        size_t n = MINIFS_BLOCK_SIZE - (size_t)within;
-        if (n > count - done)
-            n = count - done;
-        for (size_t i = 0; i < n; i++)
-            sector[within + i] = in[done + i];
-        if (write_block(block, sector) < 0) {
-            minifs_unlock();
-            return -1;
+        if (full_sector) {
+            if (write_block(block, in + done) < 0) {
+                minifs_unlock();
+                return -1;
+            }
+        } else {
+            if (read_block(block, sector) < 0) {
+                minifs_unlock();
+                return -1;
+            }
+            for (size_t i = 0; i < n; i++)
+                sector[within + i] = in[done + i];
+            if (write_block(block, sector) < 0) {
+                minifs_unlock();
+                return -1;
+            }
         }
         done += n;
     }
@@ -1009,6 +1017,13 @@ int minifs_write(uint16_t ino, size_t *pos, const void *buf, size_t count) {
     }
     minifs_unlock();
     return (int)done;
+}
+
+int minifs_sync(void) {
+    minifs_lock();
+    int ret = block_cache_flush();
+    minifs_unlock();
+    return ret;
 }
 
 int minifs_getdents(uint16_t ino, size_t *pos, struct dirent *ents, size_t count) {

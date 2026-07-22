@@ -10,9 +10,10 @@
 #define GUIAPP_PATH_MAX 128
 #define GUIAPP_TEXT_MAX 32
 #define GUIAPP_SHARED_HEADER_SIZE 4096
-#define GUIAPP_SHARED_BUFFERS 3
 #define GUIAPP_SHARED_PIXELS (GUIAPP_MAX_W * GUIAPP_MAX_H)
-#define GUIAPP_SHARED_SIZE (GUIAPP_SHARED_HEADER_SIZE + GUIAPP_SHARED_BUFFERS * GUIAPP_SHARED_PIXELS)
+#define GUIAPP_SHARED_SIZE_FOR_PIXELS(pixels) \
+    (GUIAPP_SHARED_HEADER_SIZE + (pixels))
+#define GUIAPP_SHARED_SIZE GUIAPP_SHARED_SIZE_FOR_PIXELS(GUIAPP_SHARED_PIXELS)
 
 enum {
     GUIAPP_EVT_INIT = 1,
@@ -57,7 +58,7 @@ struct guiapp_frame {
     int32_t y;
     int32_t dirty_w;
     int32_t dirty_h;
-    int32_t buffer_index;
+    uint32_t sequence;
     char title[GUIAPP_TITLE_MAX];
     char target[GUIAPP_PATH_MAX];
     char argument[GUIAPP_PATH_MAX];
@@ -69,14 +70,14 @@ enum {
     GUIAPP_FRAME_LAUNCH = 3,
     GUIAPP_FRAME_CLIPBOARD = 4,
     GUIAPP_FRAME_EXEC = 5,
-    GUIAPP_FRAME_SHARED = 6,
-    GUIAPP_FRAME_SCALED = 7,
+    GUIAPP_FRAME_SCALED = 6,
 };
 
 struct guiapp_shared_surface {
-    volatile uint32_t front;
-    volatile uint32_t reader;
     volatile uint32_t sequence;
+    uint32_t capacity_pixels;
+    volatile uint32_t width;
+    volatile uint32_t height;
 };
 
 struct guiapp_ctx {
@@ -84,6 +85,7 @@ struct guiapp_ctx {
     int frame_fd;
     uint32_t shm_token;
     struct guiapp_shared_surface *shared;
+    uint32_t capacity_pixels;
 };
 
 int guiapp_parse_args(int argc, char **argv, struct guiapp_ctx *ctx);

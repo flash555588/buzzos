@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "gdt.h"
+#include "paging.h"
 #include "serial.h"
 #include "task.h"
 #include "user.h"
@@ -17,24 +18,31 @@ enum {
 #define GNU_ASM(...) __asm__ volatile(__VA_ARGS__)
 #endif
 
+static const uint8_t trampoline_code[] = {
+    0x66, 0xB8, 0x23, 0x00, /* mov ax, 0x23 */
+    0x8E, 0xD8,             /* mov ds, ax */
+    0x8E, 0xC0,             /* mov es, ax */
+    0x8E, 0xE0,             /* mov fs, ax */
+    0x8E, 0xE8,             /* mov gs, ax */
+    0xFF, 0xE2,             /* jmp edx (final user entry) */
+};
+
 static void copy_bytes(uint8_t *dst, const uint8_t *src, size_t len) {
     for (size_t i = 0; i < len; i++)
         dst[i] = src[i];
 }
 
 int user_install_trampoline(void) {
-    static const uint8_t trampoline_code[] = {
-        0x66, 0xB8, 0x23, 0x00, /* mov ax, 0x23 */
-        0x8E, 0xD8,             /* mov ds, ax */
-        0x8E, 0xC0,             /* mov es, ax */
-        0x8E, 0xE0,             /* mov fs, ax */
-        0x8E, 0xE8,             /* mov gs, ax */
-        0xFF, 0xE2,             /* jmp edx (final user entry) */
-    };
     uint8_t *trampoline = (uint8_t *)USER_TRAMPOLINE_BASE;
 
     copy_bytes(trampoline, trampoline_code, sizeof(trampoline_code));
     return 0;
+}
+
+int user_install_trampoline_in_space(uint32_t cr3) {
+    return paging_copy_to_user_space(cr3, USER_TRAMPOLINE_BASE,
+                                     trampoline_code,
+                                     (uint32_t)sizeof(trampoline_code));
 }
 
 void user_enter(uint32_t entry, uint32_t stack_top) {

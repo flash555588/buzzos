@@ -77,6 +77,9 @@ void task_exit_code(int code);
 void task_exit_process_code(int code);
 void task_sleep_until(uint32_t wake_tick);
 void task_prepare_block_current(uint32_t wake_tick);
+/* Schedule after task_prepare_block_current() while hardware IRQs are already
+ * disabled by the caller. Returns with the caller's IRQ state unchanged. */
+void task_block_current_prepared(void);
 void task_block_current(void);
 void task_block_current_until(uint32_t wake_tick);
 int  task_wake(int id);

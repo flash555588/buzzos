@@ -1,5 +1,6 @@
 #include "pmm.h"
 #include "serial.h"
+#include "task.h"
 
 /* ------------------------------------------------------------------ */
 /*  Bitmap (1 bit per 4 KiB page)                                      */
@@ -14,6 +15,17 @@
 static uint32_t bitmap[BITMAP_WORDS];
 static size_t   managed_pages;
 static size_t   free_pages;
+static size_t   alloc_rover;
+static volatile int pmm_locked;
+
+static void pmm_lock(void) {
+    while (__sync_lock_test_and_set(&pmm_locked, 1))
+        task_yield();
+}
+
+static void pmm_unlock(void) {
+    __sync_lock_release(&pmm_locked);
+}
 
 static void bit_set(size_t idx)   { bitmap[idx / 32] |=  (1u << (idx % 32)); }
 static void bit_clr(size_t idx)   { bitmap[idx / 32] &= ~(1u << (idx % 32)); }
@@ -97,6 +109,8 @@ void pmm_init(void) {
     uint16_t entries = E820_COUNT;
     managed_pages = 0;
     free_pages = 0;
+    alloc_rover = 0;
+    pmm_locked = 0;
 
     serial_puts("[pmm] entries: ");
     serial_puthex(entries);
@@ -142,19 +156,44 @@ void pmm_init(void) {
 /* ------------------------------------------------------------------ */
 
 uintptr_t pmm_alloc_pages(size_t n) {
-    if (n == 0 || n > PMM_MANAGED_PAGES || n > free_pages) return 0;
+    if (n == 0 || n > PMM_MANAGED_PAGES)
+        return 0;
+    pmm_lock();
+    if (n > free_pages) {
+        pmm_unlock();
+        return 0;
+    }
 
-    for (size_t start = 0; start <= PMM_MANAGED_PAGES - n; start++) {
+    size_t scanned = 0;
+    while (scanned < PMM_MANAGED_PAGES) {
+        size_t start = alloc_rover + scanned;
+        if (start >= PMM_MANAGED_PAGES)
+            start -= PMM_MANAGED_PAGES;
+        if (start + n > PMM_MANAGED_PAGES) {
+            scanned += PMM_MANAGED_PAGES - start;
+            continue;
+        }
         int ok = 1;
+        size_t skip = 1;
         for (size_t j = 0; j < n; j++) {
-            if (bit_get(start + j)) { ok = 0; break; }
+            if (bit_get(start + j)) {
+                ok = 0;
+                skip = j + 1;
+                break;
+            }
         }
         if (ok) {
             for (size_t j = 0; j < n; j++) bit_set(start + j);
             free_pages -= n;
+            alloc_rover = start + n;
+            if (alloc_rover >= PMM_MANAGED_PAGES)
+                alloc_rover = 0;
+            pmm_unlock();
             return (uintptr_t)(start * PAGE_SIZE);
         }
+        scanned += skip;
     }
+    pmm_unlock();
     return 0;  /* no contiguous block found */
 }
 
@@ -165,17 +204,24 @@ uintptr_t pmm_alloc_pages(size_t n) {
 void pmm_free_pages(uintptr_t addr, size_t n) {
     if (n == 0 || n > PMM_MANAGED_PAGES)
         return;
+    pmm_lock();
     free_pages += mark_range(addr, n * PAGE_SIZE, 0);
+    size_t first = (size_t)(addr / PAGE_SIZE);
+    if (first < alloc_rover)
+        alloc_rover = first;
+    pmm_unlock();
 }
 
 void pmm_info(struct pmm_info *out) {
     if (!out)
         return;
+    pmm_lock();
     out->page_size = PAGE_SIZE;
     out->managed_limit = PMM_MANAGED_LIMIT;
     out->managed_pages = (uint32_t)managed_pages;
     out->free_pages = (uint32_t)free_pages;
     out->used_pages = (uint32_t)(managed_pages > free_pages ? managed_pages - free_pages : 0);
+    pmm_unlock();
 }
 
 /* ------------------------------------------------------------------ */

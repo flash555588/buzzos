@@ -229,7 +229,10 @@ $monitor = $null
 $script:writer = $null
 
 try {
-    Wait-ForLog "buzzos:/> " $TimeoutSeconds
+    # Kernel diagnostics may be emitted between individual shell prompt
+    # writes. Match the stable prompt suffix so concurrent serial output does
+    # not turn a successful boot into a false timeout.
+    Wait-ForLog "s:/> " $TimeoutSeconds
 
     $monitor = Connect-QemuMonitor $monitorPort
     $script:writer = [IO.StreamWriter]::new($monitor.GetStream(), [Text.Encoding]::ASCII)
@@ -371,7 +374,7 @@ try {
         "pipe_buf_bytes\s+8192",
         "max_mounts\s+8",
         "fs_name_len\s+24",
-        "managed_limit_bytes\s+67108864",
+        "managed_limit_bytes\s+268435456",
         "minifs_lba_start\s+67584",
         "minifs_sectors\s+32768",
         "minifs_status\s+ok",
@@ -406,7 +409,7 @@ try {
         "host_check\s+make fs-check",
         "host_repair\s+make fs-repair",
         "page_size\s+4096",
-        "managed_limit\s+67108864",
+        "managed_limit\s+268435456",
         "OWNER\s+FD\s+OF\s+REFS\s+FLAGS\s+KIND\s+NAME\s+DETAIL",
         "[0-9]+\s+0\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",
         "[0-9]+\s+1\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",

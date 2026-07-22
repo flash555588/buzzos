@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "net.h"
 #include "netdev.h"
+#include "irq.h"
 #include "serial.h"
 #include "task.h"
 #include "timer.h"
@@ -13,6 +14,8 @@ enum {
     NET_TCP_RETRIES = 4,
     NET_DNS_RETRY_TIMEOUT_MS = 1200,
     NET_DNS_RETRIES = 3,
+    NET_TCP_SHARED_WINDOW = 8192,
+    NET_TCP_RECV_COPY_MAX = 4096,
 };
 
 static void *memset(void *d, int c, size_t n) { for (size_t i=0;i<n;i++) ((uint8_t*)d)[i]=(uint8_t)c; return d; }
@@ -38,6 +41,7 @@ static uint32_t net_udp_tx, net_udp_rx;
 static uint32_t net_tcp_tx, net_tcp_rx;
 static uint32_t net_dhcp_tx, net_dhcp_rx;
 static uint32_t net_dns_tx, net_dns_rx;
+static volatile uint32_t net_rx_waiters;
 
 static void dbg(const char *s) { serial_puts("[net] "); serial_puts(s); }
 static int net_tcp_dispatch_frame(const void *frame, size_t len);
@@ -63,6 +67,20 @@ static int net_deadline_expired(uint32_t deadline) {
 
 static void net_poll_backoff(void) {
     if (current_task) {
+        int tid = task_get_tid();
+        if (tid > 0 && tid < MAX_TASKS) {
+            uint32_t irq_flags = irq_save();
+            uint32_t bit = 1u << (uint32_t)tid;
+            net_rx_waiters |= bit;
+            uint32_t wake_tick = timer_ticks() + 1u;
+            if (!wake_tick)
+                wake_tick = 1;
+            task_prepare_block_current(wake_tick);
+            task_block_current_prepared();
+            net_rx_waiters &= ~bit;
+            irq_restore(irq_flags);
+            return;
+        }
         task_yield();
         return;
     }
@@ -528,6 +546,14 @@ static const uint8_t *dns_skip_name(const uint8_t *p, const uint8_t *end) {
     return 0;
 }
 
+void net_rx_interrupt_notify(void) {
+    uint32_t waiters = net_rx_waiters;
+    net_rx_waiters = 0;
+    for (int tid = 1; tid < MAX_TASKS; tid++)
+        if (waiters & (1u << (uint32_t)tid))
+            (void)task_wake(tid);
+}
+
 static uint16_t dns_next_id = 0x1234;
 static uint16_t dns_next_port = 49152;
 
@@ -643,6 +669,7 @@ static int net_tcp_open_pcbs;
 static uint32_t net_tcp_rx_buffered;
 static uint32_t net_tcp_rx_dropped;
 static struct net_tcp_pcb *tcp_pcbs;
+static uint32_t net_tcp_registered_pcbs;
 
 enum {
     TCP_STATE_CLOSED = 0,
@@ -650,7 +677,10 @@ enum {
     TCP_STATE_ESTABLISHED = 2,
 };
 
-static void net_tcp_unregister_pcb(struct net_tcp_pcb *pcb) {
+/* TCP packets are dispatched by whichever task drains the NIC queue. Keep
+ * registry edits atomic against timer preemption so concurrent socket tasks
+ * cannot lose list nodes or allocate duplicate connection tuples. */
+static void net_tcp_unregister_pcb_locked(struct net_tcp_pcb *pcb) {
     if (!pcb || !pcb->registered)
         return;
     struct net_tcp_pcb **link = &tcp_pcbs;
@@ -663,19 +693,23 @@ static void net_tcp_unregister_pcb(struct net_tcp_pcb *pcb) {
     }
     pcb->registered = 0;
     pcb->next = 0;
+    if (net_tcp_registered_pcbs > 0)
+        net_tcp_registered_pcbs--;
 }
 
-static void net_tcp_register_pcb(struct net_tcp_pcb *pcb) {
+static void net_tcp_register_pcb_locked(struct net_tcp_pcb *pcb) {
     if (!pcb || pcb->registered)
         return;
     pcb->next = tcp_pcbs;
     pcb->registered = 1;
     tcp_pcbs = pcb;
+    net_tcp_registered_pcbs++;
 }
 
 void net_tcp_pcb_init(struct net_tcp_pcb *pcb) {
     if (!pcb)
         return;
+    uint32_t irq_flags = irq_save();
     if (pcb->state == TCP_STATE_ESTABLISHED && net_tcp_open_pcbs > 0)
         net_tcp_open_pcbs--;
     if (pcb->rx_len > 0) {
@@ -684,27 +718,52 @@ void net_tcp_pcb_init(struct net_tcp_pcb *pcb) {
         else
             net_tcp_rx_buffered = 0;
     }
-    net_tcp_unregister_pcb(pcb);
-    memset(pcb, 0, sizeof(*pcb));
+    net_tcp_unregister_pcb_locked(pcb);
+    pcb->dst_ip = 0;
+    pcb->dst_port = 0;
+    pcb->src_port = 0;
+    pcb->seq = 0;
+    pcb->ack = 0;
+    pcb->snd_una = 0;
+    pcb->peer_window = 0;
+    pcb->state = TCP_STATE_CLOSED;
+    pcb->registered = 0;
+    pcb->rx_closed = 0;
+    pcb->rx_reset = 0;
+    pcb->rx_head = 0;
+    pcb->rx_tail = 0;
+    pcb->rx_len = 0;
+    pcb->next = 0;
+    irq_restore(irq_flags);
 }
 
 static void net_tcp_mark_closed(struct net_tcp_pcb *pcb) {
     if (!pcb)
         return;
+    uint32_t irq_flags = irq_save();
     if (pcb->state == TCP_STATE_ESTABLISHED && net_tcp_open_pcbs > 0)
         net_tcp_open_pcbs--;
     pcb->state = TCP_STATE_CLOSED;
-    net_tcp_unregister_pcb(pcb);
+    net_tcp_unregister_pcb_locked(pcb);
+    irq_restore(irq_flags);
 }
 
 static uint16_t net_tcp_receive_window(const struct net_tcp_pcb *pcb) {
-    if (!pcb || pcb->rx_len >= NET_TCP_RX_CAP)
+    if (!pcb)
         return 0;
-    size_t space = NET_TCP_RX_CAP - pcb->rx_len;
-    /* Keep an incoming burst below the roughly 14.5 KiB NE2000 ring. */
-    if (space > 8192u)
-        space = 8192u;
-    return (uint16_t)(space > 0xFFFFu ? 0xFFFFu : space);
+    uint32_t irq_flags = irq_save();
+    size_t used = pcb->rx_len;
+    uint32_t active = net_tcp_registered_pcbs ? net_tcp_registered_pcbs : 1u;
+    irq_restore(irq_flags);
+    if (used >= NET_TCP_RX_CAP)
+        return 0;
+    size_t space = NET_TCP_RX_CAP - used;
+    size_t share = NET_TCP_SHARED_WINDOW / active;
+    if (share < 512u)
+        share = 512u;
+    if (space > share)
+        space = share;
+    return (uint16_t)space;
 }
 
 static int net_tcp_send_ack(struct net_tcp_pcb *pcb) {
@@ -713,6 +772,7 @@ static int net_tcp_send_ack(struct net_tcp_pcb *pcb) {
     if (!pcb)
         return -1;
     memset(ah, 0, sizeof(*ah));
+    uint32_t irq_flags = irq_save();
     ah->src_port = bswap16(pcb->src_port);
     ah->dst_port = bswap16(pcb->dst_port);
     ah->seq      = bswap32(pcb->seq);
@@ -720,19 +780,25 @@ static int net_tcp_send_ack(struct net_tcp_pcb *pcb) {
     ah->data_off = (uint8_t)(sizeof(*ah) / 4) << 4;
     ah->flags    = TCP_ACK;
     ah->window   = bswap16(net_tcp_receive_window(pcb));
-    ah->checksum = trans_checksum(net_ip, pcb->dst_ip, 6, ah, sizeof(*ah));
-    return ip_send(pcb->dst_ip, 6, ah, sizeof(*ah));
+    uint32_t dst_ip = pcb->dst_ip;
+    irq_restore(irq_flags);
+    ah->checksum = trans_checksum(net_ip, dst_ip, 6, ah, sizeof(*ah));
+    return ip_send(dst_ip, 6, ah, sizeof(*ah));
 }
 
 static struct net_tcp_pcb *net_tcp_match_pcb(uint32_t src_ip, uint16_t src_port,
                                              uint16_t dst_port) {
+    uint32_t irq_flags = irq_save();
     struct net_tcp_pcb *pcb = tcp_pcbs;
     while (pcb) {
         if (pcb->registered && pcb->src_port == dst_port &&
-            pcb->dst_port == src_port && pcb->dst_ip == src_ip)
+            pcb->dst_port == src_port && pcb->dst_ip == src_ip) {
+            irq_restore(irq_flags);
             return pcb;
+        }
         pcb = pcb->next;
     }
+    irq_restore(irq_flags);
     return 0;
 }
 
@@ -740,31 +806,54 @@ static size_t net_tcp_queue_rx(struct net_tcp_pcb *pcb, const uint8_t *payload,
                                size_t plen) {
     if (!pcb || !payload || plen == 0)
         return 0;
+    uint32_t irq_flags = irq_save();
     size_t space = NET_TCP_RX_CAP - pcb->rx_len;
     size_t copy = plen < space ? plen : space;
     if (copy > 0) {
-        memcpy(pcb->rx_buf + pcb->rx_len, payload, copy);
+        size_t first = NET_TCP_RX_CAP - pcb->rx_tail;
+        if (first > copy)
+            first = copy;
+        memcpy(pcb->rx_buf + pcb->rx_tail, payload, first);
+        if (copy > first)
+            memcpy(pcb->rx_buf, payload + first, copy - first);
+        pcb->rx_tail = (pcb->rx_tail + copy) % NET_TCP_RX_CAP;
         pcb->rx_len += copy;
         net_tcp_rx_buffered += (uint32_t)copy;
     }
     if (copy < plen)
         net_tcp_rx_dropped += (uint32_t)(plen - copy);
+    irq_restore(irq_flags);
     return copy;
 }
 
 static int net_tcp_take_rx(struct net_tcp_pcb *pcb, void *buf, size_t max) {
     if (!pcb || !buf || max == 0 || pcb->rx_len == 0)
         return 0;
+    uint32_t irq_flags = irq_save();
+    if (pcb->rx_len == 0) {
+        irq_restore(irq_flags);
+        return 0;
+    }
     size_t take = pcb->rx_len < max ? pcb->rx_len : max;
-    memcpy(buf, pcb->rx_buf, take);
-    for (size_t i = take; i < pcb->rx_len; i++)
-        pcb->rx_buf[i - take] = pcb->rx_buf[i];
+    if (take > NET_TCP_RECV_COPY_MAX)
+        take = NET_TCP_RECV_COPY_MAX;
+    size_t first = NET_TCP_RX_CAP - pcb->rx_head;
+    if (first > take)
+        first = take;
+    memcpy(buf, pcb->rx_buf + pcb->rx_head, first);
+    if (take > first)
+        memcpy((uint8_t *)buf + first, pcb->rx_buf, take - first);
+    pcb->rx_head = (pcb->rx_head + take) % NET_TCP_RX_CAP;
     pcb->rx_len -= take;
+    if (pcb->rx_len == 0)
+        pcb->rx_head = pcb->rx_tail = 0;
     if (net_tcp_rx_buffered >= take)
         net_tcp_rx_buffered -= (uint32_t)take;
     else
         net_tcp_rx_buffered = 0;
-    if (pcb->state == TCP_STATE_ESTABLISHED)
+    int send_ack = pcb->state == TCP_STATE_ESTABLISHED;
+    irq_restore(irq_flags);
+    if (send_ack)
         (void)net_tcp_send_ack(pcb);
     return (int)take;
 }
@@ -819,24 +908,33 @@ static int net_tcp_dispatch_frame(const void *frame, size_t len) {
         return 0;
 
     if (tcp->flags & TCP_RST) {
+        uint32_t irq_flags = irq_save();
         pcb->rx_reset = 1;
         net_tcp_mark_closed(pcb);
+        irq_restore(irq_flags);
         return 1;
     }
 
     if (pcb->state == TCP_STATE_SYN_SENT) {
-        if ((tcp->flags & (TCP_SYN | TCP_ACK)) != (TCP_SYN | TCP_ACK))
+        uint32_t irq_flags = irq_save();
+        if (pcb->state != TCP_STATE_SYN_SENT ||
+            (tcp->flags & (TCP_SYN | TCP_ACK)) != (TCP_SYN | TCP_ACK)) {
+            irq_restore(irq_flags);
             return 1;
+        }
         uint32_t peer_ack = bswap32(tcp->ack);
-        if (peer_ack != pcb->seq + 1u)
+        if (peer_ack != pcb->seq + 1u) {
+            irq_restore(irq_flags);
             return 1;
+        }
         pcb->ack = bswap32(tcp->seq) + 1;
         pcb->seq = peer_ack;
         pcb->snd_una = peer_ack;
         pcb->peer_window = bswap16(tcp->window);
-        net_tcp_send_ack(pcb);
         pcb->state = TCP_STATE_ESTABLISHED;
         net_tcp_open_pcbs++;
+        irq_restore(irq_flags);
+        net_tcp_send_ack(pcb);
         dbg("tcp: connected\n");
         return 1;
     }
@@ -855,6 +953,11 @@ static int net_tcp_dispatch_frame(const void *frame, size_t len) {
     size_t plen = tcp_len - doff;
     uint32_t peer_seq = bswap32(tcp->seq);
     uint32_t fin_seq = peer_seq + (uint32_t)plen;
+    uint32_t irq_flags = irq_save();
+    if (pcb->state != TCP_STATE_ESTABLISHED) {
+        irq_restore(irq_flags);
+        return 1;
+    }
     if (tcp->flags & TCP_ACK) {
         uint32_t peer_ack = bswap32(tcp->ack);
         if ((int32_t)(peer_ack - pcb->snd_una) >= 0 &&
@@ -884,13 +987,15 @@ static int net_tcp_dispatch_frame(const void *frame, size_t len) {
     int accepted_fin = (tcp->flags & TCP_FIN) && pcb->ack == fin_seq;
     if (accepted_fin)
         pcb->ack++;
-    if (plen > 0 || (tcp->flags & TCP_FIN))
-        (void)net_tcp_send_ack(pcb);
+    int should_ack = plen > 0 || (tcp->flags & TCP_FIN);
 
     if (accepted_fin) {
         pcb->rx_closed = 1;
         net_tcp_mark_closed(pcb);
     }
+    irq_restore(irq_flags);
+    if (should_ack)
+        (void)net_tcp_send_ack(pcb);
     return 1;
 }
 
@@ -911,8 +1016,12 @@ static int net_tcp_send_syn(struct net_tcp_pcb *pcb) {
 int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
     if (!pcb)
         return -1;
-    if (pcb->state != TCP_STATE_CLOSED || pcb->registered)
+    uint32_t irq_flags = irq_save();
+    if (pcb->state != TCP_STATE_CLOSED || pcb->registered) {
+        irq_restore(irq_flags);
+        dbg("tcp: pcb already active\n");
         return -1;
+    }
 
     pcb->dst_ip   = ip;
     pcb->dst_port = port;
@@ -927,7 +1036,8 @@ int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
     pcb->rx_closed = 0;
     pcb->rx_reset = 0;
     pcb->state    = TCP_STATE_SYN_SENT;
-    net_tcp_register_pcb(pcb);
+    net_tcp_register_pcb_locked(pcb);
+    irq_restore(irq_flags);
 
     if (net_tcp_send_syn(pcb) < 0) {
         net_tcp_mark_closed(pcb);
@@ -977,9 +1087,15 @@ int net_tcp_send_pcb(struct net_tcp_pcb *pcb, const void *data, size_t len) {
         size_t chunk = left > 1200 ? 1200 : left;
         uint8_t pkt[sizeof(struct tcp_hdr) + 1200];
         struct tcp_hdr *th = (struct tcp_hdr *)pkt;
+        memset(th, 0, sizeof(*th));
+        uint32_t irq_flags = irq_save();
+        if (pcb->state != TCP_STATE_ESTABLISHED) {
+            irq_restore(irq_flags);
+            return -1;
+        }
         uint32_t send_seq = pcb->seq;
         uint32_t want_ack = send_seq + (uint32_t)chunk;
-        memset(th, 0, sizeof(*th));
+        uint32_t dst_ip = pcb->dst_ip;
         th->src_port = bswap16(pcb->src_port);
         th->dst_port = bswap16(pcb->dst_port);
         th->seq      = bswap32(send_seq);
@@ -987,13 +1103,14 @@ int net_tcp_send_pcb(struct net_tcp_pcb *pcb, const void *data, size_t len) {
         th->data_off = (uint8_t)(sizeof(*th) / 4) << 4;
         th->flags    = TCP_PSH | TCP_ACK;
         th->window   = bswap16(net_tcp_receive_window(pcb));
-        memcpy(pkt + sizeof(*th), p, chunk);
-        th->checksum = trans_checksum(net_ip, pcb->dst_ip, 6, pkt, sizeof(*th) + chunk);
-
         pcb->seq = want_ack;
+        irq_restore(irq_flags);
+        memcpy(pkt + sizeof(*th), p, chunk);
+        th->checksum = trans_checksum(net_ip, dst_ip, 6, pkt, sizeof(*th) + chunk);
+
         int acknowledged = 0;
         for (int attempt = 0; attempt <= NET_TCP_RETRIES && !acknowledged; attempt++) {
-            if (ip_send(pcb->dst_ip, 6, pkt, sizeof(*th) + chunk) < 0)
+            if (ip_send(dst_ip, 6, pkt, sizeof(*th) + chunk) < 0)
                 return -1;
             uint32_t deadline = net_timer_ready() ?
                 net_deadline_after_ms(NET_TCP_RETRY_MS) : 0;

@@ -23,11 +23,12 @@ static int str_len(const char *s) {
     return n;
 }
 
-static void copy_str(char *dst, const char *src) {
-    while ((*dst++ = *src++)) {}
+static int write_user_u32(uint32_t cr3, uint32_t address, uint32_t value) {
+    return paging_copy_to_user_space(cr3, address, &value, sizeof(value));
 }
 
-static uint32_t build_user_stack(int argc, const char *const argv[]) {
+static uint32_t build_user_stack(uint32_t cr3, int argc,
+                                 const char *const argv[]) {
     if (argc < 0)
         argc = 0;
     if (argc > 15)
@@ -39,64 +40,60 @@ static uint32_t build_user_stack(int argc, const char *const argv[]) {
     for (int i = argc - 1; i >= 0; i--) {
         int len = str_len(argv[i]) + 1;
         sp -= (uint32_t)len;
-        copy_str((char *)(uintptr_t)sp, argv[i] ? argv[i] : "");
+        if (paging_copy_to_user_space(cr3, sp, argv[i] ? argv[i] : "",
+                                      (uint32_t)len) < 0)
+            return 0;
         arg_ptrs[i] = sp;
     }
 
     sp &= ~3u;
     sp -= 4;
-    *(uint32_t *)(uintptr_t)sp = 0;
+    if (write_user_u32(cr3, sp, 0) < 0)
+        return 0;
     for (int i = argc - 1; i >= 0; i--) {
         sp -= 4;
-        *(uint32_t *)(uintptr_t)sp = arg_ptrs[i];
+        if (write_user_u32(cr3, sp, arg_ptrs[i]) < 0)
+            return 0;
     }
     uint32_t argv_user = sp;
     sp -= 4;
-    *(uint32_t *)(uintptr_t)sp = argv_user;
+    if (write_user_u32(cr3, sp, argv_user) < 0)
+        return 0;
     sp -= 4;
-    *(uint32_t *)(uintptr_t)sp = (uint32_t)argc;
+    if (write_user_u32(cr3, sp, (uint32_t)argc) < 0)
+        return 0;
     sp -= 4;
-    *(uint32_t *)(uintptr_t)sp = 0;
+    if (write_user_u32(cr3, sp, 0) < 0)
+        return 0;
     return sp;
 }
 
-int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const char *name,
-                             int console_silent, int argc, const char *const argv[],
-                             int inherit_fd_owner, int inherit_stdio_only) {
-    uint32_t old_cr3 = paging_current_cr3();
-    uint32_t proc_cr3 = paging_create_user_space();
-    if (!proc_cr3) {
-        serial_puts("[exec] out of memory\n");
-        return -1;
+static uint32_t create_user_address_space(void) {
+    uint32_t cr3 = paging_create_user_space();
+    if (!cr3)
+        return 0;
+    if (paging_map_user_range_in_space(
+            cr3, USER_TRAMPOLINE_BASE, 0x1000u) < 0 ||
+        user_install_trampoline_in_space(cr3) < 0 ||
+        paging_set_user_range_writable_in_space(
+            cr3, USER_TRAMPOLINE_BASE, 0x1000u, 0) < 0 ||
+        paging_map_user_range_in_space(
+            cr3, USER_DEFAULT_STACK_TOP - USER_MAIN_STACK_SIZE,
+            USER_MAIN_STACK_SIZE) < 0) {
+        paging_destroy_user_space(cr3);
+        return 0;
     }
+    return cr3;
+}
 
+static int launch_prepared_space(uint32_t proc_cr3, uint32_t entry,
+                                 uint32_t image_end, uint32_t stack,
+                                 const char *name, int console_silent,
+                                 int inherit_fd_owner,
+                                 int inherit_stdio_only) {
     uint32_t irq_flags = irq_save();
-    paging_switch(proc_cr3);
-    if (paging_map_user_range(USER_TRAMPOLINE_BASE, 0x1000u) < 0 ||
-        user_install_trampoline() < 0 ||
-        paging_set_user_range_writable(USER_TRAMPOLINE_BASE, 0x1000u, 0) < 0 ||
-        paging_map_user_range(USER_DEFAULT_STACK_TOP - USER_MAIN_STACK_SIZE,
-                              USER_MAIN_STACK_SIZE) < 0) {
-        paging_switch(old_cr3);
-        irq_restore(irq_flags);
-        paging_destroy_user_space(proc_cr3);
-        serial_puts("[exec] out of user bootstrap pages\n");
-        return -1;
-    }
-    uint32_t image_end = 0;
-    uint32_t entry = elf_load(elf_data, elf_size, &image_end);
-    uint32_t stack = build_user_stack(argc, argv);
-    paging_switch(old_cr3);
-    irq_restore(irq_flags);
-
-    if (!entry || !stack) {
-        serial_puts("[exec] bad ELF\n");
-        paging_destroy_user_space(proc_cr3);
-        return -1;
-    }
-
-    irq_flags = irq_save();
-    int id = task_create_ex(user_process_trampoline, name ? name : "user_proc", console_silent);
+    int id = task_create_ex(user_process_trampoline,
+                            name ? name : "user_proc", console_silent);
     if (id < 0) {
         paging_destroy_user_space(proc_cr3);
         irq_restore(irq_flags);
@@ -128,8 +125,56 @@ int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const cha
     serial_puts(" task=");
     serial_puthex((uint32_t)id);
     serial_puts("\n");
-
     return id;
+}
+
+int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const char *name,
+                             int console_silent, int argc, const char *const argv[],
+                             int inherit_fd_owner, int inherit_stdio_only) {
+    uint32_t proc_cr3 = create_user_address_space();
+    if (!proc_cr3) {
+        serial_puts("[exec] out of user bootstrap pages\n");
+        return -1;
+    }
+    uint32_t image_end = 0;
+    uint32_t entry = elf_load_into_space(
+        proc_cr3, elf_data, elf_size, &image_end);
+    uint32_t stack = build_user_stack(proc_cr3, argc, argv);
+
+    if (!entry || !stack) {
+        serial_puts("[exec] bad ELF\n");
+        paging_destroy_user_space(proc_cr3);
+        return -1;
+    }
+
+    return launch_prepared_space(proc_cr3, entry, image_end, stack, name,
+                                 console_silent, inherit_fd_owner,
+                                 inherit_stdio_only);
+}
+
+int exec_start_file_args_with_fds(int fd, size_t elf_size, const char *name,
+                                  int console_silent, int argc,
+                                  const char *const argv[], int inherit_fd_owner,
+                                  int inherit_stdio_only) {
+    uint32_t proc_cr3 = create_user_address_space();
+    if (!proc_cr3) {
+        vfs_close(fd);
+        serial_puts("[exec] out of user bootstrap pages\n");
+        return -1;
+    }
+    uint32_t image_end = 0;
+    uint32_t entry = elf_load_file_into_space(
+        proc_cr3, fd, elf_size, &image_end);
+    uint32_t stack = build_user_stack(proc_cr3, argc, argv);
+    vfs_close(fd);
+    if (!entry || !stack) {
+        serial_puts("[exec] bad ELF\n");
+        paging_destroy_user_space(proc_cr3);
+        return -1;
+    }
+    return launch_prepared_space(proc_cr3, entry, image_end, stack, name,
+                                 console_silent, inherit_fd_owner,
+                                 inherit_stdio_only);
 }
 
 int exec_start_args(const uint8_t *elf_data, size_t elf_size, const char *name,

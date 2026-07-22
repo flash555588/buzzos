@@ -117,6 +117,8 @@ struct net_tcp_pcb {
     int      registered;
     int      rx_closed;
     int      rx_reset;
+    size_t   rx_head;
+    size_t   rx_tail;
     size_t   rx_len;
     uint8_t  rx_buf[NET_TCP_RX_CAP];
     struct net_tcp_pcb *next;
@@ -127,6 +129,8 @@ int  net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port);
 int  net_tcp_send_pcb(struct net_tcp_pcb *pcb, const void *data, size_t len);
 int  net_tcp_recv_pcb(struct net_tcp_pcb *pcb, void *buf, size_t max);
 void net_tcp_close_pcb(struct net_tcp_pcb *pcb);
+/* Called by the NIC IRQ handler after raw frames enter the software queue. */
+void net_rx_interrupt_notify(void);
 
 int  net_tcp_connect(uint32_t ip, uint16_t port);
 int  net_tcp_send(const void *data, size_t len);
