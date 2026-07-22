@@ -6,7 +6,8 @@
 
 #define MIX_CHANNELS 16
 #define MIX_RATE 11025
-#define MIX_SAMPLES 315
+#define MIX_CHUNK 96
+#define TARGET_QUEUED 480
 
 struct mix_channel {
     const byte *samples;
@@ -18,9 +19,11 @@ struct mix_channel {
 };
 
 static struct mix_channel channels[MIX_CHANNELS];
-static byte mix_buffer[MIX_SAMPLES];
+static byte mix_buffer[MIX_CHUNK];
 static boolean use_prefix;
 static snddevice_t devices[] = { SNDDEVICE_SB };
+static volatile int mixer_running;
+static volatile int mixer_lock;
 
 /* Configuration variables normally supplied by the SDL sound module. */
 int use_libsamplerate = 0;
@@ -36,18 +39,16 @@ static int buzz_get_lump(sfxinfo_t *sfx) {
     return W_GetNumForName(name);
 }
 
-static boolean buzz_sound_init(boolean prefix) {
-    use_prefix = prefix;
-    memset(channels, 0, sizeof(channels));
-    return audio_config(MIX_RATE) == 0;
+static void lock_mixer(void) {
+    while (__sync_lock_test_and_set(&mixer_lock, 1)) yield();
 }
 
-static void buzz_sound_shutdown(void) {
-    memset(channels, 0, sizeof(channels));
+static void unlock_mixer(void) {
+    __sync_lock_release(&mixer_lock);
 }
 
-static void buzz_sound_update(void) {
-    for (int i = 0; i < MIX_SAMPLES; i++) {
+static void mix_samples(int count) {
+    for (int i = 0; i < count; i++) {
         int mixed = 0;
         for (int c = 0; c < MIX_CHANNELS; c++) {
             struct mix_channel *ch = &channels[c];
@@ -66,13 +67,63 @@ static void buzz_sound_update(void) {
         if (mixed > 127) mixed = 127;
         mix_buffer[i] = (byte)(mixed + 128);
     }
-    (void)audio_write(mix_buffer, sizeof(mix_buffer));
 }
+
+static void mixer_thread(void) {
+    uint32_t last = monotonic_ms();
+    uint32_t fraction = 0;
+    while (mixer_running) {
+        uint32_t now = monotonic_ms();
+        uint32_t elapsed = now - last;
+        if (!elapsed) { sleep_ms(1); continue; }
+        last = now;
+        /* Convert elapsed wall time to an exact long-term sample count.  This
+         * keeps sound time independent from DOOM's renderer and 35 Hz tics. */
+        fraction += elapsed * MIX_RATE;
+        uint32_t due = fraction / 1000u;
+        fraction %= 1000u;
+        while (due) {
+            int count = due > MIX_CHUNK ? MIX_CHUNK : (int)due;
+            lock_mixer();
+            mix_samples(count);
+            unlock_mixer();
+            /* If rendering or scheduling fell behind, advance the mixer but
+             * do not extend an already-long hardware queue. */
+            int queued = audio_queued();
+            if (queued >= 0 && queued < TARGET_QUEUED)
+                (void)audio_write(mix_buffer, (size_t)count);
+            due -= (uint32_t)count;
+        }
+        sleep_ms(1);
+    }
+}
+
+static boolean buzz_sound_init(boolean prefix) {
+    use_prefix = prefix;
+    memset(channels, 0, sizeof(channels));
+    if (audio_config_latency(MIX_RATE, 40) < 0) return false;
+    mixer_running = 1;
+    if (spawn(mixer_thread) < 0) { mixer_running = 0; return false; }
+    return true;
+}
+
+static void buzz_sound_shutdown(void) {
+    mixer_running = 0;
+    lock_mixer();
+    memset(channels, 0, sizeof(channels));
+    unlock_mixer();
+}
+
+/* Mixing runs from mixer_thread; this callback only preserves the upstream
+ * sound-module interface. */
+static void buzz_sound_update(void) {}
 
 static void buzz_sound_params(int channel, int volume, int separation) {
     (void)separation;
+    lock_mixer();
     if (channel >= 0 && channel < MIX_CHANNELS)
         channels[channel].volume = volume;
+    unlock_mixer();
 }
 
 static int buzz_start_sound(sfxinfo_t *sfx, int channel, int volume, int separation) {
@@ -88,6 +139,7 @@ static int buzz_start_sound(sfxinfo_t *sfx, int channel, int volume, int separat
                       ((uint32_t)raw[6] << 16) | ((uint32_t)raw[7] << 24);
     if (!rate || length > (uint32_t)lump_size - 8u || length <= 32u) return -1;
 
+    lock_mixer();
     struct mix_channel *ch = &channels[channel];
     ch->samples = raw + 8 + 16;
     ch->length = length - 32;
@@ -96,15 +148,21 @@ static int buzz_start_sound(sfxinfo_t *sfx, int channel, int volume, int separat
     if (!ch->step) ch->step = 1;
     ch->volume = volume;
     ch->active = 1;
+    unlock_mixer();
     return channel;
 }
 
 static void buzz_stop_sound(int channel) {
+    lock_mixer();
     if (channel >= 0 && channel < MIX_CHANNELS) channels[channel].active = 0;
+    unlock_mixer();
 }
 
 static boolean buzz_sound_playing(int channel) {
-    return channel >= 0 && channel < MIX_CHANNELS && channels[channel].active;
+    lock_mixer();
+    boolean result = channel >= 0 && channel < MIX_CHANNELS && channels[channel].active;
+    unlock_mixer();
+    return result;
 }
 
 static void buzz_precache(sfxinfo_t *sounds, int count) {

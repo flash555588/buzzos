@@ -33,6 +33,8 @@ static int16_t current_sample;
 static uint8_t repeat_left;
 static uint32_t input_rate = 11025;
 static uint8_t input_upsample = 4;
+static uint8_t active_descriptors = ACTIVE_DESCRIPTORS;
+static uint32_t startup_samples;
 #if AC97_DIAGNOSTICS
 static uint32_t stat_since, stat_underruns, stat_irqs, stat_fifo_errors;
 static uint32_t stat_restarts, stat_refills, stat_written;
@@ -65,6 +67,8 @@ static void report_stats(void) {
 #endif
 
 static uint32_t start_threshold(void) {
+    if (startup_samples)
+        return startup_samples;
     /* About 46 ms already staged in DMA plus 31 ms left in the source FIFO. */
     return ACTIVE_DESCRIPTORS * FRAMES_PER_BUFFER / input_upsample +
            (input_rate + 31u) / 32u;
@@ -129,8 +133,8 @@ static void reconcile_dma_locked(void) {
     uint8_t lvi = inb(nabm + 0x15) & (DESCRIPTORS - 1u);
     uint8_t queued = (status & 0x01u) ? 0u :
         (uint8_t)(((lvi - civ) & (DESCRIPTORS - 1u)) + 1u);
-    if (queued > ACTIVE_DESCRIPTORS) return;
-    while (queued < ACTIVE_DESCRIPTORS) {
+    if (queued > active_descriptors) return;
+    while (queued < active_descriptors) {
         uint8_t index = (uint8_t)((lvi + 1u) & (DESCRIPTORS - 1u));
         fill_buffer(index);
         AUDIO_STAT(stat_refills++);
@@ -209,9 +213,9 @@ int ac97_init(void) {
 }
 
 static void start_playback(void) {
-    for (uint32_t i = 0; i < ACTIVE_DESCRIPTORS; i++) fill_buffer(i);
+    for (uint32_t i = 0; i < active_descriptors; i++) fill_buffer(i);
     outl(nabm + 0x10, (uint32_t)bdl);
-    outb(nabm + 0x15, ACTIVE_DESCRIPTORS - 1u);
+    outb(nabm + 0x15, active_descriptors - 1u);
     outw(nabm + 0x16, 0x1Cu);
     outb(nabm + 0x1B, 0x01u); /* run, with all AC97 interrupt enables off */
     playing = 1;
@@ -241,7 +245,7 @@ int ac97_write(const uint8_t *data, size_t size) {
     return (int)written;
 }
 
-int ac97_set_rate(uint32_t rate) {
+int ac97_set_rate(uint32_t rate, uint32_t latency_ms) {
     if (!ready || (rate != 11025u && rate != 22050u && rate != 44100u))
         return -1;
     uint32_t flags = irq_save();
@@ -256,12 +260,33 @@ int ac97_set_rate(uint32_t rate) {
     repeat_left = 0;
     input_rate = rate;
     input_upsample = (uint8_t)(OUTPUT_RATE / rate);
+    active_descriptors = latency_ms && latency_ms <= 50u ? 2u : ACTIVE_DESCRIPTORS;
+    startup_samples = latency_ms ? (rate * latency_ms + 999u) / 1000u : 0u;
+    uint32_t minimum = active_descriptors * FRAMES_PER_BUFFER / input_upsample;
+    if (startup_samples && startup_samples < minimum) startup_samples = minimum;
     playing = 0;
     AUDIO_STAT(stat_since = timer_ticks());
     AUDIO_STAT(stat_underruns = stat_irqs = stat_fifo_errors = 0);
     AUDIO_STAT(stat_restarts = stat_refills = stat_written = 0);
     irq_restore(flags);
     return 0;
+}
+
+int ac97_queued_samples(void) {
+    if (!ready) return -1;
+    uint32_t flags = irq_save();
+    uint32_t queued = fifo_count;
+    if (playing) {
+        uint16_t status = inw(nabm + 0x16);
+        uint8_t civ = inb(nabm + 0x14) & (DESCRIPTORS - 1u);
+        uint8_t lvi = inb(nabm + 0x15) & (DESCRIPTORS - 1u);
+        uint8_t dma = (status & 0x01u) ? 0u :
+            (uint8_t)(((lvi - civ) & (DESCRIPTORS - 1u)) + 1u);
+        if (dma > active_descriptors) dma = active_descriptors;
+        queued += dma * FRAMES_PER_BUFFER / input_upsample;
+    }
+    irq_restore(flags);
+    return (int)queued;
 }
 
 void ac97_poll(void) {

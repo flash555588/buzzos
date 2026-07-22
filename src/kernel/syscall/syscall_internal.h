@@ -51,6 +51,7 @@ int sys_shm_map(uint32_t token, uint32_t out_arg, uint32_t c, uint32_t d, uint32
 int sys_shm_unmap(uint32_t token, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_audio_write(uint32_t data_arg, uint32_t size, uint32_t c, uint32_t d, uint32_t e);
 int sys_audio_config(uint32_t rate, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
+int sys_audio_queued(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 
 int sys_socket(uint32_t domain, uint32_t type, uint32_t protocol, uint32_t d, uint32_t e);
 int sys_connect(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen, uint32_t d, uint32_t e);

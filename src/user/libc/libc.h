@@ -139,7 +139,9 @@ int  shm_map(uint32_t token, struct shm_mapping *mapping);
 int  shm_unmap(uint32_t token);
 /* Unsigned 8-bit mono PCM. Select 11025, 22050 or 44100 Hz before writing. */
 int  audio_config(unsigned int sample_rate);
+int  audio_config_latency(unsigned int sample_rate, unsigned int latency_ms);
 int  audio_write(const uint8_t *samples, size_t count);
+int  audio_queued(void);
 int  socket(int domain, int type, int protocol);
 int  bind(int sd, const struct sockaddr_in *addr, size_t addrlen);
 int  connect(int sd, const struct sockaddr_in *addr, size_t addrlen);

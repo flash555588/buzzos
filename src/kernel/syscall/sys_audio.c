@@ -11,6 +11,12 @@ int sys_audio_write(uint32_t data_arg, uint32_t size,
 
 int sys_audio_config(uint32_t rate, uint32_t b,
                      uint32_t c, uint32_t d, uint32_t e) {
-    (void)b; (void)c; (void)d; (void)e;
-    return ac97_set_rate(rate);
+    (void)c; (void)d; (void)e;
+    return ac97_set_rate(rate, b);
+}
+
+int sys_audio_queued(uint32_t a, uint32_t b,
+                     uint32_t c, uint32_t d, uint32_t e) {
+    (void)a; (void)b; (void)c; (void)d; (void)e;
+    return ac97_queued_samples();
 }

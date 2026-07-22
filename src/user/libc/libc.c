@@ -64,7 +64,8 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_MOUSE_GET=49, SYS_FSSTAT=50, SYS_FUTEX_WAIT_TIMEOUT=51,
        SYS_GFX_INFO=52, SYS_FONT_GLYPH=53, SYS_SBRK=54,
        SYS_SHM_CREATE=57, SYS_SHM_MAP=58, SYS_SHM_UNMAP=59,
-       SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62 };
+       SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62,
+       SYS_AUDIO_QUEUED=63 };
 
 static void (*exit_handlers[16])(void);
 static int exit_handler_count;
@@ -396,6 +397,14 @@ int audio_write(const uint8_t *samples, size_t count) {
 
 int audio_config(unsigned int sample_rate) {
     return syscall1(SYS_AUDIO_CONFIG, (int)sample_rate);
+}
+
+int audio_config_latency(unsigned int sample_rate, unsigned int latency_ms) {
+    return syscall2(SYS_AUDIO_CONFIG, (int)sample_rate, (int)latency_ms);
+}
+
+int audio_queued(void) {
+    return syscall0(SYS_AUDIO_QUEUED);
 }
 
 uint32_t monotonic_ms(void) {
