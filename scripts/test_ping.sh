@@ -3,12 +3,13 @@
 set -e
 cd "$(dirname "$0")/.."
 
-QEMU="/d/Program Files/qemu/qemu-system-i386.exe"
+QEMU="${QEMU:-/c/msys64/mingw64/bin/qemu-system-x86_64.exe}"
 SOCK="build/qemu-monitor.sock"
 rm -f "$SOCK" build/serial.log
 
 # Start QEMU with monitor socket
-"$QEMU" -drive format=raw,file=build/buzzos.img \
+"$QEMU" -accel whpx -cpu qemu64 -m 256 \
+    -drive format=raw,file=build/buzzos.img \
     -serial file:build/serial.log \
     -no-reboot \
     -netdev user,id=n0 \

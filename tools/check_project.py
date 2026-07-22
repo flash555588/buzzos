@@ -846,7 +846,7 @@ def check_procfs_diagnostics():
         "fs\\s+stable\\s+/fs,/proc/fs,fsinfo,fsstat,tools:check_minifs",
         "max_tasks\\s+32",
         "max_fd_per_owner\\s+32",
-        "minifs_max_file_size\\s+16678400",
+        "minifs_max_file_size\\s+32441856",
         "mount\\s+/fs",
         "driver\\s+minifs",
         "inodes_total\\s+128",

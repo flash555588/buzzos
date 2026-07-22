@@ -103,7 +103,11 @@ def build_report(args):
         check_tool("clang", args.clang, ["--version"], "Install LLVM/Clang and ensure clang is on PATH.", args.no_version),
         check_tool("ld.lld", args.ld, ["--version"], "Install LLVM lld and ensure ld.lld is on PATH.", args.no_version),
         check_tool("llvm-objcopy", args.objcopy, ["--version"], "Install LLVM tools and ensure llvm-objcopy is on PATH.", args.no_version),
-        check_tool("qemu-system-i386", args.qemu, ["--version"], "Install QEMU i386 or pass QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\".", args.no_version),
+        check_tool("qemu", args.qemu, ["--version"],
+                   "Install MSYS2 package mingw-w64-x86_64-qemu "
+                   "(C:\\msys64\\mingw64\\bin\\qemu-system-x86_64.exe) "
+                   "or pass QEMU=... . Prefer x86_64 + WHPX on Windows.",
+                   args.no_version),
     ]
     checks.extend(check_workspace())
     ok_count = sum(1 for row in checks if row["status"] == "ok")
@@ -134,7 +138,14 @@ def main():
     parser = argparse.ArgumentParser(description="Check the local BuzzOS build/run environment")
     parser.add_argument("--python", default=sys.executable, help="Python command used by Makefile")
     parser.add_argument("--make", default="make", help="GNU Make command")
-    parser.add_argument("--qemu", default=os.environ.get("QEMU", "qemu-system-i386"), help="qemu-system-i386 command or absolute path")
+    parser.add_argument(
+        "--qemu",
+        default=os.environ.get(
+            "QEMU",
+            r"C:\msys64\mingw64\bin\qemu-system-x86_64.exe",
+        ),
+        help="qemu-system-x86_64 (preferred, WHPX) or qemu-system-i386 path",
+    )
     parser.add_argument("--nasm", default="nasm")
     parser.add_argument("--clang", default="clang")
     parser.add_argument("--ld", default="ld.lld")

@@ -9,17 +9,19 @@ booting QEMU.
 The default image layout is:
 
 ```text
-LBA 67584         superblock
-LBA 67585..69632  inode table, one inode per sector
-LBA 69633..69692  data block bitmap
-LBA 69693..100351 data blocks
+LBA 67584          superblock
+LBA 67585..69632   inode table, one inode per sector
+LBA 69633..69756   data block bitmap
+LBA 69757..133119  data blocks
 ```
 
-The current format uses a 32768-sector (16 MiB) raw `/fs` partition. It has
-2048 inodes, 60 bitmap sectors, and 30659 data blocks. Each inode stores eight
-direct block references plus single- and double-indirect block tables. Directory
-entries are 32-byte records containing an inode number, type, and 24-byte name.
-Images made by the older 128-inode formats are migrated in place on mount.
+The current format uses a 65536-sector (32 MiB) raw `/fs` partition. It has
+2048 inodes, 124 bitmap sectors, and 63363 data blocks (~30.9 MiB usable).
+Each inode stores eight direct block references plus single- and double-indirect
+block tables. Directory entries are 32-byte records containing an inode number,
+type, and 24-byte name. Images made by the older 128-inode formats are migrated
+in place on mount. Expanding `MINIFS_SECTORS` / `FS_SECTORS` reformats on the
+next mount when the superblock block count no longer matches.
 
 ## Commands
 

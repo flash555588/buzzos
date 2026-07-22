@@ -53,10 +53,11 @@ def read_sector(image, lba):
 def c_name(raw):
     if 0 in raw:
         raw = raw[:raw.index(0)]
+    # MiniFS stores raw path component bytes (UTF-8 allowed, ASCII common).
     try:
-        return raw.decode("ascii")
+        return raw.decode("utf-8")
     except UnicodeDecodeError:
-        fail("directory entry name is not ASCII")
+        fail("directory entry name is not valid UTF-8")
 
 
 class MiniFsImage:

@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--name", default="game.gb",
                         help="destination filename under /fs/games/gameboy")
     parser.add_argument("--fs-start", type=int, default=parse_make_int("FS_START", 67584))
-    parser.add_argument("--fs-sectors", type=int, default=parse_make_int("FS_SECTORS", 32768))
+    parser.add_argument("--fs-sectors", type=int, default=parse_make_int("FS_SECTORS", 65536))
     args = parser.parse_args()
     image_path, rom_path = Path(args.image), Path(args.rom)
     target_name = args.name

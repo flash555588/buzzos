@@ -1,7 +1,7 @@
 name=Music
 kind=gui
 version=1
-summary=WAV music player and AC97 test
+summary=Music player for WAV and MP3
 exec=/fs/apps/music
 state=/fs/music.cfg
 source=src/user/bin/music.c

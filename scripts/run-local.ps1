@@ -11,18 +11,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ([string]::IsNullOrWhiteSpace($QemuPath)) {
-    $QemuPath = $env:QEMU
-}
-if ([string]::IsNullOrWhiteSpace($QemuPath)) {
-    $defaultWindowsQemu = "C:\Program Files\qemu\qemu-system-i386.exe"
-    if (Test-Path -LiteralPath $defaultWindowsQemu) {
-        $QemuPath = $defaultWindowsQemu
-    } else {
-        $QemuPath = "qemu-system-i386"
-    }
-}
-$QemuPath = $QemuPath.Trim('"')
+. (Join-Path $PSScriptRoot "Resolve-BuzzosQemu.ps1")
+$qemuInfo = Resolve-BuzzosQemu -Preferred $QemuPath
+$QemuPath = $qemuInfo.Path
+$QemuAccel = $qemuInfo.Accel
+$QemuCpu = $qemuInfo.Cpu
 
 if ($KillExisting) {
     Get-Process | Where-Object { $_.ProcessName -like "qemu*" } |
@@ -101,14 +94,21 @@ function Key-Name([char]$Ch) {
 }
 
 $monitorPort = Get-FreeTcpPort
+# Match make run: SDL+GL is far faster than default GTK under WHPX.
+$QemuDisplay = if (-not [string]::IsNullOrWhiteSpace($env:QEMU_DISPLAY)) {
+    $env:QEMU_DISPLAY.Trim()
+} else {
+    "sdl,gl=on"
+}
 $argLine = '-drive "format=raw,file=' + $imagePath + '"' +
-    ' -accel tcg,tb-size=512' +
-    ' -cpu max' +
+    ' -accel ' + $QemuAccel +
+    ' -cpu ' + $QemuCpu +
     ' -m 256' +
     ' -serial "file:' + $serialPath + '"' +
     ' -monitor "tcp:127.0.0.1:' + $monitorPort + ',server,nowait"' +
     ' -no-reboot' +
     ' -vga std' +
+    ' -display ' + $QemuDisplay +
     ' -audiodev dsound,id=audio0' +
     ' -device AC97,audiodev=audio0' +
     ' -netdev user,id=n0' +
@@ -138,5 +138,7 @@ if (![string]::IsNullOrWhiteSpace($Command)) {
 }
 
 Write-Host "QEMU started: pid=$($script:qemuProcess.Id)"
+Write-Host "QEMU binary: $QemuPath"
+Write-Host "QEMU accel: $QemuAccel  cpu: $QemuCpu  display: $QemuDisplay"
 Write-Host "Serial log: $serialPath"
 Write-Host "Monitor: 127.0.0.1:$monitorPort"

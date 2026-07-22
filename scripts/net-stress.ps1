@@ -11,9 +11,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-if ([string]::IsNullOrWhiteSpace($QemuPath)) { $QemuPath = $env:QEMU }
-if ([string]::IsNullOrWhiteSpace($QemuPath)) { $QemuPath = "qemu-system-i386" }
-$QemuPath = $QemuPath.Trim('"')
+. (Join-Path $PSScriptRoot "Resolve-BuzzosQemu.ps1")
+$qemuInfo = Resolve-BuzzosQemu -Preferred $QemuPath
+$QemuPath = $qemuInfo.Path
+$QemuAccel = $qemuInfo.Accel
+$QemuCpu = $qemuInfo.Cpu
 
 function Get-FreeTcpPort {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -171,7 +173,9 @@ while (!(Test-Path -LiteralPath $readyPath)) {
 }
 
 $qemuArgs = @(
-    "-cpu", "max", "-m", "256",
+    "-accel", $QemuAccel,
+    "-cpu", $QemuCpu,
+    "-m", "256",
     "-drive", "format=raw,file=$TestImage",
     "-serial", "file:$SerialLog",
     "-display", "none",

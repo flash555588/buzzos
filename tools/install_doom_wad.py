@@ -145,8 +145,15 @@ class MiniFsWriter:
         return None
 
     def add_child(self, parent, name, typ):
-        if not name or len(name.encode("ascii")) >= MINIFS_NAME_LEN:
-            raise RuntimeError(f"invalid MiniFS name: {name}")
+        try:
+            name_bytes = name.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise RuntimeError(f"invalid MiniFS name: {name}") from exc
+        # MINIFS_NAME_LEN includes the trailing NUL; leaf names are UTF-8 bytes.
+        if not name_bytes or len(name_bytes) >= MINIFS_NAME_LEN:
+            raise RuntimeError(
+                f"invalid MiniFS name (need 1..{MINIFS_NAME_LEN - 1} UTF-8 bytes): {name}"
+            )
         existing = self.child(parent, name)
         if existing:
             if existing["type"] != typ:
@@ -154,7 +161,6 @@ class MiniFsWriter:
             return existing
         inode = self.alloc_inode(typ, parent["ino"])
         current = self.fs.read_file_bytes(parent)
-        name_bytes = name.encode("ascii")
         entry = struct.pack("<HB24s5x", inode["ino"], typ,
                             name_bytes + bytes(MINIFS_NAME_LEN - len(name_bytes)))
         assert len(entry) == MINIFS_DIRENT_SIZE
@@ -175,7 +181,7 @@ def main():
     parser.add_argument("--image", default="build/buzzos.img")
     parser.add_argument("--wad", required=True)
     parser.add_argument("--fs-start", type=int, default=parse_make_int("FS_START", 67584))
-    parser.add_argument("--fs-sectors", type=int, default=parse_make_int("FS_SECTORS", 32768))
+    parser.add_argument("--fs-sectors", type=int, default=parse_make_int("FS_SECTORS", 65536))
     args = parser.parse_args()
     image_path = Path(args.image)
     wad_path = Path(args.wad)

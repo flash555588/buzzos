@@ -7,7 +7,9 @@
 
 enum {
     MINIFS_LBA_START = 67584,
-    MINIFS_SECTORS = 32768,
+    /* Keep in sync with Makefile FS_SECTORS. uint16_t block indices cap this
+     * near 33 MiB of partition; 65536 sectors gives a 32 MiB /fs region. */
+    MINIFS_SECTORS = 65536,
 };
 
 struct fs_info {

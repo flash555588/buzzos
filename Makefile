@@ -5,7 +5,9 @@ IMAGE := $(BUILD)/buzzos.img
 BOOT_PARTITION_START := 2048
 BOOT_PARTITION_SECTORS := 65536
 FS_START_SECTOR := 67584
-FS_SECTORS := 32768
+# MiniFS data blocks are uint16_t-indexed (~33 MiB ceiling).
+# 65536 sectors = 32 MiB /fs partition (~30.9 MiB usable after metadata).
+FS_SECTORS := 65536
 FS_IMAGE ?= $(IMAGE)
 FS_TEST_IMAGE ?= $(BUILD)/buzzos-test.img
 FS_REPAIR_IMAGE ?= $(BUILD)/buzzos-repaired.img
@@ -71,7 +73,24 @@ CC   := clang
 LD   := ld.lld
 OBJCOPY := llvm-objcopy
 PYTHON ?= python
-QEMU ?= qemu-system-i386
+# Prefer MSYS2 mingw64 QEMU (pacman -S mingw-w64-x86_64-qemu) with WHPX.
+# Override examples:
+#   make run QEMU="C:/msys64/mingw64/bin/qemu-system-x86_64.exe" QEMU_ACCEL=whpx
+#   make run QEMU_ACCEL=tcg,tb-size=512
+#   make run QEMU_DISPLAY=gtk
+QEMU ?= C:/msys64/mingw64/bin/qemu-system-x86_64.exe
+QEMU_ACCEL ?= whpx
+# WHPX + "-cpu max" breaks on new Intel hosts (APX/MPX feature conflicts →
+# "Unexpected VP exit code 4"). BuzzOS only needs a plain 64-bit-capable
+# model; qemu64 is stable under WHPX and enough for the 32-bit kernel.
+QEMU_CPU ?= qemu64
+# SDL+GL is much faster than default GTK under WHPX; clarity is acceptable.
+QEMU_DISPLAY ?= sdl,gl=on
+QEMU_COMMON := -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 256 \
+	-drive format=raw,file=$(IMAGE) -no-reboot -vga std \
+	-display $(QEMU_DISPLAY) \
+	-audiodev dsound,id=audio0 -device AC97,audiodev=audio0 \
+	-netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
 LIMINE_DIR ?= D:/limine-binary/limine-binary
 
 KERNEL_INCLUDES := \
@@ -129,6 +148,9 @@ LODEPNG_OBJ := $(BUILD)/user/lodepng.o
 LODEPNG_FLAGS := -I$(LODEPNG_DIR) -DLODEPNG_NO_COMPILE_DISK \
 	-DLODEPNG_NO_COMPILE_ENCODER -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS \
 	-DLODEPNG_NO_COMPILE_ALLOCATORS
+MINIMP3_DIR := src/user/third_party/minimp3
+MINIMP3_OBJ := $(BUILD)/user/minimp3_impl.o
+MINIMP3_FLAGS := -I$(MINIMP3_DIR) -DMINIMP3_NO_SIMD -DMINIMP3_ONLY_MP3
 DOOM_DIR := src/user/third_party/doomgeneric/doomgeneric
 DOOM_SRCS := $(wildcard $(DOOM_DIR)/*.c $(DOOM_DIR)/*.h) src/user/bin/doom.c src/user/bin/doom_audio.c tools/build-doom.ps1
 BINJGB_DIR := src/user/third_party/binjgb/src
@@ -138,6 +160,8 @@ BINJGB_FLAGS := -I$(BINJGB_DIR) -include stdbool.h -DNDEBUG \
 	-Wno-unused-function -Wno-unused-variable -Wno-unused-parameter
 BINJGB_OBJS := $(BUILD)/user/binjgb_common.o $(BUILD)/user/binjgb_emulator.o
 DEMO_WAV := $(BUILD)/assets/buzzos-demo.wav
+DEMO_MP3 := $(BUILD)/assets/buzzos-demo.mp3
+DEMO_MP3_SRC := assets/buzzos-demo.mp3
 USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(NETSTRESS_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(GUI_APP_ELFS)
 USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/netstress.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
 USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c
@@ -151,7 +175,7 @@ FONT_H := src/kernel/drv/font_builtin.h
 UNICODE_FONT_H := src/kernel/drv/font_unicode_data.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
-.PHONY: all clean help doctor run run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify image-reset-fs new-app doom-install gameboy-install
+.PHONY: all clean help doctor run run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify image-reset-fs new-app doom-install gameboy-install music-install
 
 # These objects are prerequisites of pattern-built user ELFs, not disposable
 # intermediates. Keeping them makes source timestamp changes rebuild reliably.
@@ -160,7 +184,7 @@ GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).ap
 	$(BUILD)/user/faulttest.o $(BUILD)/user/socketleak.o $(BUILD)/user/heaptest.o \
 	$(BUILD)/user/audiotest.o \
 	$(BUILD)/user/nsporttest.o $(NETSURF_PORT_OBJ) \
-	$(LODEPNG_OBJ) $(BINJGB_OBJS) $(BUILD)/user/netstress.o
+	$(LODEPNG_OBJ) $(MINIMP3_OBJ) $(BINJGB_OBJS) $(BUILD)/user/netstress.o
 
 all: $(IMAGE)
 
@@ -171,6 +195,14 @@ doom-install: $(IMAGE)
 
 gameboy-install: $(IMAGE)
 	$(PYTHON) tools/install_gameboy_rom.py --image $(IMAGE) --rom "$(ROM)"
+	$(PYTHON) tools/check_minifs.py --image $(IMAGE)
+
+# Install a host audio file into MiniFS at /fs/music/<name>.
+# Leaf names are max 23 UTF-8 bytes. Full "周杰伦 - 青花瓷.mp3" is too long;
+# use NAME="青花瓷.mp3" (or similar). Example:
+#   make music-install TRACK="周杰伦 - 青花瓷.mp3" NAME="青花瓷.mp3"
+music-install: $(IMAGE)
+	$(PYTHON) tools/install_music_track.py --image $(IMAGE) --track "$(TRACK)" $(if $(NAME),--name "$(NAME)",)
 	$(PYTHON) tools/check_minifs.py --image $(IMAGE)
 
 help:
@@ -271,6 +303,19 @@ $(LODEPNG_OBJ): $(LODEPNG_DIR)/lodepng.c $(LODEPNG_DIR)/lodepng.h src/user/libc/
 
 $(BUILD)/user/browser.o: src/user/bin/browser.c $(USER_HEADERS) $(LODEPNG_DIR)/lodepng.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) $(LODEPNG_FLAGS) -c src/user/bin/browser.c -o $@
+
+$(MINIMP3_OBJ): $(MINIMP3_DIR)/minimp3_impl.c $(MINIMP3_DIR)/minimp3.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) $(MINIMP3_FLAGS) -c $(MINIMP3_DIR)/minimp3_impl.c -o $@
+
+$(BUILD)/user/music.o: src/user/bin/music.c $(USER_HEADERS) $(MINIMP3_DIR)/minimp3.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) $(MINIMP3_FLAGS) -c src/user/bin/music.c -o $@
+
+$(BUILD)/user/music.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
+		$(BUILD)/user/music.o $(MINIMP3_OBJ) $(BUILD)/user/user.ld | $(BUILD)/user
+	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
+		$(BUILD)/user/music.o $(MINIMP3_OBJ)
+	$(OBJCOPY) --strip-sections $@
 
 $(NETSURF_PORT_OBJ): src/user/ports/netsurf/buzzos_platform.c \
 		src/user/ports/netsurf/buzzos_platform.h src/user/libc/libc.h | $(BUILD)/user
@@ -392,7 +437,10 @@ $(DEMO_WAV): tools/gen_demo_wav.py
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)/assets' | Out-Null"
 	$(PYTHON) tools/gen_demo_wav.py --out $@
 
-$(INITRD_H): Makefile $(USER_ELFS) $(DEMO_WAV) tools/mkinitrd.py
+$(DEMO_MP3): $(DEMO_MP3_SRC)
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)/assets' | Out-Null; Copy-Item -Force '$(DEMO_MP3_SRC)' '$@'"
+
+$(INITRD_H): Makefile $(USER_ELFS) $(DEMO_WAV) $(DEMO_MP3) tools/mkinitrd.py
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
 	$(PYTHON) tools/mkinitrd.py /hello $(USER_ELF) /bin/sh $(SHELL_ELF) \
 		/bin/nano $(NANO_ELF) /bin/basm $(BASM_ELF) /bin/gui $(GUI_ELF) \
@@ -405,6 +453,7 @@ $(INITRD_H): Makefile $(USER_ELFS) $(DEMO_WAV) tools/mkinitrd.py
 		/bin/netsurf $(NETSURF_ELF) \
 		/bin/browser $(NETSURF_ELF) \
 		/share/buzzos-demo.wav $(DEMO_WAV) \
+		/share/buzzos-demo.mp3 $(DEMO_MP3) \
 		/bin/netstress $(NETSTRESS_ELF) $(foreach app,$(filter-out browser,$(GUI_APP_NAMES)),/bin/$(app) $(BUILD)/user/$(app).elf) > $@
 
 $(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META) $(BASM_EXAMPLE) $(BCC_EXAMPLE) $(UTF8_EXAMPLE)
@@ -422,11 +471,11 @@ doctor:
 	$(PYTHON) tools/doctor.py --python "$(PYTHON)" --make "$(MAKE)" --qemu "$(QEMU)"
 
 run: $(IMAGE)
-	$(QEMU) -accel tcg,tb-size=512 -cpu max -m 256 -drive format=raw,file=$(IMAGE) -serial stdio -no-reboot -vga std -audiodev dsound,id=audio0 -device AC97,audiodev=audio0 -netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
+	$(QEMU) $(QEMU_COMMON) -serial stdio
 
 run-current:
 	powershell -NoProfile -Command "if (!(Test-Path '$(IMAGE)')) { throw '$(IMAGE) does not exist. Run make first.' }"
-	$(QEMU) -accel tcg,tb-size=512 -cpu max -m 256 -drive format=raw,file=$(IMAGE) -serial stdio -no-reboot -vga std -audiodev dsound,id=audio0 -device AC97,audiodev=audio0 -netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
+	$(QEMU) $(QEMU_COMMON) -serial stdio
 
 run-local:
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local.ps1 -Qemu "$(QEMU)"

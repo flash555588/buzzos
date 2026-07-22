@@ -1,10 +1,21 @@
 Music for BuzzOS
 
-Plays the bundled /share/buzzos-demo.wav sample through the native AC97
-audio driver.
+Desktop music player with WAV and MP3 support through the native AC97
+driver. Bundled samples:
+
+  /share/buzzos-demo.mp3
+  /share/buzzos-demo.wav
+
+Open a file from the File Manager, or pass a path as the app argument.
 
 Controls:
   Space       play or pause
   R           restart from the beginning
+  S           stop and rewind
+  Click bar   seek to a position
 
-The bundled WAV is 11025 Hz, unsigned 8-bit, mono PCM.
+Supported:
+  MP3   MPEG-1/2 Layer III (decoded with minimp3)
+  WAV   PCM 8/16-bit, mono or stereo
+
+Playback is converted to unsigned 8-bit mono at 11025, 22050, or 44100 Hz.

@@ -276,6 +276,13 @@ static void open_selected(struct guiapp_ctx *ctx) {
             set_status("Opened in Game Boy");
         return;
     }
+    if (has_extension(path, ".mp3") || has_extension(path, ".wav")) {
+        if (guiapp_request_launch(ctx, "/fs/apps/music", path) < 0)
+            set_status("Could not launch Music");
+        else
+            set_status("Opened in Music");
+        return;
+    }
     if (guiapp_request_launch(ctx, "/fs/apps/textedit", path) < 0) {
         set_status("Could not launch TextEdit");
         return;

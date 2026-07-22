@@ -9,13 +9,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ([string]::IsNullOrWhiteSpace($QemuPath)) {
-    $QemuPath = $env:QEMU
-}
-if ([string]::IsNullOrWhiteSpace($QemuPath)) {
-    $QemuPath = "qemu-system-i386"
-}
-$QemuPath = $QemuPath.Trim('"')
+. (Join-Path $PSScriptRoot "Resolve-BuzzosQemu.ps1")
+$qemuInfo = Resolve-BuzzosQemu -Preferred $QemuPath
+$QemuPath = $qemuInfo.Path
+$QemuAccel = $qemuInfo.Accel
+$QemuCpu = $qemuInfo.Cpu
 
 function Get-FreeTcpPort {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -210,7 +208,8 @@ $tcpPairJobA = Start-TcpSmokeServer $tcpPairPortA "BUZZOS_TCP_TWO_A" $tcpPairRea
 $tcpPairJobB = Start-TcpSmokeServer $tcpPairPortB "BUZZOS_TCP_TWO_B" $tcpPairReadyB
 
 $qemuArgs = @(
-    "-cpu", "max",
+    "-accel", $QemuAccel,
+    "-cpu", $QemuCpu,
     "-m", "256",
     "-drive", "format=raw,file=$TestImage",
     "-serial", "file:$SerialLog",
@@ -376,11 +375,11 @@ try {
         "fs_name_len\s+24",
         "managed_limit_bytes\s+268435456",
         "minifs_lba_start\s+67584",
-        "minifs_sectors\s+32768",
+        "minifs_sectors\s+65536",
         "minifs_status\s+ok",
-        "minifs_inodes\s+128",
-        "minifs_blocks\s+3959",
-        "minifs_max_file_size\s+16678400",
+        "minifs_inodes\s+2048",
+        "minifs_blocks\s+63363",
+        "minifs_max_file_size\s+32441856",
         "NAME\s+STATUS\s+ENTRYPOINTS",
         "procfs\s+stable\s+/proc",
         "about\s+stable\s+/proc/about,about,gui:about,make:report",
@@ -395,17 +394,17 @@ try {
         "mount\s+/fs",
         "driver\s+minifs",
         "lba_start\s+67584",
-        "sectors\s+4096",
+        "sectors\s+65536",
         "magic\s+1397113421",
         "inodes_used\s+[0-9]+",
-        "inodes_total\s+128",
+        "inodes_total\s+2048",
         "dirs\s+[0-9]+",
         "files\s+[0-9]+",
         "blocks_used\s+[0-9]+",
         "blocks_free\s+[0-9]+",
-        "blocks_total\s+3959",
-        "data_lba\s+67721",
-        "max_file_size\s+16678400",
+        "blocks_total\s+63363",
+        "data_lba\s+69757",
+        "max_file_size\s+32441856",
         "host_check\s+make fs-check",
         "host_repair\s+make fs-repair",
         "page_size\s+4096",
