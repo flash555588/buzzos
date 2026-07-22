@@ -327,6 +327,7 @@ def check_runtime_lifecycle():
         if snippet not in smoke:
             fail(f"resource/TCP smoke coverage is missing: {snippet}")
     for snippet in ["textedit-maximized", "filemanager", "filemanager-textedit",
+                    "filemanager-terminal-exec", "app protocol ended",
                     "many-windows", "dock-expanded",
                     "Move-MouseRelative", "Click-Left"]:
         if snippet not in gui_smoke:

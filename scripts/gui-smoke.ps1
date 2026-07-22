@@ -295,6 +295,26 @@ try {
     Send-Key "esc"
     Wait-ForLog "\[gui\] exited" 10
 
+    # Opening a regular /bin ELF through Files must hand it to Terminal
+    # without terminating the File Manager GUI protocol session.
+    Type-Command "gui"
+    Press-Many "down" 3
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 600
+    Send-Key "left"
+    Start-Sleep -Milliseconds 250
+    Send-Key "ret"
+    Press-Many "down" 4
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 900
+    $filesExecPpm = (Join-Path $OutDir "filemanager-terminal-exec.ppm")
+    $screens += Capture-Screen "filemanager-terminal-exec" $filesExecPpm (Join-Path $OutDir "filemanager-terminal-exec.png")
+    if ((Read-SerialLog) -match "\[gui\] app protocol ended") {
+        Fail-WithLog "File Manager protocol ended while opening a terminal ELF."
+    }
+    Send-Key "esc"
+    Wait-ForLog "\[gui\] exited" 10
+
     Type-Command "gui"
     Send-Key "down"
     Send-Key "ret"
@@ -398,6 +418,9 @@ try {
     $log = Read-SerialLog
     if ($log -match "=== EXCEPTION ===") {
         Fail-WithLog "QEMU reported a CPU exception."
+    }
+    if ($log -match "\[gui\] app protocol ended") {
+        Fail-WithLog "A GUI application protocol ended unexpectedly."
     }
 
     foreach ($screen in $screens) {

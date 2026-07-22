@@ -272,16 +272,28 @@ static int app_target_allowed(const char *path) {
 }
 
 static int exec_target_allowed(const char *path) {
-    static const char prefix[] = "/fs/";
-    int i = 0;
-    while (prefix[i]) { if (path[i] != prefix[i]) return 0; i++; }
-    if (!path[i]) return 0;
-    for (; path[i]; i++) {
+    if (!path || path[0] != '/' || !path[1])
+        return 0;
+    for (int i = 1; path[i]; i++) {
         unsigned char ch = (unsigned char)path[i];
-        if (ch < 32 || ch == ' ' || ch == ';' || ch == '|' || ch == '<' ||
-            ch == '>' || ch == '&') return 0;
+        int safe = (ch >= 'a' && ch <= 'z') ||
+                   (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= '0' && ch <= '9') ||
+                   ch == '/' || ch == '.' || ch == '_' || ch == '-';
+        if (!safe)
+            return 0;
     }
-    return 1;
+    struct stat st;
+    if (stat(path, &st) < 0 || st.st_type != DT_REG)
+        return 0;
+    uint8_t magic[4];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    int n = read(fd, magic, sizeof(magic));
+    close(fd);
+    return n == 4 && magic[0] == 0x7Fu && magic[1] == 'E' &&
+           magic[2] == 'L' && magic[3] == 'F';
 }
 
 static void append_text(char *dst, const char *src, size_t cap) {
@@ -810,16 +822,18 @@ static int app_read_frame(int slot) {
             continue;
         }
         if (frame.type == GUIAPP_FRAME_EXEC) {
-            if (!exec_target_allowed(frame.target))
-                return -1;
-            terminal_execute_path(frame.target);
+            if (exec_target_allowed(frame.target))
+                terminal_execute_path(frame.target);
+            else
+                term_log("exec request rejected");
             continue;
         }
         if (frame.type != GUIAPP_FRAME_LAUNCH)
             break;
-        if (!app_target_allowed(frame.target))
-            return -1;
-        run_app_with_arg(frame.target, frame.argument[0] ? frame.argument : 0);
+        if (app_target_allowed(frame.target))
+            run_app_with_arg(frame.target, frame.argument[0] ? frame.argument : 0);
+        else
+            term_log("launch request rejected");
     }
     if (frame.width <= 0 || frame.height <= 0 ||
         frame.width > APP_SURFACE_MAX_W || frame.height > APP_SURFACE_MAX_H)
@@ -2002,6 +2016,7 @@ static void reap_dead_apps(void) {
     for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
         if (app_sessions[slot].used && app_sessions[slot].reader_dead) {
             term_log("app protocol ended");
+            puts("[gui] app protocol ended");
             close_window(WIN_APP_BASE + slot);
         }
     }
