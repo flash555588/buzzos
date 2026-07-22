@@ -764,16 +764,21 @@ static int app_read_frame(int slot) {
         (frame.dirty_w <= 0 || frame.dirty_h <= 0 ||
          frame.dirty_w > APP_SURFACE_MAX_W || frame.dirty_h > APP_SURFACE_MAX_H))
         return -1;
+    int scaled = frame.type == GUIAPP_FRAME_SCALED;
+    int source_w = scaled ? frame.dirty_w : frame.width;
+    int source_h = scaled ? frame.dirty_h : frame.height;
     int full_change = app_sessions[slot].surface_w != frame.width ||
         app_sessions[slot].surface_h != frame.height ||
-        app_sessions[slot].scaled_surface != (frame.type == GUIAPP_FRAME_SCALED) ||
+        app_sessions[slot].scaled_surface != scaled ||
+        app_sessions[slot].source_w != source_w ||
+        app_sessions[slot].source_h != source_h ||
         strcmp(app_sessions[slot].title, frame.title) != 0;
     app_sessions[slot].front_buffer = frame.buffer_index;
     app_sessions[slot].surface_w = frame.width;
     app_sessions[slot].surface_h = frame.height;
-    app_sessions[slot].scaled_surface = frame.type == GUIAPP_FRAME_SCALED;
-    app_sessions[slot].source_w = app_sessions[slot].scaled_surface ? frame.dirty_w : frame.width;
-    app_sessions[slot].source_h = app_sessions[slot].scaled_surface ? frame.dirty_h : frame.height;
+    app_sessions[slot].scaled_surface = scaled;
+    app_sessions[slot].source_w = source_w;
+    app_sessions[slot].source_h = source_h;
     copy_text(app_sessions[slot].title, frame.title, sizeof(app_sessions[slot].title));
     windows[WIN_APP_BASE + slot].title = app_sessions[slot].title[0]
         ? app_sessions[slot].title : "Application";
@@ -1074,6 +1079,25 @@ static struct rect content_rect(int id) {
     return (struct rect){r.x + 12, r.y + 40, r.w - 30, r.h - 70};
 }
 
+static struct rect scaled_view_rect(int id, int slot) {
+    struct rect c = content_rect(id);
+    int aw = app_sessions[slot].surface_w;
+    int ah = app_sessions[slot].surface_h;
+    int source_w = app_sessions[slot].source_w;
+    int source_h = app_sessions[slot].source_h;
+    if (!app_sessions[slot].scaled_surface || aw <= 0 || ah <= 0 ||
+        source_w <= 0 || source_h <= 0)
+        return c;
+    int vw = aw;
+    int vh = aw * source_h / source_w;
+    if (vh > ah) {
+        vh = ah;
+        vw = ah * source_w / source_h;
+    }
+    return (struct rect){c.x + (aw - vw) / 2,
+                         c.y + (ah - vh) / 2, vw, vh};
+}
+
 static struct rect close_rect(int id) {
     struct rect r = windows[id].r;
     return (struct rect){r.x + r.w - 27, r.y + 8, 12, 12};
@@ -1363,11 +1387,20 @@ static void draw_app_window(int id) {
     const uint8_t *pixels = (const uint8_t *)shared +
         GUIAPP_SHARED_HEADER_SIZE + front * GUIAPP_SHARED_PIXELS;
     if (app_sessions[slot].scaled_surface && source_w > 0 && source_h > 0) {
-        int vw = aw, vh = aw * source_h / source_w;
-        if (vh > ah) { vh = ah; vw = ah * source_w / source_h; }
-        int dx = ox + (aw - vw) / 2, dy = oy + (ah - vh) / 2;
-        fill((struct rect){ox, oy, aw, ah}, gray(0));
-        struct rect visible = intersect_rect((struct rect){dx, dy, vw, vh}, clip);
+        struct rect view = scaled_view_rect(id, slot);
+        int vw = view.w;
+        int vh = view.h;
+        int dx = view.x;
+        int dy = view.y;
+        if (!partial_app_render) {
+            int right = ox + aw;
+            int bottom = oy + ah;
+            fill((struct rect){ox, oy, aw, dy - oy}, gray(0));
+            fill((struct rect){ox, dy + vh, aw, bottom - (dy + vh)}, gray(0));
+            fill((struct rect){ox, dy, dx - ox, vh}, gray(0));
+            fill((struct rect){dx + vw, dy, right - (dx + vw), vh}, gray(0));
+        }
+        struct rect visible = intersect_rect(view, clip);
         if (app_sessions[slot].scale_map_w != vw ||
             app_sessions[slot].scale_map_h != vh ||
             app_sessions[slot].scale_source_w != source_w ||
@@ -1656,8 +1689,11 @@ static int render_app_partial(int slot) {
     /* The frame and title bar are unchanged for an ordinary app frame.  Only
      * move the content pixels; mouse/window operations request a full desktop
      * redraw separately. */
-    struct rect area = intersect_rect(content_rect(id),
-                                      (struct rect){0, 0, sw, sh});
+    struct rect area = app_sessions[slot].scaled_surface
+        ? intersect_rect(scaled_view_rect(id, slot),
+                         intersect_rect(content_rect(id),
+                                        (struct rect){0, 0, sw, sh}))
+        : intersect_rect(content_rect(id), (struct rect){0, 0, sw, sh});
     if (area.w <= 0 || area.h <= 0) return 0;
     return fb_blit_stride(area.x, area.y, area.w, area.h,
                           fb + area.y * sw + area.x, sw);

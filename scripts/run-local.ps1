@@ -102,6 +102,7 @@ function Key-Name([char]$Ch) {
 
 $monitorPort = Get-FreeTcpPort
 $argLine = '-drive "format=raw,file=' + $imagePath + '"' +
+    ' -accel tcg,tb-size=512' +
     ' -cpu max' +
     ' -m 256' +
     ' -serial "file:' + $serialPath + '"' +

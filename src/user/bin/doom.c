@@ -20,11 +20,7 @@ static volatile unsigned key_tail;
 static uint16_t key_queue[KEY_QUEUE_SIZE];
 static uint8_t held_keys[256];
 static uint32_t release_at[256];
-static uint8_t *frame_pixels;
-static int frame_capacity;
 static uint8_t native_pixels[DOOM_W * DOOM_H];
-static uint16_t scale_x[GUIAPP_MAX_W];
-static uint16_t scale_y[GUIAPP_MAX_H];
 static char window_title[GUIAPP_TITLE_MAX] = "DOOM";
 
 static uint8_t rgb_to_index(uint32_t pixel) {
@@ -109,42 +105,16 @@ void DG_DrawFrame(void) {
     if (h < 200) h = 200;
     if (w > GUIAPP_MAX_W) w = GUIAPP_MAX_W;
     if (h > GUIAPP_MAX_H) h = GUIAPP_MAX_H;
-    int needed = w * h;
-    if (needed > frame_capacity) {
-        uint8_t *grown = realloc(frame_pixels, (size_t)needed);
-        if (!grown) return;
-        frame_pixels = grown;
-        frame_capacity = needed;
-    }
-
-    int view_w = w;
-    int view_h = (w * DOOM_H) / DOOM_W;
-    if (view_h > h) {
-        view_h = h;
-        view_w = (h * DOOM_W) / DOOM_H;
-    }
-    int ox = (w - view_w) / 2;
-    int oy = (h - view_h) / 2;
     /* Quantize the native DOOM frame once. Quantizing after scaling made a
      * maximized window perform up to a million RGB conversions per frame. */
     for (int i = 0; i < DOOM_W * DOOM_H; i++)
         native_pixels[i] = rgb_to_index(DG_ScreenBuffer[i]);
 
-    /* Division in the inner scaling loop dominated large windows under
-     * emulation. Build compact coordinate maps once per frame instead. */
-    for (int x = 0; x < view_w; x++)
-        scale_x[x] = (uint16_t)(x * DOOM_W / view_w);
-    for (int y = 0; y < view_h; y++)
-        scale_y[y] = (uint16_t)(y * DOOM_H / view_h);
-
-    memset(frame_pixels, 0, (size_t)needed);
-    for (int y = 0; y < view_h; y++) {
-        int sy = scale_y[y];
-        uint8_t *dst = frame_pixels + (oy + y) * w + ox;
-        for (int x = 0; x < view_w; x++)
-            dst[x] = native_pixels[sy * DOOM_W + scale_x[x]];
-    }
-    if (guiapp_send_frame(&gui, window_title, w, h, frame_pixels) < 0)
+    /* Keep the 320x200 frame native while crossing the app boundary.  The
+     * desktop already has a cached scaler, so expanding here only caused a
+     * large temporary allocation plus two extra full-window copies. */
+    if (guiapp_send_scaled_frame(&gui, window_title, w, h, native_pixels,
+                                 DOOM_W, DOOM_H) < 0)
         gui_closed = 1;
 }
 

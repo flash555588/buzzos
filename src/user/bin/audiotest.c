@@ -15,12 +15,21 @@ int main(void) {
             phase++;
             if (phase >= (SAMPLE_RATE / 440)) phase = 0;
         }
-        int written = audio_write(samples, sizeof(samples));
-        if (written < 0) {
-            puts("audiotest: audio_write failed");
-            return 1;
+        int offset = 0;
+        while (offset < BLOCK_SAMPLES) {
+            int written = audio_write(samples + offset,
+                                      (size_t)(BLOCK_SAMPLES - offset));
+            if (written < 0) {
+                puts("audiotest: audio_write failed");
+                return 1;
+            }
+            if (written == 0) {
+                sleep_ms(1);
+                continue;
+            }
+            offset += written;
+            total += written;
         }
-        total += written;
         sleep_ms(28);
     }
     printf("audiotest: ok %d bytes\n", total);

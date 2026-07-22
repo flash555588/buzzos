@@ -248,6 +248,11 @@ int ac97_write(const uint8_t *data, size_t size) {
 int ac97_set_rate(uint32_t rate, uint32_t latency_ms) {
     if (!ready || (rate != 11025u && rate != 22050u && rate != 44100u))
         return -1;
+    /* Older one-argument callers did not define the latency register.  Treat
+     * values larger than the FIFO can possibly prebuffer as the default
+     * policy instead of creating an unreachable start threshold. */
+    if (latency_ms > (FIFO_BYTES * 1000u) / rate)
+        latency_ms = 0;
     uint32_t flags = irq_save();
     outb(nabm + 0x1B, 0x00); /* stop PCM-out before replacing stream state */
     outb(nabm + 0x1B, 0x02);

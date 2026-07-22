@@ -491,7 +491,7 @@ try {
         "threadreuse: joined 40",
         "socketleak: opened 8",
         "heaptest: ok 320K realloc reuse",
-        "audiotest: ok [0-9]+ bytes",
+        "audiotest: ok 33075 bytes",
         "nsporttest: ok surface scheduler",
         "nshtmltest: ok HTML DOM CSS form img",
         "basm",

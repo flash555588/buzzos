@@ -396,7 +396,10 @@ int audio_write(const uint8_t *samples, size_t count) {
 }
 
 int audio_config(unsigned int sample_rate) {
-    return syscall1(SYS_AUDIO_CONFIG, (int)sample_rate);
+    /* SYS_AUDIO_CONFIG also accepts an optional latency in ECX.  Pass an
+     * explicit zero so the one-argument API never leaks a stale register
+     * value into the kernel. */
+    return syscall2(SYS_AUDIO_CONFIG, (int)sample_rate, 0);
 }
 
 int audio_config_latency(unsigned int sample_rate, unsigned int latency_ms) {

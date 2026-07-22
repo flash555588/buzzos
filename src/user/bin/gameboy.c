@@ -12,7 +12,9 @@ static Emulator *emulator;
 static volatile int ready, closed, want_w=640, want_h=576;
 static volatile uint8_t held_buttons;
 static JoypadButtons buttons;
+#ifndef BINJGB_BUZZOS_INDEXED_COLOR
 static uint8_t native_frame[SCREEN_WIDTH*SCREEN_HEIGHT];
+#endif
 static uint8_t mono_audio[AUDIO_FRAMES];
 #ifndef BINJGB_BUZZOS_INDEXED_COLOR
 static uint8_t color_r[256],color_g[256],color_b[256];
@@ -74,7 +76,7 @@ static void render(const char*title){
  int w=want_w,h=want_h;if(w<320)w=320;if(w>GUIAPP_MAX_W)w=GUIAPP_MAX_W;if(h<288)h=288;if(h>GUIAPP_MAX_H)h=GUIAPP_MAX_H;int need=w*h;
  (void)need;
 #ifdef BINJGB_BUZZOS_INDEXED_COLOR
- memcpy(native_frame,*emulator_get_frame_buffer(emulator),sizeof(native_frame));
+ const uint8_t*native_frame=*emulator_get_frame_buffer(emulator);
 #else
  RGBA*fb=*emulator_get_frame_buffer(emulator);
  for(int i=0;i<SCREEN_WIDTH*SCREEN_HEIGHT;i++)native_frame[i]=rgba_index(fb[i]);
