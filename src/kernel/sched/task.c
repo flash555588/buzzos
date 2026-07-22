@@ -248,7 +248,11 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
         tasks[id].name[i] = 0;
     for (int i = 0; i < 15 && name[i]; i++)
         tasks[id].name[i] = name[i];
-    tasks[id].state  = TASK_READY;
+    /* Stay blocked until the creator finishes per-task metadata (user entry,
+     * thread func/stack, CR3, etc.). Otherwise the trampoline can run with
+     * zeros and fault at EIP=0 / ESP=0. */
+    tasks[id].state = TASK_BLOCKED;
+    tasks[id].wake_tick = 0;
     fpu_state_init(tasks[id].fpu_state);
 
     if (!tasks[id].console_silent) {
@@ -262,6 +266,16 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
     }
 
     return id;
+}
+
+void task_make_ready(int id) {
+    if (id < 0 || id >= num_tasks)
+        return;
+    if (tasks[id].state == TASK_DEAD)
+        return;
+    tasks[id].wake_tick = 0;
+    if (tasks[id].state != TASK_RUNNING)
+        tasks[id].state = TASK_READY;
 }
 
 /* ------------------------------------------------------------------ */

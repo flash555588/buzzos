@@ -229,8 +229,20 @@ void syscall_release_thread(int task_id) {
 
 static void thread_trampoline(void) {
     int id = current_task->id;
-    uint32_t func = thread_infos[id].func_addr;
-    uint32_t stack = thread_infos[id].stack_top;
+    uint32_t func = 0;
+    uint32_t stack = 0;
+    if (id >= 0 && id < MAX_TASKS && thread_infos[id].used) {
+        func = thread_infos[id].func_addr;
+        stack = thread_infos[id].stack_top;
+    }
+    if (!func || !stack) {
+        serial_puts("[spawn] refuse null thread entry/stack for task=");
+        serial_puthex((uint32_t)id);
+        serial_puts("\n");
+        task_exit_code(-1);
+        for (;;)
+            __asm__ volatile("hlt");
+    }
     user_enter(func, stack);
 }
 
@@ -278,6 +290,8 @@ int sys_spawn(uint32_t func_addr, uint32_t b, uint32_t c, uint32_t d, uint32_t e
     thread_infos[id].stack_slot = slot;
     thread_infos[id].used = 1;
     task_set_fd_owner(id, owner);
+    /* Arm only after thread_infos is fully populated. */
+    task_make_ready(id);
     irq_restore(irq_flags);
     return id;
 }

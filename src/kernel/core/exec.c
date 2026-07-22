@@ -13,7 +13,19 @@ static uint32_t proc_stack[MAX_TASKS];
 
 static void user_process_trampoline(void) {
     int id = current_task->id;
-    user_enter(proc_entry[id], proc_stack[id] ? proc_stack[id] : USER_DEFAULT_STACK_TOP);
+    uint32_t entry = (id >= 0 && id < MAX_TASKS) ? proc_entry[id] : 0;
+    uint32_t stack = (id >= 0 && id < MAX_TASKS) ? proc_stack[id] : 0;
+    if (!stack)
+        stack = USER_DEFAULT_STACK_TOP;
+    if (!entry || !stack) {
+        serial_puts("[exec] refuse null user entry/stack for task=");
+        serial_puthex((uint32_t)id);
+        serial_puts("\n");
+        task_exit_process_code(-1);
+        for (;;)
+            __asm__ volatile("hlt");
+    }
+    user_enter(entry, stack);
 }
 
 static int str_len(const char *s) {
@@ -118,6 +130,8 @@ static int launch_prepared_space(uint32_t proc_cr3, uint32_t entry,
     } else {
         vfs_setup_stdio(id, console_silent);
     }
+    /* Arm only after entry/stack/CR3/fds are fully installed. */
+    task_make_ready(id);
     irq_restore(irq_flags);
 
     serial_puts("[exec] entry=");

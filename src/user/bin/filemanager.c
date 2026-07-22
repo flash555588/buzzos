@@ -255,20 +255,8 @@ static void open_selected(struct guiapp_ctx *ctx) {
         set_status("This item cannot be opened");
         return;
     }
-    if (is_elf_file(path)) {
-        if (strcmp(current_path, "/fs/apps") == 0 && has_gui_manifest(path)) {
-            if (guiapp_request_launch(ctx, path, 0) < 0)
-                set_status("Could not launch GUI app");
-            else
-                set_status("Launched GUI app");
-        } else {
-            if (guiapp_request_exec(ctx, path) < 0)
-                set_status("Could not execute program");
-            else
-                set_status("Running in Terminal");
-        }
-        return;
-    }
+    /* Match by extension before ELF sniffing so ROM/audio assets never go
+     * through the generic exec path (even if a header looks odd). */
     if (has_extension(path, ".gb") || has_extension(path, ".gbc")) {
         if (guiapp_request_launch(ctx, "/fs/apps/gameboy", path) < 0)
             set_status("Could not launch Game Boy");
@@ -281,6 +269,20 @@ static void open_selected(struct guiapp_ctx *ctx) {
             set_status("Could not launch Music");
         else
             set_status("Opened in Music");
+        return;
+    }
+    if (is_elf_file(path)) {
+        if (strcmp(current_path, "/fs/apps") == 0 && has_gui_manifest(path)) {
+            if (guiapp_request_launch(ctx, path, 0) < 0)
+                set_status("Could not launch GUI app");
+            else
+                set_status("Launched GUI app");
+        } else {
+            if (guiapp_request_exec(ctx, path) < 0)
+                set_status("Could not execute program");
+            else
+                set_status("Running in Terminal");
+        }
         return;
     }
     if (guiapp_request_launch(ctx, "/fs/apps/textedit", path) < 0) {

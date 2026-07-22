@@ -34,9 +34,12 @@ struct task {
  * execution context. */
 void sched_init(void);
 
-/* Create a new kernel thread starting at `entry`. Returns task id. */
+/* Create a new kernel thread starting at `entry`. Returns task id.
+ * The task is created BLOCKED; callers must task_make_ready(id) after any
+ * per-task setup so the trampoline never races with metadata init. */
 int task_create(void (*entry)(void), const char *name);
 int task_create_ex(void (*entry)(void), const char *name, int console_silent);
+void task_make_ready(int id);
 
 /* Yield the CPU voluntarily. */
 void task_yield(void);
