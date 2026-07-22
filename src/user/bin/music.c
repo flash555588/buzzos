@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
     for (;;) {
         if (guiapp_read_event(&ctx, &ev) < 0 || ev.type == GUIAPP_EVT_CLOSE)
             break;
-        if (ev.type == GUIAPP_EVT_KEY) {
+        if (ev.type == GUIAPP_EVT_KEY && ev.buttons) {
             if (ev.key == ' ') playing = !playing && position < sample_count;
             else if (ev.key == 'r' || ev.key == 'R') restart();
         } else if (ev.type == GUIAPP_EVT_MOUSE) {

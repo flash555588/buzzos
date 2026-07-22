@@ -289,7 +289,7 @@ int main(int argc, char **argv) {
             break;
         if (ev.type == GUIAPP_EVT_MOUSE)
             mouse(ev.x, ev.y, ev.buttons);
-        else if (ev.type == GUIAPP_EVT_KEY)
+        else if (ev.type == GUIAPP_EVT_KEY && ev.buttons)
             key(ev.key);
         else if (ev.type == GUIAPP_EVT_TEXT)
             text_input(ev.text);

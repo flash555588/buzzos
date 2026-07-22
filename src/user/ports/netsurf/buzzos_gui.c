@@ -441,7 +441,8 @@ int main(int argc, char **argv) {
             if (event.type == GUIAPP_EVT_INIT || event.type == GUIAPP_EVT_RESIZE) {
                 frame_width = appui_max(320, appui_min(GUIAPP_MAX_W, event.width));
                 frame_height = appui_max(220, appui_min(GUIAPP_MAX_H, event.height));
-            } else if (event.type == GUIAPP_EVT_KEY) handle_key(event.key);
+            } else if (event.type == GUIAPP_EVT_KEY && event.buttons)
+                handle_key(event.key);
             else if (event.type == GUIAPP_EVT_TEXT) handle_text(event.text);
             else if (event.type == GUIAPP_EVT_MOUSE)
                 handle_mouse(event.x, event.y, event.buttons, event.wheel);

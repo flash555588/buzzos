@@ -564,7 +564,7 @@ int main(int argc, char **argv) {
             w = clamp_int(ev.width, 220, MAX_W);
             h = clamp_int(ev.height, 160, MAX_H);
             ensure_cursor_visible();
-        } else if (ev.type == GUIAPP_EVT_KEY) {
+        } else if (ev.type == GUIAPP_EVT_KEY && ev.buttons) {
             key(ev.key);
         } else if (ev.type == GUIAPP_EVT_TEXT) {
             insert_text(ev.text);

@@ -856,7 +856,7 @@ int main(int argc, char **argv) {
         if (event.type == GUIAPP_EVT_INIT || event.type == GUIAPP_EVT_RESIZE) {
             w = clamp_int(event.width, 300, MAX_W);
             h = clamp_int(event.height, 190, MAX_H);
-        } else if (event.type == GUIAPP_EVT_KEY) {
+        } else if (event.type == GUIAPP_EVT_KEY && event.buttons) {
             key(event.key);
         } else if (event.type == GUIAPP_EVT_TEXT) {
             text_input(event.text);

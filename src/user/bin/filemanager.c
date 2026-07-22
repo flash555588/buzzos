@@ -706,7 +706,7 @@ int main(int argc, char **argv) {
             w = clamp_int(event.width, 220, MAX_W);
             h = clamp_int(event.height, 160, MAX_H);
             clamp_selection();
-        } else if (event.type == GUIAPP_EVT_KEY) {
+        } else if (event.type == GUIAPP_EVT_KEY && event.buttons) {
             handle_key(&ctx, event.key);
         } else if (event.type == GUIAPP_EVT_TEXT) {
             handle_text(event.text);
