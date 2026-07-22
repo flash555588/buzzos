@@ -147,6 +147,7 @@ static uint8_t scaled_scanline[APP_SURFACE_MAX_W];
 static struct rect compose_clip = {0, 0, MAX_SW, MAX_SH};
 static struct rect pending_damage;
 static int pending_damage_valid;
+static int damage_lock;
 static uint32_t last_wheel_seq;
 static int last_wheel_value;
 static int ime_enabled;
@@ -209,21 +210,52 @@ static struct rect union_rect(struct rect a, struct rect b) {
 }
 
 static void queue_damage(struct rect area) {
+    while (__sync_lock_test_and_set(&damage_lock, 1))
+        yield();
     area = intersect_rect(area, (struct rect){0, 0, sw, sh});
-    if (area.w <= 0 || area.h <= 0)
-        return;
-    pending_damage = pending_damage_valid
-        ? union_rect(pending_damage, area) : area;
-    pending_damage_valid = 1;
+    if (area.w > 0 && area.h > 0) {
+        pending_damage = pending_damage_valid
+            ? union_rect(pending_damage, area) : area;
+        pending_damage_valid = 1;
+    }
+    __sync_lock_release(&damage_lock);
 }
 
 static int take_damage(struct rect *out) {
-    if (!pending_damage_valid)
-        return 0;
-    *out = pending_damage;
-    pending_damage_valid = 0;
-    pending_damage = (struct rect){0, 0, 0, 0};
-    return 1;
+    int valid;
+    while (__sync_lock_test_and_set(&damage_lock, 1))
+        yield();
+    valid = pending_damage_valid;
+    if (valid) {
+        *out = pending_damage;
+        pending_damage_valid = 0;
+        pending_damage = (struct rect){0, 0, 0, 0};
+    }
+    __sync_lock_release(&damage_lock);
+    return valid;
+}
+
+/* Damage a window including its drop shadow. */
+static void win_damage(int id) {
+    if (id < 0 || id >= WIN_COUNT)
+        return;
+    struct rect r = windows[id].r;
+    queue_damage((struct rect){r.x, r.y, r.w + 6, r.h + 6});
+}
+
+static void dock_geometry(int *x, int *y, int *dock_w, int *task_cap);
+
+/* Damage the dock plus the tooltip/expanded-panel area above it. */
+static void dock_damage(void) {
+    int x, y, dock_w, task_cap;
+    dock_geometry(&x, &y, &dock_w, &task_cap);
+    queue_damage((struct rect){x - 6, y - 120, dock_w + 12, 186});
+}
+
+/* Damage the IME badge (top bar) and the candidate panel area. */
+static void ime_damage(void) {
+    queue_damage((struct rect){0, 0, sw, 30});
+    queue_damage((struct rect){0, sh - 116, sw, 116});
 }
 
 static void app_dirty_lock(int slot) {
@@ -751,7 +783,7 @@ static void terminal_reader(void) {
         for (int i = 0; i < n; i++)
             term_putc_locked(buf[i]);
         term_lock_leave();
-        desktop_dirty = 1;
+        win_damage(WIN_TERMINAL);
     }
 }
 
@@ -890,7 +922,8 @@ static int app_read_frame(int slot) {
         frame.argument[GUIAPP_PATH_MAX - 1] = 0;
         if (frame.type == GUIAPP_FRAME_CLIPBOARD) {
             copy_text(clipboard, frame.argument, sizeof(clipboard));
-            desktop_dirty = 1;
+            if (context_open)
+                queue_damage((struct rect){context_x, context_y, 124, 88});
             continue;
         }
         if (frame.type == GUIAPP_FRAME_EXEC) {
@@ -958,7 +991,8 @@ static int app_read_frame(int slot) {
         ? app_sessions[slot].title : "Application";
     clamp_scroll(WIN_APP_BASE + slot);
     if (full_change) {
-        desktop_dirty = 1;
+        win_damage(WIN_APP_BASE + slot);
+        dock_damage();
     } else {
         struct rect dirty = frame.type == GUIAPP_FRAME_DIRTY
             ? (struct rect){frame.x, frame.y, frame.dirty_w, frame.dirty_h}
@@ -975,7 +1009,8 @@ static void app_reader_loop(int slot) {
     }
     if (!app_sessions[slot].closing) {
         app_sessions[slot].reader_dead = 1;
-        desktop_dirty = 1;
+        win_damage(WIN_APP_BASE + slot);
+        dock_damage();
     }
 }
 
@@ -2387,17 +2422,17 @@ static int ime_handle_key(int k) {
     if (k == 0x1F) { /* Ctrl+Space from the keyboard driver */
         ime_enabled = !ime_enabled;
         ime_clear();
-        desktop_dirty = 1;
+        ime_damage();
         return 1;
     }
     if (!ime_enabled || !ime_target_active())
         return 0;
     if (k == KEY_ESC && ime_length > 0) {
-        ime_clear(); desktop_dirty = 1; return 1;
+        ime_clear(); ime_damage(); return 1;
     }
     if ((k == KEY_BACKSPACE || k == 127) && ime_length > 0) {
         ime_buffer[--ime_length] = 0;
-        desktop_dirty = 1;
+        ime_damage();
         return 1;
     }
     if ((k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z')) {
@@ -2406,22 +2441,22 @@ static int ime_handle_key(int k) {
             ime_buffer[ime_length++] = (char)k;
             ime_buffer[ime_length] = 0;
         }
-        desktop_dirty = 1;
+        ime_damage();
         return 1;
     }
     if (ime_length > 0) {
         if (k >= '1' && k <= '9') {
-            ime_commit_candidate(k - '1'); desktop_dirty = 1; return 1;
+            ime_commit_candidate(k - '1'); ime_damage(); return 1;
         }
         if (k == ' ' || k == '\r' || k == '\n') {
-            ime_commit_candidate(0); desktop_dirty = 1; return 1;
+            ime_commit_candidate(0); ime_damage(); return 1;
         }
         /* Commit the composition before passing punctuation/navigation on. */
         ime_commit_candidate(0);
     }
     const char *punct = ime_punctuation(k);
     if (punct) {
-        ime_submit(punct); desktop_dirty = 1; return 1;
+        ime_submit(punct); ime_damage(); return 1;
     }
     return 0;
 }
@@ -2447,17 +2482,25 @@ static void handle_key(int k) {
     }
     if (k == '\t') {
         activate_next_visible();
+        desktop_dirty = 1;
         return;
     }
     if (focus == WIN_LAUNCHER) {
+        int old_selected = app_selected;
         if (k == KEY_UP && app_selected > 0)
             app_selected--;
         else if (k == KEY_DOWN && app_selected + 1 < app_count)
             app_selected++;
-        else if ((k == '\n' || k == '\r') && app_count > 0)
+        else if ((k == '\n' || k == '\r') && app_count > 0) {
             run_app(apps[app_selected].path);
-        else if (k == 'r' || k == 'R')
+            return;
+        } else if (k == 'r' || k == 'R') {
             scan_apps();
+            desktop_dirty = 1;
+            return;
+        }
+        if (app_selected != old_selected)
+            win_damage(WIN_LAUNCHER);
         return;
     }
     if (focus == WIN_TERMINAL) {
@@ -2494,7 +2537,7 @@ static void handle_mouse(void) {
     int old_pointer_y = pointer_y;
     int old_dock_hover = dock_hover;
     int pointer_moved = ms.x != pointer_x || ms.y != pointer_y;
-    if (ms.buttons != prev_buttons || ms.wheel_seq != last_wheel_seq)
+    if (ms.buttons != prev_buttons)
         desktop_dirty = 1;
     pointer_x = ms.x;
     pointer_y = ms.y;
@@ -2506,7 +2549,7 @@ static void handle_mouse(void) {
     int right = ms.buttons & 2;
     dock_hover = hit_dock(pointer_x, pointer_y);
     if (dock_hover != old_dock_hover)
-        desktop_dirty = 1;
+        dock_damage();
 
     if (right && !(prev_buttons & 2)) {
         int target = hit_window(pointer_x, pointer_y);
@@ -2547,6 +2590,7 @@ static void handle_mouse(void) {
                 scroll_y[h] -= wheel_delta * 44;
                 clamp_scroll(h);
             }
+            win_damage(h);
         }
         last_wheel_seq = ms.wheel_seq;
         last_wheel_value = ms.wheel;
@@ -2803,10 +2847,8 @@ int main(int argc, char **argv) {
     while (running) {
         reap_dead_apps();
         int key;
-        while ((key = read_key_poll()) >= 0) {
-            desktop_dirty = 1;
+        while ((key = read_key_poll()) >= 0)
             handle_key(key);
-        }
         forward_key_releases();
         handle_mouse();
         flush_pending_app_resizes();
