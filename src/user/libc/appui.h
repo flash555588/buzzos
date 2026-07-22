@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "libc.h"
+#include "palette.h"
 #include "../../kernel/drv/font_builtin.h"
 
 struct appui_rect {
@@ -48,6 +49,26 @@ static void appui_fill(uint8_t *fb, int w, int h, struct appui_rect r, int color
         uint8_t *row = fb + (r.y + yy) * w + r.x;
         memset(row, color, (size_t)r.w);
     }
+}
+
+/* Corner inset (px) per row for a 4px rounded corner. */
+static const uint8_t appui_corner[4] = {3, 2, 1, 1};
+
+static void appui_fill_round(uint8_t *fb, int w, int h, struct appui_rect r,
+                             int color) {
+    appui_fill(fb, w, h, (struct appui_rect){r.x + 3, r.y, r.w - 6, r.h},
+               color);
+    for (int i = 0; i < 4; i++) {
+        int inset = appui_corner[i];
+        int rw = r.w - 2 * inset;
+        appui_fill(fb, w, h,
+                   (struct appui_rect){r.x + inset, r.y + i, rw, 1}, color);
+        appui_fill(fb, w, h,
+                   (struct appui_rect){r.x + inset, r.y + r.h - 1 - i, rw, 1},
+                   color);
+    }
+    appui_fill(fb, w, h, (struct appui_rect){r.x, r.y + 4, r.w, r.h - 8},
+               color);
 }
 
 static void appui_border(uint8_t *fb, int w, int h, struct appui_rect r, int hi, int lo) {
@@ -117,6 +138,7 @@ static __attribute__((unused)) int appui_draw_codepoint(
     uint8_t bits[FONT_GLYPH_BYTES];
     const uint8_t *alpha = 0;
     int glyph_w = KFONT_WIDTH;
+    y -= PLT_FONT_Y_SHIFT;
     if (cp >= KFONT_FIRST && cp < KFONT_FIRST + KFONT_COUNT) {
         alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
     } else if (cp >= 0x80u) {
@@ -133,17 +155,24 @@ static __attribute__((unused)) int appui_draw_codepoint(
         x < clip.x + clip.w && y < clip.y + clip.h) {
         for (int py = 0; py < KFONT_HEIGHT; py++) {
             for (int px = 0; px < glyph_w; px++) {
-                int on = alpha ? alpha[py * KFONT_WIDTH + px] >= 128 :
-                    ((bits[py * FONT_GLYPH_STRIDE + px / 8] &
-                      (uint8_t)(0x80u >> (px & 7))) != 0);
+                int coverage = alpha ? alpha[py * KFONT_WIDTH + px] :
+                    (((bits[py * FONT_GLYPH_STRIDE + px / 8] &
+                       (uint8_t)(0x80u >> (px & 7))) != 0) ? 255 : 0);
                 int tx = x + px;
                 int ty = y + py;
-                if (!appui_inside(tx, ty, clip))
+                if (!appui_inside(tx, ty, clip) ||
+                    tx < 0 || ty < 0 || tx >= w || ty >= h)
                     continue;
-                if (on)
+                if (coverage >= 255) {
                     appui_pixel(fb, w, h, tx, ty, fg);
-                else if (bg >= 0)
-                    appui_pixel(fb, w, h, tx, ty, bg);
+                } else if (coverage <= 0) {
+                    if (bg >= 0)
+                        appui_pixel(fb, w, h, tx, ty, bg);
+                } else {
+                    int under = bg >= 0 ? bg : fb[ty * w + tx];
+                    appui_pixel(fb, w, h, tx, ty,
+                                plt_blend(fg, under, coverage));
+                }
             }
         }
     }
@@ -178,10 +207,13 @@ static void appui_text(uint8_t *fb, int w, int h, int x, int y,
 
 static void appui_button(uint8_t *fb, int w, int h, struct appui_rect r,
                          const char *label, int active) {
-    int bg = active ? appui_rgb6(0, 3, 5) : appui_gray(4);
-    appui_fill(fb, w, h, r, bg);
-    appui_border(fb, w, h, r, active ? appui_rgb6(2, 5, 5) : appui_gray(8), appui_gray(1));
-    appui_text(fb, w, h, r.x + 8, r.y + 6, label, 15, -1,
+    int bg = active ? THEME_ACCENT_DIM : THEME_WIN_CONTROL;
+    int edge = active ? THEME_ACCENT : appui_gray(0);
+    appui_fill_round(fb, w, h, r, edge);
+    appui_fill_round(fb, w, h,
+                     (struct appui_rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
+                     bg);
+    appui_text(fb, w, h, r.x + 8, r.y + 6, label, THEME_TEXT, -1,
                (struct appui_rect){r.x + 4, r.y + 2, r.w - 8, r.h - 4});
 }
 

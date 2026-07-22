@@ -50,12 +50,12 @@ static void set_document_path(const char *path) {
 }
 
 static struct appui_rect editor_rect(void) {
-    return (struct appui_rect){12, 52, w - 34, h - 76};
+    return (struct appui_rect){4, 46, w - 8, h - 50};
 }
 
 static struct appui_rect text_clip_rect(void) {
     struct appui_rect e = editor_rect();
-    return (struct appui_rect){e.x + 8, e.y + 8, e.w - 24, e.h - 24};
+    return (struct appui_rect){e.x + 6, e.y + 4, e.w - 19, e.h - 15};
 }
 
 static void load_file(void) {
@@ -372,10 +372,10 @@ static struct appui_rect hthumb(void) {
 }
 
 static void draw_scrollbars(void) {
-    appui_fill(pixels, w, h, vtrack(), appui_gray(2));
-    appui_fill(pixels, w, h, htrack(), appui_gray(2));
-    appui_fill(pixels, w, h, vthumb(), max_scroll_y() ? appui_gray(8) : appui_gray(4));
-    appui_fill(pixels, w, h, hthumb(), max_scroll_x() ? appui_gray(8) : appui_gray(4));
+    appui_fill(pixels, w, h, vtrack(), 15);
+    appui_fill(pixels, w, h, htrack(), 15);
+    appui_fill(pixels, w, h, vthumb(), max_scroll_y() ? appui_gray(8) : appui_gray(11));
+    appui_fill(pixels, w, h, hthumb(), max_scroll_x() ? appui_gray(8) : appui_gray(11));
 }
 
 static void render(void) {
@@ -390,7 +390,7 @@ static void render(void) {
 
     struct appui_rect editor = editor_rect();
     appui_fill(pixels, w, h, editor, 15);
-    appui_border(pixels, w, h, editor, appui_gray(8), appui_gray(1));
+    appui_border(pixels, w, h, editor, appui_gray(5), appui_gray(0));
     struct appui_rect clip = text_clip_rect();
     int x = clip.x - scroll_x;
     int y = clip.y - scroll_y;
@@ -418,9 +418,9 @@ static void render(void) {
         int glyph_w = appui_codepoint_width(cp);
         if (glyph_start < select_hi && pos > select_lo) {
             int sx = appui_max(x, clip.x);
-            int sy = appui_max(y, clip.y);
+            int sy = appui_max(y - PLT_FONT_Y_SHIFT, clip.y);
             int ex = appui_min(x + glyph_w, clip.x + clip.w);
-            int ey = appui_min(y + KFONT_HEIGHT, clip.y + clip.h);
+            int ey = appui_min(y - PLT_FONT_Y_SHIFT + KFONT_HEIGHT, clip.y + clip.h);
             if (ex > sx && ey > sy)
                 appui_fill(pixels, w, h, (struct appui_rect){sx, sy, ex - sx, ey - sy},
                            appui_rgb6(2, 4, 5));
@@ -430,7 +430,7 @@ static void render(void) {
             appui_draw_codepoint(pixels, w, h, x, y, cp, 0, -1, clip);
         x += glyph_w;
     }
-    appui_fill(pixels, w, h, (struct appui_rect){cur_x, cur_y, 2, KFONT_HEIGHT + 2},
+    appui_fill(pixels, w, h, (struct appui_rect){cur_x, cur_y - PLT_FONT_Y_SHIFT, 2, KFONT_HEIGHT + 2},
                appui_rgb6(0, 2, 5));
     draw_scrollbars();
 }

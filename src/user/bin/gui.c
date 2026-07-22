@@ -1,5 +1,6 @@
 #include "libc.h"
 #include "guiapp.h"
+#include "palette.h"
 #include "pinyin_data.h"
 #include "../../kernel/drv/font_builtin.h"
 
@@ -169,6 +170,11 @@ static int gray(int n) {
     if (n > 14) n = 14;
     return 25 + n;
 }
+
+/* Rounded-corner inset tables: outer ring radius ~4px, inner (1px
+ * inset) follows the same arc so a fill_round pair makes a 1px ring. */
+static const uint8_t corner_outer[4] = {3, 2, 1, 1};
+static const uint8_t corner_inner[4] = {2, 1, 1, 0};
 
 static int min_i(int a, int b) { return a < b ? a : b; }
 static int max_i(int a, int b) { return a > b ? a : b; }
@@ -452,6 +458,7 @@ static int gui_text_width(const char *s) {
 }
 
 static void text_clip(int x, int y, const char *s, int fg, int bg, struct rect clip) {
+    y -= PLT_FONT_Y_SHIFT;
     while (s && *s) {
         uint32_t cp = gui_utf8_next(&s);
         if (cp == '\n') {
@@ -479,13 +486,22 @@ static void text_clip(int x, int y, const char *s, int fg, int bg, struct rect c
             x < clip.x + clip.w && y < clip.y + clip.h) {
         for (int py = 0; py < KFONT_HEIGHT; py++) {
             for (int px = 0; px < glyph_w; px++) {
-                int on = alpha ? alpha[py * KFONT_WIDTH + px] >= 128 :
-                    ((bits[py * FONT_GLYPH_STRIDE + px / 8] &
-                      (uint8_t)(0x80u >> (px & 7))) != 0);
-                if (on)
-                    pixel_clip(x + px, y + py, fg, clip);
-                else if (bg >= 0)
-                    pixel_clip(x + px, y + py, bg, clip);
+                int coverage = alpha ? alpha[py * KFONT_WIDTH + px] :
+                    (((bits[py * FONT_GLYPH_STRIDE + px / 8] &
+                       (uint8_t)(0x80u >> (px & 7))) != 0) ? 255 : 0);
+                int tx = x + px;
+                int ty = y + py;
+                if (coverage >= 255) {
+                    pixel_clip(tx, ty, fg, clip);
+                } else if (coverage <= 0) {
+                    if (bg >= 0)
+                        pixel_clip(tx, ty, bg, clip);
+                } else if (inside(tx, ty, clip) && tx >= 0 && ty >= 0 &&
+                           tx < sw && ty < sh &&
+                           inside(tx, ty, compose_clip)) {
+                    int under = bg >= 0 ? bg : fb[ty * sw + tx];
+                    pixel(tx, ty, plt_blend(fg, under, coverage));
+                }
             }
         }
         }
@@ -508,16 +524,72 @@ static void border(struct rect r, int hi, int lo) {
     line_v(r.x + r.w - 1, r.y, r.h, lo);
 }
 
+/* Fill a rect with rounded corners; insets picks the corner arc. */
+static void fill_round_t(struct rect r, const uint8_t *insets, int color) {
+    fill((struct rect){r.x + insets[0], r.y, r.w - 2 * insets[0], r.h},
+         color);
+    for (int i = 0; i < 4; i++) {
+        int rw = r.w - 2 * insets[i];
+        fill((struct rect){r.x + insets[i], r.y + i, rw, 1}, color);
+        fill((struct rect){r.x + insets[i], r.y + r.h - 1 - i, rw, 1},
+             color);
+    }
+    fill((struct rect){r.x, r.y + 4, r.w, r.h - 8}, color);
+}
+
+static void fill_round(struct rect r, int color) {
+    fill_round_t(r, corner_outer, color);
+}
+
+/* Only the top corners are rounded (window title bars). */
+static void fill_round_top(struct rect r, const uint8_t *insets, int color) {
+    fill((struct rect){r.x, r.y + 4, r.w, r.h - 4}, color);
+    for (int i = 0; i < 4; i++)
+        fill((struct rect){r.x + insets[i], r.y + i, r.w - 2 * insets[i], 1},
+             color);
+}
+
+/* Blend palette color fg over the current backbuffer contents. */
+static void fill_blend(struct rect r, int fg, int alpha) {
+    if (r.x < 0) { r.w += r.x; r.x = 0; }
+    if (r.y < 0) { r.h += r.y; r.y = 0; }
+    if (r.x + r.w > sw) r.w = sw - r.x;
+    if (r.y + r.h > sh) r.h = sh - r.y;
+    r = intersect_rect(r, compose_clip);
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    for (int yy = 0; yy < r.h; yy++) {
+        uint8_t *row = fb + (r.y + yy) * sw + r.x;
+        for (int xx = 0; xx < r.w; xx++)
+            row[xx] = (uint8_t)plt_blend(fg, row[xx], alpha);
+    }
+}
+
+static void fill_circle(int cx, int cy, int rad, int color) {
+    for (int dy = -rad; dy <= rad; dy++) {
+        for (int dx = -rad; dx <= rad; dx++) {
+            if (dx * dx + dy * dy <= rad * rad)
+                pixel(cx + dx, cy + dy, color);
+        }
+    }
+}
+
+/* Soft drop shadow: two blended black layers, 6px max extent (matches
+ * the +6 damage margin used by window move/resize code). */
 static void shadow(struct rect r) {
-    fill((struct rect){r.x + 6, r.y + r.h, r.w, 6}, gray(2));
-    fill((struct rect){r.x + r.w, r.y + 6, 6, r.h}, gray(2));
+    fill_blend((struct rect){r.x + 6, r.y + r.h, r.w, 6}, 0, 55);
+    fill_blend((struct rect){r.x + r.w, r.y + 6, 6, r.h}, 0, 55);
+    fill_blend((struct rect){r.x + 3, r.y + r.h, r.w, 3}, 0, 120);
+    fill_blend((struct rect){r.x + r.w, r.y + 3, 3, r.h}, 0, 120);
 }
 
 static void button(struct rect r, const char *label, int active) {
-    int bg = active ? rgb6(1, 3, 5) : gray(4);
-    fill(r, bg);
-    border(r, active ? rgb6(3, 5, 5) : gray(8), gray(1));
-    text_clip(r.x + 10, r.y + 5, label, 15, -1,
+    int bg = active ? THEME_ACCENT_DIM : THEME_WIN_CONTROL;
+    int edge = active ? THEME_ACCENT : THEME_WIN_BORDER_INACT;
+    fill_round_t(r, corner_outer, edge);
+    fill_round_t((struct rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
+                 corner_inner, bg);
+    text_clip(r.x + 10, r.y + 5, label, THEME_TEXT, -1,
               (struct rect){r.x + 4, r.y + 2, r.w - 8, r.h - 4});
 }
 
@@ -1140,15 +1212,15 @@ static void layout(void) {
 }
 
 static void draw_background(void) {
-    fill((struct rect){0, 0, sw, sh}, rgb6(0, 2, 3));
+    fill((struct rect){0, 0, sw, sh}, plt_rgb(22, 30, 42));
 }
 
 static void draw_topbar(void) {
-    fill((struct rect){0, 0, sw, 30}, gray(2));
-    fill((struct rect){0, 29, sw, 1}, gray(7));
-    text(14, 7, "BuzzOS", 15, -1);
-    text(88, 7, "Desktop", gray(12), -1);
-    text(sw - 178, 7, "Framebuffer 32bpp", gray(12), -1);
+    fill((struct rect){0, 0, sw, 30}, plt_rgb(22, 26, 34));
+    fill((struct rect){0, 29, sw, 1}, plt_rgb(52, 62, 80));
+    text(14, 7, "BuzzOS", THEME_ACCENT, -1);
+    text(88, 7, "Desktop", THEME_TEXT_DIM, -1);
+    text(sw - 178, 7, "Framebuffer 32bpp", THEME_TEXT_FAINT, -1);
 }
 
 static struct rect close_rect(int id);
@@ -1161,26 +1233,36 @@ static void draw_window_frame(int id) {
         return;
     struct rect r = w->r;
     shadow(r);
-    fill(r, gray(3));
-    border(r, w->active ? rgb6(2, 5, 5) : gray(8), gray(1));
-    fill((struct rect){r.x + 1, r.y + 1, r.w - 2, 28},
-         w->active ? rgb6(0, 3, 5) : gray(5));
-    text_clip(r.x + 12, r.y + 7, w->title, 15, -1,
+    fill_round_t(r, corner_outer,
+                 w->active ? THEME_WIN_BORDER_ACT : THEME_WIN_BORDER_INACT);
+    fill_round_t((struct rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
+                 corner_inner, THEME_WIN_BODY);
+    fill_round_top((struct rect){r.x + 1, r.y + 1, r.w - 2, 28},
+                   corner_inner,
+                   w->active ? THEME_TITLE_ACT : THEME_TITLE_INACT);
+    line_h(r.x + 1, r.y + 29, r.w - 2,
+           w->active ? THEME_ACCENT_SOFT : THEME_WIN_BORDER_INACT);
+    text_clip(r.x + 12, r.y + 7, w->title,
+              w->active ? THEME_TEXT : THEME_TEXT_FAINT, -1,
               (struct rect){r.x + 10, r.y + 4, r.w - 88, 22});
     struct rect mn = min_rect(id);
     struct rect mx = max_rect(id);
     struct rect cl = close_rect(id);
-    fill(mn, gray(8));
-    fill(mx, rgb6(2, 4, 3));
-    fill(cl, rgb6(4, 1, 1));
-    line_h(mn.x + 3, mn.y + 8, 6, 0);
-    border(mx, 15, gray(1));
-    line_h(cl.x + 3, cl.y + 3, 6, 15);
-    line_h(cl.x + 3, cl.y + 8, 6, 15);
+    int idle = gray(3);
+    fill_circle(mn.x + 6, mn.y + 6, 5, w->active ? THEME_MIN_YELLOW : idle);
+    fill_circle(mx.x + 6, mx.y + 6, 5, w->active ? THEME_MAX_GREEN : idle);
+    fill_circle(cl.x + 6, cl.y + 6, 5, w->active ? THEME_CLOSE_RED : idle);
+    int glyph = plt_rgb(40, 20, 20);
+    line_h(mn.x + 4, mn.y + 6, 5, gray(0));
+    border((struct rect){mx.x + 4, mx.y + 4, 5, 5}, gray(0), gray(0));
+    for (int i = 0; i < 5; i++) {
+        pixel(cl.x + 4 + i, cl.y + 4 + i, glyph);
+        pixel(cl.x + 8 - i, cl.y + 4 + i, glyph);
+    }
     if (!w->maximized) {
         for (int i = 0; i < 3; i++) {
             line_h(r.x + r.w - 18 + i * 5, r.y + r.h - 6 - i * 5,
-                   12 - i * 4, gray(8));
+                   12 - i * 4, gray(4));
         }
     }
 }
@@ -1299,10 +1381,14 @@ static void draw_scrollbars(int id) {
     clamp_scroll(id);
     struct rect vt = vscroll_track(id);
     struct rect ht = hscroll_track(id);
-    fill(vt, gray(2));
-    fill(ht, gray(2));
-    fill(vscroll_thumb(id), max_scroll_y(id) ? gray(8) : gray(4));
-    fill(hscroll_thumb(id), max_scroll_x(id) ? gray(8) : gray(4));
+    fill(vt, THEME_WIN_BODY);
+    fill(ht, THEME_WIN_BODY);
+    struct rect vth = vscroll_thumb(id);
+    struct rect hth = hscroll_thumb(id);
+    fill_round((struct rect){vth.x + 1, vth.y + 1, vth.w - 2, vth.h - 2},
+               max_scroll_y(id) ? gray(5) : gray(3));
+    fill_round((struct rect){hth.x + 1, hth.y + 1, hth.w - 2, hth.h - 2},
+               max_scroll_x(id) ? gray(5) : gray(3));
 }
 
 static void draw_launcher(void) {
@@ -1310,14 +1396,14 @@ static void draw_launcher(void) {
         return;
     draw_window_frame(WIN_LAUNCHER);
     struct rect c = content_rect(WIN_LAUNCHER);
-    fill(c, gray(3));
+    fill(c, THEME_WIN_BODY);
     struct rect clip = c;
     int ox = c.x - scroll_x[WIN_LAUNCHER];
     int oy = c.y - scroll_y[WIN_LAUNCHER];
-    text_clip(ox, oy, "Installed", gray(13), -1, clip);
+    text_clip(ox, oy, "Installed", THEME_ACCENT, -1, clip);
     int y = oy + 28;
     if (app_count == 0) {
-        text_clip(ox, y, "No apps in /fs/apps", gray(11), -1, clip);
+        text_clip(ox, y, "No apps in /fs/apps", THEME_TEXT_DIM, -1, clip);
         draw_scrollbars(WIN_LAUNCHER);
         return;
     }
@@ -1327,11 +1413,18 @@ static void draw_launcher(void) {
         if (visible.w <= 0 || visible.h <= 0)
             continue;
         int selected = i == app_selected;
-        fill(visible, selected ? rgb6(0, 3, 5) : gray(4));
-        border(visible, selected ? rgb6(2, 5, 5) : gray(6), gray(2));
-        fill(intersect_rect((struct rect){row.x + 8, row.y + 6, 16, 16}, clip),
-             rgb6((i % 5) + 1, 3, 4));
-        text_clip(row.x + 34, row.y + 6, apps[i].name, 15, -1, clip);
+        if (selected) {
+            struct rect sel = intersect_rect(
+                (struct rect){row.x, row.y, row.w - 6, row.h}, clip);
+            if (sel.w > 0 && sel.h > 0)
+                fill_round(sel, THEME_ACCENT_SOFT);
+        }
+        struct rect icon = intersect_rect(
+            (struct rect){row.x + 8, row.y + 6, 16, 16}, clip);
+        if (icon.w > 0 && icon.h > 0)
+            fill_round(icon, rgb6((i % 5) + 1, 3, 4));
+        text_clip(row.x + 34, row.y + 6, apps[i].name,
+                  selected ? THEME_TEXT : THEME_TEXT_DIM, -1, clip);
     }
     draw_scrollbars(WIN_LAUNCHER);
 }
@@ -1341,8 +1434,8 @@ static void draw_terminal(void) {
         return;
     draw_window_frame(WIN_TERMINAL);
     struct rect c = content_rect(WIN_TERMINAL);
-    fill(c, 0);
-    border(c, gray(6), gray(1));
+    fill(c, plt_rgb(14, 18, 26));
+    border(c, gray(3), THEME_WIN_BORDER_INACT);
     struct rect clip = {c.x + 1, c.y + 1, c.w - 2, c.h - 2};
     int ox = c.x + 10 - scroll_x[WIN_TERMINAL];
     int y = c.y + 8 - scroll_y[WIN_TERMINAL];
@@ -1366,7 +1459,7 @@ static void draw_terminal(void) {
                                (i < br || (i == br && start < bp));
                 if (selected) {
                     struct rect mark = intersect_rect(
-                        (struct rect){px, y, glyph_w, KFONT_HEIGHT}, clip);
+                        (struct rect){px, y - PLT_FONT_Y_SHIFT, glyph_w, KFONT_HEIGHT}, clip);
                     if (mark.w > 0 && mark.h > 0)
                         fill(mark, rgb6(1, 3, 5));
                 }
@@ -1444,24 +1537,24 @@ static void draw_status(void) {
         return;
     draw_window_frame(WIN_STATUS);
     struct rect c = content_rect(WIN_STATUS);
-    fill(c, gray(3));
+    fill(c, THEME_WIN_BODY);
     struct rect clip = c;
     int ox = c.x - scroll_x[WIN_STATUS];
     int oy = c.y - scroll_y[WIN_STATUS];
     char line[96];
-    text_clip(ox, oy, "Display", gray(13), -1, clip);
+    text_clip(ox, oy, "Display", THEME_ACCENT, -1, clip);
     copy_text(line, "resolution ", sizeof(line));
     append_uint(line, (unsigned int)sw, sizeof(line));
     append_text(line, " x ", sizeof(line));
     append_uint(line, (unsigned int)sh, sizeof(line));
-    text_clip(ox, oy + 30, line, 15, -1, clip);
+    text_clip(ox, oy + 30, line, THEME_TEXT_DIM, -1, clip);
     copy_text(line, "apps ", sizeof(line));
     append_uint(line, (unsigned int)app_count, sizeof(line));
-    text_clip(ox, oy + 58, line, 15, -1, clip);
-    text_clip(ox, oy + 96, "Controls", gray(13), -1, clip);
-    text_clip(ox, oy + 126, "Enter launches selected app", 15, -1, clip);
-    text_clip(ox, oy + 150, "Tab cycles windows", 15, -1, clip);
-    text_clip(ox, oy + 174, "Esc exits desktop", 15, -1, clip);
+    text_clip(ox, oy + 58, line, THEME_TEXT_DIM, -1, clip);
+    text_clip(ox, oy + 96, "Controls", THEME_ACCENT, -1, clip);
+    text_clip(ox, oy + 126, "Enter launches selected app", THEME_TEXT_DIM, -1, clip);
+    text_clip(ox, oy + 150, "Tab cycles windows", THEME_TEXT_DIM, -1, clip);
+    text_clip(ox, oy + 174, "Esc exits desktop", THEME_TEXT_DIM, -1, clip);
     draw_scrollbars(WIN_STATUS);
 }
 
@@ -1472,8 +1565,6 @@ static void draw_app_window(int id) {
         return;
     draw_window_frame(id);
     struct rect c = content_rect(id);
-    if (!app_sessions[slot].scaled_surface)
-        fill(c, gray(2));
     struct rect clip = c;
     int ox = c.x;
     int oy = c.y;
@@ -1482,12 +1573,12 @@ static void draw_app_window(int id) {
     int source_w = app_sessions[slot].source_w;
     int source_h = app_sessions[slot].source_h;
     struct guiapp_shared_surface *shared = app_sessions[slot].shared;
-    if (!shared || aw <= 0 || ah <= 0)
+    if (!shared || aw <= 0 || ah <= 0) {
+        if (!app_sessions[slot].scaled_surface)
+            fill(c, THEME_WIN_BODY);
         return;
-    uint32_t sequence = shared->sequence;
-    if (sequence & 1u)
-        return;
-    __sync_synchronize();
+    }
+    uint32_t sequence;
     const uint8_t *pixels = (const uint8_t *)shared +
         GUIAPP_SHARED_HEADER_SIZE;
     if (app_sessions[slot].scaled_surface && source_w > 0 && source_h > 0) {
@@ -1498,11 +1589,13 @@ static void draw_app_window(int id) {
         int dy = view.y;
         int right = ox + aw;
         int bottom = oy + ah;
-        fill((struct rect){ox, oy, aw, dy - oy}, gray(0));
-        fill((struct rect){ox, dy + vh, aw, bottom - (dy + vh)}, gray(0));
-        fill((struct rect){ox, dy, dx - ox, vh}, gray(0));
-        fill((struct rect){dx + vw, dy, right - (dx + vw), vh}, gray(0));
+        fill((struct rect){ox, oy, aw, dy - oy}, 0);
+        fill((struct rect){ox, dy + vh, aw, bottom - (dy + vh)}, 0);
+        fill((struct rect){ox, dy, dx - ox, vh}, 0);
+        fill((struct rect){dx + vw, dy, right - (dx + vw), vh}, 0);
         struct rect visible = intersect_rect(intersect_rect(view, clip), compose_clip);
+        if (visible.w <= 0 || visible.h <= 0)
+            return;
         if (app_sessions[slot].scale_map_w != vw ||
             app_sessions[slot].scale_map_h != vh ||
             app_sessions[slot].scale_source_w != source_w ||
@@ -1517,6 +1610,18 @@ static void draw_app_window(int id) {
             app_sessions[slot].scale_source_h = source_h;
         }
         int xscale = vw / source_w, yscale = vh / source_h;
+        /* Copy straight into the backbuffer, retrying until the seqlock
+         * confirms a tear-free pass.  Intermediate tears never reach the
+         * screen: the display is only updated from the backbuffer after
+         * compose finishes. */
+        int copied = 0;
+        for (int attempt = 0; attempt < 100 && !copied; attempt++) {
+            sequence = shared->sequence;
+            if (sequence & 1u) {
+                yield();
+                continue;
+            }
+            __sync_synchronize();
         if (xscale > 0 && yscale > 0 &&
             xscale * source_w == vw && yscale * source_h == vh) {
             /* Expand each source row only once, then reuse it for all of its
@@ -1559,23 +1664,45 @@ static void draw_app_window(int id) {
                 memcpy(dst, scaled_scanline, (size_t)visible.w);
             }
         }
-        __sync_synchronize();
-        if (shared->sequence != sequence)
+            __sync_synchronize();
+            copied = shared->sequence == sequence;
+            if (!copied && (attempt & 3) == 3)
+                yield();
+        }
+        if (!copied)
             app_note_dirty(slot, (struct rect){0, 0, source_w, source_h});
         return;
     }
+    /* Paint only the margins around the surface; the surface area is
+     * (re)painted below once the seqlock confirms a clean copy. */
+    fill((struct rect){ox + aw, c.y, (c.x + c.w) - (ox + aw), c.h},
+         THEME_WIN_BODY);
+    fill((struct rect){c.x, oy + ah, c.w, (c.y + c.h) - (oy + ah)},
+         THEME_WIN_BODY);
     struct rect visible = intersect_rect(
         intersect_rect((struct rect){ox, oy, aw, ah}, clip), compose_clip);
     if (visible.w > 0 && visible.h > 0) {
         int sx = visible.x - ox;
         int sy = visible.y - oy;
-        for (int y = 0; y < visible.h; y++)
-            memcpy(fb + (visible.y + y) * sw + visible.x,
-                   pixels + (sy + y) * aw + sx, (size_t)visible.w);
+        int copied = 0;
+        for (int attempt = 0; attempt < 100 && !copied; attempt++) {
+            sequence = shared->sequence;
+            if (sequence & 1u) {
+                yield();
+                continue;
+            }
+            __sync_synchronize();
+            for (int y = 0; y < visible.h; y++)
+                memcpy(fb + (visible.y + y) * sw + visible.x,
+                       pixels + (sy + y) * aw + sx, (size_t)visible.w);
+            __sync_synchronize();
+            copied = shared->sequence == sequence;
+            if (!copied && (attempt & 3) == 3)
+                yield();
+        }
+        if (!copied)
+            app_note_dirty(slot, (struct rect){0, 0, aw, ah});
     }
-    __sync_synchronize();
-    if (shared->sequence != sequence)
-        app_note_dirty(slot, (struct rect){0, 0, aw, ah});
 }
 
 static int collect_open_apps(int ids[MAX_GUI_APPS]) {
@@ -1607,9 +1734,10 @@ static void draw_dock_tooltip(void) {
     int tx = clamp_i(pointer_x - tw / 2, 8, sw - tw - 8);
     int ty = sh - 96;
     struct rect tip = {tx, ty, tw, 26};
-    fill(tip, gray(1));
-    border(tip, gray(9), 0);
-    text_clip(tip.x + 10, tip.y + 5, title, 15, -1,
+    fill_round(tip, THEME_WIN_CONTROL);
+    fill_round((struct rect){tip.x + 1, tip.y + 1, tip.w - 2, tip.h - 2},
+               THEME_WIN_BODY);
+    text_clip(tip.x + 10, tip.y + 5, title, THEME_TEXT, -1,
               (struct rect){tip.x + 5, tip.y + 2, tip.w - 10, tip.h - 4});
 }
 
@@ -1619,8 +1747,14 @@ static void draw_dock(void) {
     int x, y, dock_w, task_cap;
     dock_geometry(&x, &y, &dock_w, &task_cap);
     struct rect r = {x, y, dock_w, 54};
-    fill(r, gray(3));
-    border(r, gray(8), gray(1));
+    /* Lift the dock off the wallpaper: soft shadow, bright ring,
+     * lighter panel and a top highlight. */
+    fill_blend((struct rect){r.x + 4, r.y + r.h, r.w - 4, 5}, 0, 70);
+    fill_blend((struct rect){r.x + r.w, r.y + 4, 5, r.h - 4}, 0, 70);
+    fill_round_t(r, corner_outer, plt_rgb(78, 92, 114));
+    fill_round_t((struct rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
+                 corner_inner, plt_rgb(43, 51, 66));
+    line_h(r.x + 5, r.y + 1, r.w - 10, plt_rgb(96, 112, 138));
 
     static const char *system_labels[] = {"Apps", "Term", "Sys"};
     for (int i = 0; i < WIN_APP_BASE; i++) {
@@ -1630,10 +1764,13 @@ static void draw_dock(void) {
 
     int shown = min_i(app_total, task_cap);
     int task_x = x + 12 + WIN_APP_BASE * 70;
+    line_v(task_x - 6, y + 10, 34, plt_rgb(78, 92, 114));
     for (int i = 0; i < shown; i++) {
         int id = ids[i];
         struct rect b = {task_x + i * 118, y + 9, 112, 36};
         button(b, windows[id].title, windows[id].active || dock_hover == id);
+        if (windows[id].active)
+            fill_circle(b.x + b.w / 2, y + 49, 2, THEME_ACCENT);
     }
     if (app_total > 0) {
         int more_x = x + dock_w - 76;
@@ -1647,8 +1784,9 @@ static void draw_dock(void) {
         int panel_x = x + dock_w - panel_w;
         int panel_y = y - panel_h - 6;
         struct rect panel = {panel_x, panel_y, panel_w, panel_h};
-        fill(panel, gray(3));
-        border(panel, gray(9), gray(1));
+        fill_round(panel, THEME_WIN_CONTROL);
+        fill_round((struct rect){panel.x + 1, panel.y + 1,
+                                 panel.w - 2, panel.h - 2}, THEME_WIN_BODY);
         for (int i = 0; i < app_total; i++) {
             int id = ids[i];
             struct rect item = {panel_x + 7, panel_y + 7 + i * 30,
@@ -1691,9 +1829,8 @@ static int ime_candidate_at(int wanted, char out[GUIAPP_TEXT_MAX]) {
 static void draw_ime(void) {
     const char *mode = ime_enabled ? "中" : "英";
     struct rect badge = {sw - 48, 8, 34, 25};
-    fill(badge, ime_enabled ? rgb6(0, 3, 5) : gray(3));
-    border(badge, gray(9), gray(1));
-    text_clip(badge.x + 5, badge.y + 2, mode, 15, -1,
+    fill_round(badge, ime_enabled ? THEME_ACCENT_DIM : THEME_WIN_CONTROL);
+    text_clip(badge.x + 5, badge.y + 2, mode, THEME_TEXT, -1,
               (struct rect){badge.x + 2, badge.y + 1, badge.w - 4, badge.h - 2});
     if (!ime_enabled || ime_length == 0)
         return;
@@ -1710,9 +1847,10 @@ static void draw_ime(void) {
     }
     int panel_w = min_i(sw - 24, max_i(260, gui_text_width(line) + 20));
     struct rect panel = {(sw - panel_w) / 2, sh - 108, panel_w, 32};
-    fill(panel, 15);
-    border(panel, rgb6(0, 3, 5), gray(1));
-    text_clip(panel.x + 10, panel.y + 5, line, 0, -1,
+    fill_round(panel, THEME_ACCENT_DIM);
+    fill_round((struct rect){panel.x + 1, panel.y + 1,
+                             panel.w - 2, panel.h - 2}, THEME_WIN_BODY);
+    text_clip(panel.x + 10, panel.y + 5, line, THEME_TEXT, -1,
               (struct rect){panel.x + 5, panel.y + 3, panel.w - 10, panel.h - 6});
 }
 
@@ -1723,8 +1861,9 @@ static void draw_context_menu(void) {
     if (menu.x + menu.w > sw) menu.x = sw - menu.w;
     if (menu.y + menu.h > sh) menu.y = sh - menu.h;
     context_x = menu.x; context_y = menu.y;
-    fill(menu, gray(3));
-    border(menu, gray(9), gray(1));
+    fill_round(menu, THEME_WIN_CONTROL);
+    fill_round((struct rect){menu.x + 1, menu.y + 1,
+                             menu.w - 2, menu.h - 2}, THEME_WIN_BODY);
     for (int i = 0; i < 3; i++)
         button((struct rect){menu.x + 4, menu.y + 4 + i * 27, menu.w - 8, 25},
                labels[i], i == 1 && clipboard[0]);
@@ -2104,8 +2243,9 @@ static void send_mouse_to_app(int id, int buttons, int wheel) {
 }
 
 static void flush_pending_app_resizes(void) {
-    if (resize_win >= WIN_APP_BASE)
-        return;
+    /* Send coalesced resize events to apps even mid-drag so their content
+     * relayouts live.  sync_app_size() dedups against want_w/want_h, so
+     * unchanged sizes cost nothing. */
     for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
         if (!app_sessions[slot].used || !app_sessions[slot].resize_dirty)
             continue;
