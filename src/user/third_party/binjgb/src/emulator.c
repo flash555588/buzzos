@@ -2470,11 +2470,11 @@ static void do_sgb(Emulator* e) {
             u8 palin = pal & 3, palon = (pal >> 2) & 3, palout = (pal >> 4) & 3;
             u8 l = SGB.data[4 + i * 6], t = SGB.data[5 + i * 6],
                r = SGB.data[6 + i * 6], b = SGB.data[7 + i * 6];
-            
+
             Bool inside = info & 1;
             Bool border = info & 2;
             Bool outside = info & 4;
-            
+
             if (inside && !border && !outside) {
               border = TRUE;
               palon = palin;
@@ -2482,7 +2482,7 @@ static void do_sgb(Emulator* e) {
               border = TRUE;
               palon = palout;
             }
-            
+
             Bool has_inner = (r - l) >= 2 && (b - t) >= 2;
             if (inside && has_inner) { // colors inside region
               set_sgb_attr_block(e, l + 1, t + 1, r - 1, b - 1, palin);
@@ -5312,7 +5312,7 @@ void emulator_render_background(Emulator* e, u32* buffer, int type) {
 
           int px = xflip ? (7 - x) : x;
           u8 bit = (0x80 >> px);
-          
+
           if ((a & bit) && (b & bit)) {
             color = 0xFF001B2D;
           } else if (a & bit) {
@@ -5363,7 +5363,7 @@ Bool set_audio_channel_mute(Emulator *e, int channel, Bool muted) {
 
 #else  // !GBSTUDIO
 
-Bool set_audio_channel_mute(Emulator *e, int channel, Bool muted) { 
+Bool set_audio_channel_mute(Emulator *e, int channel, Bool muted) {
   return FALSE;
 }
 
