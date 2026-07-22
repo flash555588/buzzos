@@ -83,7 +83,8 @@ int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const cha
         serial_puts("[exec] out of user bootstrap pages\n");
         return -1;
     }
-    uint32_t entry = elf_load(elf_data, elf_size);
+    uint32_t image_end = 0;
+    uint32_t entry = elf_load(elf_data, elf_size, &image_end);
     uint32_t stack = build_user_stack(argc, argv);
     paging_switch(old_cr3);
     irq_restore(irq_flags);
@@ -105,6 +106,7 @@ int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const cha
     proc_entry[id] = entry;
     proc_stack[id] = stack;
     syscall_reset_process(id);
+    syscall_set_heap_start(id, (image_end + 0xFFFu) & ~0xFFFu);
     task_set_cr3(id, proc_cr3);
     task_set_console_silent(id, console_silent);
     task_set_fd_owner(id, id);

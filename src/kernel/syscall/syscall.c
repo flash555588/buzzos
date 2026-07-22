@@ -108,5 +108,12 @@ void syscall_init(void) {
     syscall_table[SYS_CHDIR]  = sys_chdir;
     syscall_table[SYS_GETCWD] = sys_getcwd;
     syscall_table[SYS_WAITPID] = sys_waitpid;
+    syscall_table[SYS_SBRK] = sys_sbrk;
+    syscall_table[SYS_MONOTONIC_MS] = sys_monotonic_ms;
+    syscall_table[SYS_REALTIME] = sys_realtime;
+    syscall_table[SYS_SHM_CREATE] = sys_shm_create;
+    syscall_table[SYS_SHM_MAP] = sys_shm_map;
+    syscall_table[SYS_SHM_UNMAP] = sys_shm_unmap;
+    syscall_table[SYS_AUDIO_WRITE] = sys_audio_write;
     serial_puts("[syscall] VFS-backed syscalls ready\n");
 }

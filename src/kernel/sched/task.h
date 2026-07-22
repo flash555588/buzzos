@@ -2,6 +2,7 @@
 #define BUZZOS_TASK_H
 
 #include <stdint.h>
+#include "fpu.h"
 
 /* Process Control Block. The saved register context is stored on the
  * task's own kernel stack; the PCB only holds the stack pointer. */
@@ -19,6 +20,7 @@ struct task {
     int      state;
     char     name[16];
     char     cwd[128];
+    uint8_t  fpu_state[FPU_STATE_SIZE] __attribute__((aligned(16)));
 };
 
 #define TASK_READY   0
@@ -38,6 +40,12 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent);
 
 /* Yield the CPU voluntarily. */
 void task_yield(void);
+
+/* Keep the current task on-CPU while leaving hardware IRQs enabled.  Kernel
+ * locks use this on the single-CPU system so disk I/O cannot starve audio,
+ * network, keyboard, or timer interrupts. */
+void task_preempt_disable(void);
+void task_preempt_enable(void);
 
 /* Called from timer IRQ to preempt the current task. */
 void sched_tick(void);

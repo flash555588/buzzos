@@ -69,6 +69,9 @@ struct app_session {
     int reader_tid;
     volatile int reader_dead;
     volatile int closing;
+    uint32_t shm_token;
+    struct guiapp_shared_surface *shared;
+    int front_buffer;
     char title[GUIAPP_TITLE_MAX];
 };
 
@@ -80,7 +83,6 @@ static struct window windows[WIN_COUNT];
 static int z_order[WIN_COUNT];
 static struct app_entry apps[MAX_APPS];
 static struct app_session app_sessions[MAX_GUI_APPS];
-static uint8_t app_pixels[MAX_GUI_APPS][APP_SURFACE_MAX_W * APP_SURFACE_MAX_H];
 static int app_count;
 static int app_selected;
 static int app_last_click = -1;
@@ -742,25 +744,11 @@ static int app_read_frame(int slot) {
     if (frame.width <= 0 || frame.height <= 0 ||
         frame.width > APP_SURFACE_MAX_W || frame.height > APP_SURFACE_MAX_H)
         return -1;
-    if (frame.type == GUIAPP_FRAME_DIRTY) {
-        if (frame.x < 0 || frame.y < 0 || frame.dirty_w <= 0 || frame.dirty_h <= 0 ||
-            frame.x + frame.dirty_w > frame.width ||
-            frame.y + frame.dirty_h > frame.height)
-            return -1;
-        if (app_sessions[slot].surface_w != frame.width ||
-            app_sessions[slot].surface_h != frame.height)
-            return -1;
-        for (int row = 0; row < frame.dirty_h; row++) {
-            uint8_t *dst = app_pixels[slot] +
-                           (frame.y + row) * frame.width + frame.x;
-            if (read_full(app_sessions[slot].from_fd, dst, frame.dirty_w) < 0)
-                return -1;
-        }
-    } else {
-        int bytes = frame.width * frame.height;
-        if (read_full(app_sessions[slot].from_fd, app_pixels[slot], bytes) < 0)
-            return -1;
-    }
+    if (frame.type != GUIAPP_FRAME_SHARED ||
+        frame.buffer_index < 0 || frame.buffer_index >= GUIAPP_SHARED_BUFFERS ||
+        !app_sessions[slot].shared)
+        return -1;
+    app_sessions[slot].front_buffer = frame.buffer_index;
     app_sessions[slot].surface_w = frame.width;
     app_sessions[slot].surface_h = frame.height;
     copy_text(app_sessions[slot].title, frame.title, sizeof(app_sessions[slot].title));
@@ -808,10 +796,10 @@ static int sync_app_size(int id) {
     app_target_size(id, &target_w, &target_h);
     if (target_w <= 0 || target_h <= 0)
         return -1;
+    /* want_w/want_h are the last dimensions already submitted. Do not flood
+     * the event pipe while waiting for the application's next frame. */
     if (target_w == app_sessions[slot].want_w &&
-        target_h == app_sessions[slot].want_h &&
-        target_w == app_sessions[slot].surface_w &&
-        target_h == app_sessions[slot].surface_h) {
+        target_h == app_sessions[slot].want_h) {
         app_sessions[slot].resize_dirty = 0;
         return 0;
     }
@@ -839,24 +827,41 @@ static void run_app_with_arg(const char *path, const char *argument) {
         return;
     }
 
-    int ev_pipe[2];
-    int frame_pipe[2];
+    struct shm_mapping mapping;
+    if (shm_create(GUIAPP_SHARED_SIZE, &mapping) < 0) {
+        term_log("shared surface failed");
+        return;
+    }
+    struct guiapp_shared_surface *shared =
+        (struct guiapp_shared_surface *)mapping.address;
+    shared->front = 0;
+    shared->reader = 0xFFFFFFFFu;
+    shared->sequence = 0;
+
+    int ev_pipe[2] = {-1, -1};
+    int frame_pipe[2] = {-1, -1};
     if (pipe(ev_pipe) < 0 || pipe(frame_pipe) < 0) {
+        if (ev_pipe[0] >= 0) close(ev_pipe[0]);
+        if (ev_pipe[1] >= 0) close(ev_pipe[1]);
+        (void)shm_unmap(mapping.token);
         term_log("pipe failed");
         return;
     }
 
     char ev_fd[12];
     char frame_fd[12];
+    char shm_token[12];
     int_to_dec(ev_pipe[0], ev_fd, sizeof(ev_fd));
     int_to_dec(frame_pipe[1], frame_fd, sizeof(frame_fd));
-    char *argv[5];
+    int_to_dec((int)mapping.token, shm_token, sizeof(shm_token));
+    char *argv[6];
     argv[0] = (char *)path;
     argv[1] = "--buzz-gui";
     argv[2] = ev_fd;
     argv[3] = frame_fd;
-    argv[4] = (char *)argument;
-    int argc = argument && argument[0] ? 5 : 4;
+    argv[4] = (char *)(argument ? argument : "");
+    argv[5] = shm_token;
+    int argc = 6;
 
     copy_text(msg, "launch ", sizeof(msg));
     append_text(msg, path, sizeof(msg));
@@ -868,6 +873,7 @@ static void run_app_with_arg(const char *path, const char *argument) {
     if (pid < 0) {
         close(ev_pipe[1]);
         close(frame_pipe[0]);
+        (void)shm_unmap(mapping.token);
         term_log("launch failed");
         return;
     }
@@ -894,6 +900,9 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].resize_dirty = 0;
     app_sessions[slot].reader_dead = 0;
     app_sessions[slot].closing = 0;
+    app_sessions[slot].shm_token = mapping.token;
+    app_sessions[slot].shared = shared;
+    app_sessions[slot].front_buffer = 0;
     copy_text(app_sessions[slot].title, "Application", sizeof(app_sessions[slot].title));
 
     app_sessions[slot].reader_tid = spawn(app_reader_functions[slot]);
@@ -1308,6 +1317,21 @@ static void draw_app_window(int id) {
     int oy = c.y;
     int aw = app_sessions[slot].surface_w;
     int ah = app_sessions[slot].surface_h;
+    struct guiapp_shared_surface *shared = app_sessions[slot].shared;
+    if (!shared || aw <= 0 || ah <= 0)
+        return;
+    uint32_t front = shared->front;
+    if (front >= GUIAPP_SHARED_BUFFERS)
+        return;
+    shared->reader = front;
+    __sync_synchronize();
+    if (shared->front != front) {
+        front = shared->front;
+        shared->reader = front;
+        __sync_synchronize();
+    }
+    const uint8_t *pixels = (const uint8_t *)shared +
+        GUIAPP_SHARED_HEADER_SIZE + front * GUIAPP_SHARED_PIXELS;
     for (int y = 0; y < ah; y++) {
         int dy = oy + y;
         if (dy < clip.y || dy >= clip.y + clip.h)
@@ -1316,9 +1340,11 @@ static void draw_app_window(int id) {
             int dx = ox + x;
             if (dx < clip.x || dx >= clip.x + clip.w)
                 continue;
-            pixel(dx, dy, app_pixels[slot][y * aw + x]);
+            pixel(dx, dy, pixels[y * aw + x]);
         }
     }
+    __sync_synchronize();
+    shared->reader = 0xFFFFFFFFu;
 }
 
 static int collect_open_apps(int ids[MAX_GUI_APPS]) {
@@ -1685,6 +1711,8 @@ static void close_window(int id) {
         if (app_sessions[slot].reader_tid > 0)
             (void)join(app_sessions[slot].reader_tid);
         close(app_sessions[slot].from_fd);
+        if (app_sessions[slot].shm_token)
+            (void)shm_unmap(app_sessions[slot].shm_token);
         app_sessions[slot].used = 0;
         app_sessions[slot].pid = 0;
         app_sessions[slot].to_fd = -1;
@@ -1692,6 +1720,8 @@ static void close_window(int id) {
         app_sessions[slot].reader_tid = -1;
         app_sessions[slot].reader_dead = 0;
         app_sessions[slot].closing = 0;
+        app_sessions[slot].shm_token = 0;
+        app_sessions[slot].shared = 0;
     }
     windows[id].visible = 0;
     windows[id].minimized = 0;
@@ -1721,8 +1751,12 @@ static void toggle_maximize(int id) {
         windows[id].r = windows[id].restore;
         windows[id].maximized = 0;
     } else {
+        int dock_x, dock_y, dock_w, task_cap;
+        dock_geometry(&dock_x, &dock_y, &dock_w, &task_cap);
         windows[id].restore = windows[id].r;
-        windows[id].r = (struct rect){8, 34, sw - 16, sh - 46};
+        /* Keep maximized content inside the desktop work area instead of
+         * extending underneath the Deck. */
+        windows[id].r = (struct rect){8, 34, sw - 16, dock_y - 40};
         windows[id].maximized = 1;
     }
     clamp_scroll(id);
@@ -2204,8 +2238,6 @@ static void handle_mouse(void) {
     }
     if (left && resize_win >= 0) {
         apply_resize(resize_win, pointer_x, pointer_y);
-        if (resize_win >= WIN_APP_BASE)
-            (void)sync_app_size(resize_win);
         prev_buttons = ms.buttons;
         return;
     }

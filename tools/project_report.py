@@ -404,7 +404,9 @@ def collect_runtime_limits():
     if minifs_sectors is not None and minifs_inodes is not None:
         minifs_blocks = minifs_sectors - 1 - minifs_inodes - 1
     if minifs_block_size is not None and minifs_direct is not None:
-        minifs_max_file_size = (minifs_direct + (minifs_block_size // 2)) * minifs_block_size
+        meta_free = minifs_sectors - 1 - minifs_inodes
+        bitmap_sectors = (meta_free + minifs_block_size) // (minifs_block_size + 1)
+        minifs_max_file_size = (meta_free - bitmap_sectors) * minifs_block_size
 
     rows = [
         {"limit": "max_tasks", "value": max_tasks},

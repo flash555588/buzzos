@@ -3,9 +3,9 @@ param(
     [string]$FontFile = "",
     [int]$CellWidth = 12,
     [int]$CellHeight = 22,
-    [int]$FontSize = 17,
+    [int]$FontSize = 19,
     [int]$OffsetX = -1,
-    [int]$OffsetY = -2,
+    [int]$OffsetY = 1,
     [int]$Threshold = 24,
     [double]$Embolden = 0.45,
     [bool]$Monochrome = $true

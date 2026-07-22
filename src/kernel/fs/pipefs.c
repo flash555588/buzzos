@@ -2,6 +2,11 @@
 
 struct pipe_obj pipes[MAX_PIPES];
 
+static void pipe_copy(uint8_t *dst, const uint8_t *src, size_t count) {
+    for (size_t i = 0; i < count; i++)
+        dst[i] = src[i];
+}
+
 static int pipe_open(vnode_t *vn) { (void)vn; return 0; }
 
 static uint32_t current_task_bit(void) {
@@ -83,12 +88,16 @@ static int pipe_read(vnode_t *vn, void *buf, size_t count) {
     if (p->count == 0)
         return 0;
     uint8_t *out = (uint8_t *)buf;
-    size_t done = 0;
-    while (done < count && p->count > 0) {
-        out[done++] = p->data[p->tail];
-        p->tail = (p->tail + 1) % PIPE_BUFSZ;
-        p->count--;
-    }
+    size_t done = count < p->count ? count : p->count;
+    size_t first = done;
+    size_t contiguous = PIPE_BUFSZ - p->tail;
+    if (first > contiguous)
+        first = contiguous;
+    pipe_copy(out, p->data + p->tail, first);
+    if (done > first)
+        pipe_copy(out + first, p->data, done - first);
+    p->tail = (p->tail + done) % PIPE_BUFSZ;
+    p->count -= done;
     pipe_wake_mask(&p->write_waiters);
     return (int)done;
 }
@@ -115,11 +124,20 @@ static int pipe_write(vnode_t *vn, const void *buf, size_t count) {
         }
         if (p->readers == 0)
             return done ? (int)done : -1;
-        while (done < count && p->count < PIPE_BUFSZ) {
-            p->data[p->head] = in[done++];
-            p->head = (p->head + 1) % PIPE_BUFSZ;
-            p->count++;
-        }
+        size_t available = PIPE_BUFSZ - p->count;
+        size_t chunk = count - done;
+        if (chunk > available)
+            chunk = available;
+        size_t first = chunk;
+        size_t contiguous = PIPE_BUFSZ - p->head;
+        if (first > contiguous)
+            first = contiguous;
+        pipe_copy(p->data + p->head, in + done, first);
+        if (chunk > first)
+            pipe_copy(p->data, in + done + first, chunk - first);
+        p->head = (p->head + chunk) % PIPE_BUFSZ;
+        p->count += chunk;
+        done += chunk;
         pipe_wake_mask(&p->read_waiters);
     }
     return (int)done;

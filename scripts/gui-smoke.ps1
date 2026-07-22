@@ -6,6 +6,8 @@ param(
     [string]$TestImage = "build/buzzos-gui-test.img",
     [string]$OutDir = "build/gui-smoke",
     [string]$PythonPath = "",
+    [ValidateSet("none", "dsound", "sdl", "wav")]
+    [string]$AudioDriver = "none",
     [int]$TimeoutSeconds = 45
 )
 
@@ -247,12 +249,16 @@ Remove-Item -Path (Join-Path $OutDir "*.png") -ErrorAction SilentlyContinue
 
 $monitorPort = Get-FreeTcpPort
 $qemuArgs = @(
+    "-cpu", "max",
+    "-m", "256",
     "-drive", "format=raw,file=$TestImage",
     "-serial", "file:$SerialLog",
     "-display", "none",
     "-monitor", "tcp:127.0.0.1:$monitorPort,server,nowait",
     "-no-reboot",
     "-vga", "std",
+    "-audiodev", "$AudioDriver,id=audio0",
+    "-device", "AC97,audiodev=audio0",
     "-netdev", "user,id=n0",
     "-device", "ne2k_isa,netdev=n0,iobase=0x300,irq=10"
 )
@@ -358,6 +364,24 @@ try {
     Start-Sleep -Milliseconds 500
     $expandedPpm = (Join-Path $OutDir "dock-expanded.ppm")
     $screens += Capture-Screen "dock-expanded" $expandedPpm (Join-Path $OutDir "dock-expanded.png")
+    Send-Key "esc"
+    Wait-ForLog "\[gui\] exited" 10
+
+    Type-Command "gui"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "ret"
+    Wait-ForLog "PCM playback started \(AC97 bus master\)" 15
+    Start-Sleep -Seconds 2
+    $doomPpm = (Join-Path $OutDir "doom.ppm")
+    $screens += Capture-Screen "doom" $doomPpm (Join-Path $OutDir "doom.png")
+    Send-Key "ret"
+    Start-Sleep -Seconds 2
+    $doomInputPpm = (Join-Path $OutDir "doom-input.ppm")
+    $screens += Capture-Screen "doom-input" $doomInputPpm (Join-Path $OutDir "doom-input.png")
     Send-Key "esc"
     Wait-ForLog "\[gui\] exited" 10
 

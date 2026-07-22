@@ -1,0 +1,10 @@
+Music for BuzzOS
+
+Plays the bundled /share/buzzos-demo.wav sample through the native AC97
+audio driver.
+
+Controls:
+  Space       play or pause
+  R           restart from the beginning
+
+The bundled WAV is 11025 Hz, unsigned 8-bit, mono PCM.

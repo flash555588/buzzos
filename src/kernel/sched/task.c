@@ -23,6 +23,7 @@ static struct task tasks[MAX_TASKS];
 static int          num_tasks;
 static int          current_id;
 struct task        *current_task;
+static uint32_t preempt_depth;
 
 #define PROC_UNUSED 0
 #define PROC_RUNNING 1
@@ -169,6 +170,7 @@ void sched_init(void) {
     copy_cstr(procs[0].cwd, sizeof(procs[0].cwd), "/");
     num_tasks = 1;
     current_task = &tasks[0];
+    fpu_state_init(tasks[0].fpu_state);
 
     serial_puts("[sched] init: idle task created\n");
 }
@@ -244,6 +246,7 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
     for (int i = 0; i < 15 && name[i]; i++)
         tasks[id].name[i] = name[i];
     tasks[id].state  = TASK_READY;
+    fpu_state_init(tasks[id].fpu_state);
 
     if (!tasks[id].console_silent) {
         serial_puts("[sched] task ");
@@ -312,6 +315,8 @@ static void schedule(void) {
     if (paging_current_cr3() != task->cr3)
         paging_switch(task->cr3);
 
+    fpu_state_save(prev->fpu_state);
+    fpu_state_restore(task->fpu_state);
     switch_context(&prev->esp, (uint32_t *)(uintptr_t)task->esp);
 
     irq_restore(irq_flags);
@@ -322,11 +327,24 @@ static void schedule(void) {
 /* ------------------------------------------------------------------ */
 
 void task_yield(void) {
+    if (preempt_depth)
+        return;
     schedule();
 }
 
 void sched_tick(void) {
+    if (preempt_depth)
+        return;
     schedule();
+}
+
+void task_preempt_disable(void) {
+    preempt_depth++;
+}
+
+void task_preempt_enable(void) {
+    if (preempt_depth)
+        preempt_depth--;
 }
 
 int task_get_state(int id) {

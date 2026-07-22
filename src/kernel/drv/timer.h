@@ -10,7 +10,10 @@
  * preemptive scheduler. This is the foundation for uptime, sleep, and any
  * future time-based facility. */
 
-#define TIMER_HZ 100u   /* 100 ticks/sec → 10 ms granularity */
+/* 250 Hz is the conventional desktop-oriented compromise: Doom's 35 Hz
+ * cadence is quantized to 4 ms instead of 10 ms, while the simple i386
+ * scheduler avoids the overhead of a 1000 Hz context-switch clock. */
+#define TIMER_HZ 250u
 
 /* Program the PIT and unmask IRQ0 on the PIC. Call after idt_install()
  * (so the gate exists) and sched_init() (so schedule() is safe). */
@@ -20,8 +23,8 @@ void timer_init(void);
  * preempts the current task. */
 void timer_irq(void);
 
-/* Monotonic tick count since boot. 32-bit is plenty: at 100 Hz it wraps
- * after ~497 days, and 64-bit division would pull in libgcc helpers
+/* Monotonic tick count since boot. 32-bit is plenty: at 250 Hz it wraps
+ * after ~198 days, and 64-bit division would pull in libgcc helpers
  * (__udivdi3) that this freestanding build does not link. */
 uint32_t timer_ticks(void);
 

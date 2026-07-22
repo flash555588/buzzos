@@ -1,6 +1,6 @@
 #include "block/cache.h"
 #include "block/ata.h"
-#include "irq.h"
+#include "task.h"
 
 #define CACHE_BLOCKS 16
 #define SECTOR_SIZE 512
@@ -15,19 +15,16 @@ struct cache_entry {
 static struct cache_entry cache[CACHE_BLOCKS];
 static uint32_t cache_clock;
 static volatile int cache_locked;
-static uint32_t cache_irq_flags;
 
 static void cache_lock(void) {
-    uint32_t flags = irq_save();
+    task_preempt_disable();
     while (__sync_lock_test_and_set(&cache_locked, 1))
         __asm__ volatile("pause");
-    cache_irq_flags = flags;
 }
 
 static void cache_unlock(void) {
-    uint32_t flags = cache_irq_flags;
     __sync_lock_release(&cache_locked);
-    irq_restore(flags);
+    task_preempt_enable();
 }
 
 static void copy_bytes(void *dst, const void *src, int len) {
@@ -58,7 +55,6 @@ static int pick_entry(void) {
 
 void block_cache_init(void) {
     cache_locked = 0;
-    cache_irq_flags = 0;
     cache_lock();
     for (int i = 0; i < CACHE_BLOCKS; i++)
         cache[i].valid = 0;

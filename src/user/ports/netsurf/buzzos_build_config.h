@@ -1,0 +1,11 @@
+#ifndef BUZZOS_NETSURF_BUILD_CONFIG_H
+#define BUZZOS_NETSURF_BUILD_CONFIG_H
+
+#define NETSURF_LOG_LEVEL WARNING
+#define NETSURF_UA_FORMAT_STRING "Mozilla/5.0 (%s) NetSurf/%d.%d"
+#define NETSURF_HOMEPAGE "about:blank"
+#define NETSURF_BUILTIN_LOG_FILTER "level:WARNING"
+#define NETSURF_BUILTIN_VERBOSE_FILTER "level:WARNING"
+#define MONKEY_RESPATH "/res/netsurf"
+
+#endif

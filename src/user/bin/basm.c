@@ -10,7 +10,7 @@
 #define OPERAND_MAX 128
 #define LINE_MAX 512
 
-#define USER_BASE 0x02000000u
+#define USER_BASE 0x20000000u
 #define LOAD_OFF  0x1000u
 
 enum section_id {

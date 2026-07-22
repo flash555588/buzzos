@@ -1,0 +1,21 @@
+DOOM for BuzzOS
+
+This application uses the GPL doomgeneric engine. Game data is separate.
+Place a legally obtained DOOM shareware IWAD at:
+
+  /fs/games/doom/doom1.wad
+
+Run make doom-install on the host to download the verified Doom 1.9
+shareware WAD and install it into the BuzzOS disk image automatically.
+
+Controls:
+  Arrow keys  move and turn
+  X           fire
+  Space       use/open
+  C           run
+  V           strafe modifier
+  M           menu/back
+  Enter       select
+
+Sound effects use the native BuzzOS AC97 bus-master PCM driver. Music synthesis is not
+implemented in DOOM yet; use the Music application to test WAV playback.

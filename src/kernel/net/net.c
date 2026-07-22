@@ -11,6 +11,8 @@ enum {
     NET_TCP_RECV_TIMEOUT_MS = 15000,
     NET_TCP_RETRY_MS = 350,
     NET_TCP_RETRIES = 4,
+    NET_DNS_RETRY_TIMEOUT_MS = 1200,
+    NET_DNS_RETRIES = 3,
 };
 
 static void *memset(void *d, int c, size_t n) { for (size_t i=0;i<n;i++) ((uint8_t*)d)[i]=(uint8_t)c; return d; }
@@ -512,18 +514,35 @@ static size_t dns_encode_name(uint8_t *out, const char *name) {
     return (size_t)(out - start);
 }
 
-static const uint8_t *dns_skip_name(const uint8_t *p) {
-    for (;;) {
-        if ((*p & 0xC0) == 0xC0) return p + 2;
-        if (*p == 0) return p + 1;
-        p += 1 + *p;
+static const uint8_t *dns_skip_name(const uint8_t *p, const uint8_t *end) {
+    while (p < end) {
+        uint8_t label = *p++;
+        if ((label & 0xC0) == 0xC0)
+            return p < end ? p + 1 : 0;
+        if (label == 0)
+            return p;
+        if (label > 63 || (size_t)(end - p) < label)
+            return 0;
+        p += label;
     }
+    return 0;
 }
 
+static uint16_t dns_next_id = 0x1234;
+static uint16_t dns_next_port = 49152;
+
 int net_dns_resolve(const char *hostname, uint32_t *ip_out) {
+    if (!hostname || !hostname[0] || !ip_out)
+        return -1;
+
     uint8_t qbuf[512];
     memset(qbuf, 0, sizeof(qbuf));
-    qbuf[0] = 0x12; qbuf[1] = 0x34;
+    uint16_t txid = ++dns_next_id;
+    uint16_t local_port = ++dns_next_port;
+    if (dns_next_port < 49152 || dns_next_port == 65535)
+        dns_next_port = 49152;
+    qbuf[0] = (uint8_t)(txid >> 8);
+    qbuf[1] = (uint8_t)txid;
     qbuf[2] = 0x01; qbuf[3] = 0x00;
     qbuf[4] = 0x00; qbuf[5] = 0x01;
     size_t nlen = dns_encode_name(qbuf + 12, hostname);
@@ -532,52 +551,81 @@ int net_dns_resolve(const char *hostname, uint32_t *ip_out) {
     q[2] = 0x00; q[3] = 0x01;
     size_t qlen = (size_t)(q + 4 - qbuf);
 
-    dbg("dns: sending query\n");
-    if (udp_send(0x0302000A, 12345, 53, qbuf, qlen) < 0) {
-        dbg("dns: udp send failed\n");
-        return -1;
-    }
-
-    for (int tries = 0; tries < 200; tries++) {
-        uint8_t rbuf[1514];
-        size_t n = dev_recv(rbuf, sizeof(rbuf));
-        if (n == 0) { net_poll_backoff(); continue; }
-        if (n < sizeof(struct eth_frame) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr))
+    for (int attempt = 0; attempt < NET_DNS_RETRIES; attempt++) {
+        dbg(attempt ? "dns: retrying query\n" : "dns: sending query\n");
+        if (udp_send(net_dns_ip, local_port, 53, qbuf, qlen) < 0) {
+            dbg("dns: udp send failed\n");
             continue;
-        struct eth_frame *re = (struct eth_frame *)rbuf;
-        if (bswap16(re->ethertype) != 0x0800) continue;
-        struct ip_hdr *rip = (struct ip_hdr *)re->payload;
-        if (rip->protocol != 17) continue;
-        struct udp_hdr *rudp = (struct udp_hdr *)(rip + 1);
-        if (bswap16(rudp->src_port) != 53) continue;
-        if (bswap16(rudp->dst_port) != 12345) continue;
+        }
 
-        const uint8_t *dns = (const uint8_t *)(rudp + 1);
-        size_t dlen = bswap16(rudp->length) - sizeof(*rudp);
-        if (dlen < 12) continue;
-        if (dns[0] != 0x12 || dns[1] != 0x34) continue;
-        uint16_t ancount = ((uint16_t)dns[6] << 8) | dns[7];
-        if (ancount == 0) { dbg("dns: no answers\n"); return -1; }
-
-        const uint8_t *p = dns + 12;
-        p = dns_skip_name(p);
-        p += 4;
-
-        for (uint16_t i = 0; i < ancount; i++) {
-            p = dns_skip_name(p);
-            uint16_t rtype = ((uint16_t)p[0] << 8) | p[1];
-            uint16_t rdlen = ((uint16_t)p[8] << 8) | p[9];
-            if (rtype == 1 && rdlen == 4) {
-                *ip_out = ((uint32_t)p[10]) | ((uint32_t)p[11] << 8)
-                        | ((uint32_t)p[12] << 16) | ((uint32_t)p[13] << 24);
-                serial_puts("[dns] resolved ");
-                serial_puts(hostname);
-                serial_puts(" -> ");
-                serial_puthex(*ip_out);
-                serial_puts("\n");
-                return 0;
+        uint32_t deadline = net_deadline_after_ms(NET_DNS_RETRY_TIMEOUT_MS);
+        while (!net_deadline_expired(deadline)) {
+            uint8_t rbuf[1514];
+            size_t n = dev_recv(rbuf, sizeof(rbuf));
+            if (n == 0) {
+                if (net_timer_ready())
+                    task_sleep_until(timer_ticks() + 1);
+                else
+                    net_poll_backoff();
+                continue;
             }
-            p += 10 + rdlen;
+            if (n < sizeof(struct eth_frame) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr))
+                continue;
+            struct eth_frame *re = (struct eth_frame *)rbuf;
+            if (bswap16(re->ethertype) != 0x0800) continue;
+            struct ip_hdr *rip = (struct ip_hdr *)re->payload;
+            uint8_t ip_hlen = (uint8_t)((rip->ver_ihl & 0x0F) * 4);
+            if (rip->protocol != 17 || ip_hlen < sizeof(*rip)) continue;
+            if (rip->src_ip != net_dns_ip) continue;
+            if (n < sizeof(struct eth_frame) + ip_hlen + sizeof(struct udp_hdr)) continue;
+            struct udp_hdr *rudp = (struct udp_hdr *)((uint8_t *)rip + ip_hlen);
+            if (bswap16(rudp->src_port) != 53) continue;
+            if (bswap16(rudp->dst_port) != local_port) continue;
+
+            size_t udp_len = bswap16(rudp->length);
+            if (udp_len < sizeof(*rudp) + 12 ||
+                udp_len > n - sizeof(struct eth_frame) - ip_hlen)
+                continue;
+            const uint8_t *dns = (const uint8_t *)(rudp + 1);
+            size_t dlen = udp_len - sizeof(*rudp);
+            const uint8_t *end = dns + dlen;
+            if (dns[0] != (uint8_t)(txid >> 8) || dns[1] != (uint8_t)txid)
+                continue;
+            if (!(dns[2] & 0x80)) continue; /* Not a response. */
+            uint8_t rcode = dns[3] & 0x0F;
+            if (rcode == 3) { dbg("dns: name does not exist\n"); return -1; }
+            if (rcode != 0) break; /* Retry transient server errors. */
+
+            uint16_t qdcount = ((uint16_t)dns[4] << 8) | dns[5];
+            uint16_t ancount = ((uint16_t)dns[6] << 8) | dns[7];
+            const uint8_t *p = dns + 12;
+            for (uint16_t i = 0; i < qdcount; i++) {
+                p = dns_skip_name(p, end);
+                if (!p || (size_t)(end - p) < 4) { p = 0; break; }
+                p += 4;
+            }
+            if (!p) continue;
+
+            for (uint16_t i = 0; i < ancount; i++) {
+                p = dns_skip_name(p, end);
+                if (!p || (size_t)(end - p) < 10) break;
+                uint16_t rtype = ((uint16_t)p[0] << 8) | p[1];
+                uint16_t rclass = ((uint16_t)p[2] << 8) | p[3];
+                uint16_t rdlen = ((uint16_t)p[8] << 8) | p[9];
+                p += 10;
+                if ((size_t)(end - p) < rdlen) break;
+                if (rtype == 1 && rclass == 1 && rdlen == 4) {
+                    *ip_out = ((uint32_t)p[0]) | ((uint32_t)p[1] << 8)
+                            | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+                    serial_puts("[dns] resolved ");
+                    serial_puts(hostname);
+                    serial_puts(" -> ");
+                    serial_puthex(*ip_out);
+                    serial_puts("\n");
+                    return 0;
+                }
+                p += rdlen;
+            }
         }
     }
     dbg("dns: timeout\n");
@@ -653,6 +701,9 @@ static uint16_t net_tcp_receive_window(const struct net_tcp_pcb *pcb) {
     if (!pcb || pcb->rx_len >= NET_TCP_RX_CAP)
         return 0;
     size_t space = NET_TCP_RX_CAP - pcb->rx_len;
+    /* Keep an incoming burst below the roughly 14.5 KiB NE2000 ring. */
+    if (space > 8192u)
+        space = 8192u;
     return (uint16_t)(space > 0xFFFFu ? 0xFFFFu : space);
 }
 
@@ -723,7 +774,22 @@ static int net_tcp_poll_once(void) {
     size_t n = dev_recv_raw(rbuf, sizeof(rbuf));
     if (n == 0)
         return 0;
-    return net_tcp_dispatch_frame(rbuf, n);
+    (void)net_tcp_dispatch_frame(rbuf, n);
+    return 1;
+}
+
+/* Polling is our receive interrupt. Empty the hardware ring in one visit so
+ * a fast peer cannot refill it between a series of recv system calls. */
+static int net_tcp_poll_available(void) {
+    int handled = 0;
+    for (int packets = 0; packets < 64; packets++) {
+        int result = net_tcp_poll_once();
+        if (result == 0)
+            break;
+        if (result > 0)
+            handled++;
+    }
+    return handled;
 }
 
 static int net_tcp_dispatch_frame(const void *frame, size_t len) {
@@ -821,11 +887,6 @@ static int net_tcp_dispatch_frame(const void *frame, size_t len) {
     if (plen > 0 || (tcp->flags & TCP_FIN))
         (void)net_tcp_send_ack(pcb);
 
-    if (queued > 0) {
-        serial_puts("[tcp] queued rx len=");
-        serial_puthex((uint32_t)queued);
-        serial_puts("\n");
-    }
     if (accepted_fin) {
         pcb->rx_closed = 1;
         net_tcp_mark_closed(pcb);
@@ -960,6 +1021,7 @@ int net_tcp_send_pcb(struct net_tcp_pcb *pcb, const void *data, size_t len) {
 
 int net_tcp_recv_pcb(struct net_tcp_pcb *pcb, void *buf, size_t max) {
     if (!pcb) return -1;
+    net_tcp_poll_available();
     int queued = net_tcp_take_rx(pcb, buf, max);
     if (queued > 0)
         return queued;
@@ -973,7 +1035,7 @@ int net_tcp_recv_pcb(struct net_tcp_pcb *pcb, void *buf, size_t max) {
     uint32_t deadline = net_timer_ready() ?
         net_deadline_after_ms(NET_TCP_RECV_TIMEOUT_MS) : 0;
     for (int tries = 0;; tries++) {
-        net_tcp_poll_once();
+        net_tcp_poll_available();
         queued = net_tcp_take_rx(pcb, buf, max);
         if (queued > 0)
             return queued;
@@ -1003,15 +1065,39 @@ void net_tcp_close_pcb(struct net_tcp_pcb *pcb) {
         memset(fh, 0, sizeof(*fh));
         fh->src_port = bswap16(pcb->src_port);
         fh->dst_port = bswap16(pcb->dst_port);
-        fh->seq      = bswap32(pcb->seq);
+        uint32_t fin_seq = pcb->seq;
+        uint32_t fin_ack = fin_seq + 1u;
+        fh->seq      = bswap32(fin_seq);
         fh->ack      = bswap32(pcb->ack);
         fh->data_off = (uint8_t)(sizeof(*fh) / 4) << 4;
         fh->flags    = TCP_FIN | TCP_ACK;
         fh->window   = bswap16(net_tcp_receive_window(pcb));
         fh->checksum = trans_checksum(net_ip, pcb->dst_ip, 6, fh, sizeof(*fh));
-        ip_send(pcb->dst_ip, 6, fh, sizeof(*fh));
+        pcb->seq = fin_ack;
+        uint32_t deadline = net_timer_ready() ? net_deadline_after_ms(1000) : 0;
+        uint32_t retry_deadline = net_timer_ready() ? net_deadline_after_ms(250) : 0;
+        for (int polls = 0, retries = 0; pcb->state == TCP_STATE_ESTABLISHED;) {
+            if (polls == 0 || (retry_deadline && net_deadline_expired(retry_deadline))) {
+                (void)ip_send(pcb->dst_ip, 6, fh, sizeof(*fh));
+                if (polls != 0) retries++;
+                retry_deadline = net_timer_ready() ? net_deadline_after_ms(250) : 0;
+                if (retries >= 3 && (int32_t)(pcb->snd_una - fin_ack) >= 0)
+                    break;
+            }
+            net_tcp_poll_available();
+            if (pcb->state == TCP_STATE_CLOSED)
+                break;
+            if ((deadline && net_deadline_expired(deadline)) || (!deadline && polls >= 400))
+                break;
+            if (net_timer_ready())
+                task_sleep_until(timer_ticks() + 1);
+            else
+                net_poll_backoff();
+            polls++;
+        }
     }
-    net_tcp_mark_closed(pcb);
+    if (pcb->state != TCP_STATE_CLOSED)
+        net_tcp_mark_closed(pcb);
     dbg("tcp: closed\n");
 }
 

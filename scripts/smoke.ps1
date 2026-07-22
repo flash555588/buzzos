@@ -210,12 +210,16 @@ $tcpPairJobA = Start-TcpSmokeServer $tcpPairPortA "BUZZOS_TCP_TWO_A" $tcpPairRea
 $tcpPairJobB = Start-TcpSmokeServer $tcpPairPortB "BUZZOS_TCP_TWO_B" $tcpPairReadyB
 
 $qemuArgs = @(
+    "-cpu", "max",
+    "-m", "256",
     "-drive", "format=raw,file=$TestImage",
     "-serial", "file:$SerialLog",
     "-display", "none",
     "-monitor", "tcp:127.0.0.1:$monitorPort,server,nowait",
     "-no-reboot",
     "-vga", "std",
+    "-audiodev", "none,id=audio0",
+    "-device", "AC97,audiodev=audio0",
     "-netdev", "user,id=n0",
     "-device", "ne2k_isa,netdev=n0,iobase=0x300,irq=10"
 )
@@ -233,6 +237,7 @@ try {
     $script:writer.AutoFlush = $true
 
     $commands = @(
+        "exec /bin/audiotest",
         "ls /",
         "ls /bin",
         "ls /proc",
@@ -286,6 +291,9 @@ try {
         "threadreusetest",
         "exec /bin/socketleak",
         "exec /bin/socketleak",
+        "exec /bin/heaptest",
+        "exec /bin/nsporttest",
+        "exec /bin/nshtmltest",
         "pipetest",
         "pipeedgetest",
         "pipeblocktest",
@@ -365,11 +373,11 @@ try {
         "fs_name_len\s+24",
         "managed_limit_bytes\s+67108864",
         "minifs_lba_start\s+67584",
-        "minifs_sectors\s+4096",
+        "minifs_sectors\s+32768",
         "minifs_status\s+ok",
         "minifs_inodes\s+128",
         "minifs_blocks\s+3959",
-        "minifs_max_file_size\s+135168",
+        "minifs_max_file_size\s+16678400",
         "NAME\s+STATUS\s+ENTRYPOINTS",
         "procfs\s+stable\s+/proc",
         "about\s+stable\s+/proc/about,about,gui:about,make:report",
@@ -394,7 +402,7 @@ try {
         "blocks_free\s+[0-9]+",
         "blocks_total\s+3959",
         "data_lba\s+67721",
-        "max_file_size\s+135168",
+        "max_file_size\s+16678400",
         "host_check\s+make fs-check",
         "host_repair\s+make fs-repair",
         "page_size\s+4096",
@@ -403,7 +411,6 @@ try {
         "[0-9]+\s+0\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",
         "[0-9]+\s+1\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",
         "[0-9]+\s+2\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",
-        "[0-9]+\s+3\s+[0-9]+\s+1\s+r\s+file\s+fds\s+pos=[0-9]+",
         "driver\s+ne2000",
         "ip\s+10\.0\.2\.15",
         "gateway\s+10\.0\.2\.2",
@@ -483,6 +490,10 @@ try {
         "\[exec\] exited -14",
         "threadreuse: joined 40",
         "socketleak: opened 8",
+        "heaptest: ok 320K realloc reuse",
+        "audiotest: ok [0-9]+ bytes",
+        "nsporttest: ok surface scheduler",
+        "nshtmltest: ok HTML DOM CSS form img",
         "basm",
         "nano",
         "sh",

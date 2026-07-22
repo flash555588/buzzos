@@ -103,7 +103,7 @@ struct tcp_hdr {
 int  net_dns_resolve(const char *hostname, uint32_t *ip_out);
 
 /* Minimal TCP client — single connection at a time. */
-#define NET_TCP_RX_CAP 8192
+#define NET_TCP_RX_CAP 32768
 
 struct net_tcp_pcb {
     uint32_t dst_ip;

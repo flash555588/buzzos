@@ -7,7 +7,7 @@
 
 enum {
     MINIFS_LBA_START = 67584,
-    MINIFS_SECTORS = 4096,
+    MINIFS_SECTORS = 32768,
 };
 
 struct fs_info {

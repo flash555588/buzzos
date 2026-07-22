@@ -6,7 +6,7 @@
 /* ------------------------------------------------------------------ */
 
 #define MAX_PAGES          65536      /* bitmap capacity: 256 MiB */
-#define PMM_MANAGED_LIMIT  0x04000000u /* current paging maps low 64 MiB */
+#define PMM_MANAGED_LIMIT  0x10000000u /* current paging maps low 256 MiB */
 #define PMM_MANAGED_PAGES  (PMM_MANAGED_LIMIT / PAGE_SIZE)
 #define BITMAP_WORDS       (MAX_PAGES / 32)
 #define PAGE_MASK          ((uint64_t)PAGE_SIZE - 1u)

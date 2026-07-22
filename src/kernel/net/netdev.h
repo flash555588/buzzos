@@ -17,5 +17,6 @@ struct netdev *netdev_get(void);
 
 /* Built-in drivers */
 void ne2000_init_device(void);
+void ne2000_irq_handler(void);
 
 #endif

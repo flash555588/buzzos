@@ -314,7 +314,7 @@ def check_runtime_lifecycle():
         "waitpid(term_pid",
         "desktop_dirty",
         "tick - last_render_tick >= 60u",
-        "sync_app_size(resize_win)",
+        "sync_app_size(finished_resize)",
     ]:
         if snippet not in gui_c:
             fail(f"desktop lifecycle/event-driven rendering is missing: {snippet}")
@@ -338,7 +338,7 @@ def check_elf_loader_hardening():
     smoke_ps1 = read_text("scripts/smoke.ps1")
 
     for snippet in [
-        "uint32_t elf_load(const uint8_t *buf, size_t size)",
+        "uint32_t elf_load(const uint8_t *buf, size_t size, uint32_t *image_end_out)",
         "static int add_overflows_u32",
         "static int file_range_ok",
         "static int user_range_ok",
@@ -355,11 +355,11 @@ def check_elf_loader_hardening():
         if snippet not in elf_c:
             fail(f"ELF loader hardening is missing: {snippet}")
 
-    if "uint32_t elf_load(const uint8_t *buf, size_t size);" not in elf_h:
+    if "uint32_t elf_load(const uint8_t *buf, size_t size, uint32_t *image_end_out);" not in elf_h:
         fail("elf.h does not expose the size-aware elf_load signature")
 
     for snippet in [
-        "elf_load(elf_data, elf_size)",
+        "elf_load(elf_data, elf_size, &image_end)",
         "paging_destroy_user_space(proc_cr3)",
         'serial_puts("[exec] bad ELF\\n")',
     ]:
@@ -391,6 +391,52 @@ def check_elf_loader_hardening():
             fail(f"smoke.ps1 is missing bad ELF coverage: {snippet}")
 
     ok("ELF loader: size-aware validation rejects malformed runtime exec fixtures")
+
+
+def check_dynamic_heap():
+    syscall_h = read_text("src/kernel/syscall/syscall.h")
+    syscall_c = read_text("src/kernel/syscall/syscall.c")
+    sys_proc = read_text("src/kernel/syscall/sys_proc.c")
+    exec_c = read_text("src/kernel/core/exec.c")
+    libc_h = read_text("src/user/libc/libc.h")
+    libc_c = read_text("src/user/libc/libc.c")
+    makefile = read_text("Makefile")
+    heaptest = read_text("src/user/bin/heaptest.c")
+    smoke = read_text("scripts/smoke.ps1")
+
+    source = syscall_h + "\n" + syscall_c + "\n" + sys_proc + "\n" + exec_c
+    for snippet in [
+        "SYS_SBRK=54",
+        "syscall_table[SYS_SBRK] = sys_sbrk",
+        "process_heap_break",
+        "paging_map_user_range(old_break",
+        "syscall_set_heap_start(id",
+    ]:
+        if snippet not in source:
+            fail(f"dynamic heap syscall support is missing: {snippet}")
+
+    allocator = libc_h + "\n" + libc_c
+    for snippet in [
+        "void  *calloc(size_t count, size_t size)",
+        "void  *realloc(void *ptr, size_t size)",
+        "struct heap_block",
+        "heap_merge_next",
+        "syscall1(SYS_SBRK",
+    ]:
+        if snippet not in allocator:
+            fail(f"reusable user allocator is missing: {snippet}")
+
+    fixture = makefile + "\n" + heaptest + "\n" + smoke
+    for snippet in [
+        "HEAPTEST_ELF",
+        "/bin/heaptest",
+        "GROWN_SIZE = 320 * 1024",
+        "heaptest: ok 320K realloc reuse",
+    ]:
+        if snippet not in fixture:
+            fail(f"dynamic heap runtime coverage is missing: {snippet}")
+
+    ok("user heap: page-backed malloc/free/calloc/realloc has >64 KiB smoke coverage")
 
 
 def check_elf(path, load_start, load_end):
@@ -789,7 +835,7 @@ def check_procfs_diagnostics():
         "fs\\s+stable\\s+/fs,/proc/fs,fsinfo,fsstat,tools:check_minifs",
         "max_tasks\\s+32",
         "max_fd_per_owner\\s+32",
-        "minifs_max_file_size\\s+135168",
+        "minifs_max_file_size\\s+16678400",
         "mount\\s+/fs",
         "driver\\s+minifs",
         "inodes_total\\s+128",
@@ -1415,6 +1461,7 @@ def main():
         check_user_fault_isolation()
         check_runtime_lifecycle()
         check_elf_loader_hardening()
+        check_dynamic_heap()
         check_syscall_abi()
         check_network_socket_state()
         check_procfs_diagnostics()
@@ -1432,6 +1479,7 @@ def main():
     check_user_fault_isolation()
     check_runtime_lifecycle()
     check_elf_loader_hardening()
+    check_dynamic_heap()
     check_syscall_abi()
     check_network_socket_state()
     check_procfs_diagnostics()

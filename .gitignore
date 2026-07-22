@@ -1,4 +1,7 @@
 build/
+qemu.wav
 build_*/
 build-*/
 __pycache__/
+/third_party/netsurf-reference/
+/third_party/netsurf-workspace/

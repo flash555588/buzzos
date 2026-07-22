@@ -102,10 +102,14 @@ function Key-Name([char]$Ch) {
 
 $monitorPort = Get-FreeTcpPort
 $argLine = '-drive "format=raw,file=' + $imagePath + '"' +
+    ' -cpu max' +
+    ' -m 256' +
     ' -serial "file:' + $serialPath + '"' +
     ' -monitor "tcp:127.0.0.1:' + $monitorPort + ',server,nowait"' +
     ' -no-reboot' +
     ' -vga std' +
+    ' -audiodev dsound,id=audio0' +
+    ' -device AC97,audiodev=audio0' +
     ' -netdev user,id=n0' +
     ' -device ne2k_isa,netdev=n0,iobase=0x300,irq=10'
 

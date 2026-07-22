@@ -93,6 +93,9 @@ extern void exc_stub_13(void);
 extern void exc_stub_14(void);
 extern void irq_stub_32(void);
 extern void irq_stub_33(void);
+extern void irq_stub_37(void);
+extern void irq_stub_42(void);
+extern void irq_stub_43(void);
 extern void irq_stub_44(void);
 extern void syscall_stub(void);
 
@@ -113,6 +116,9 @@ static const struct idt_gate_init early_gates[] = {
     {14, exc_stub_14, IDT_GATE_INT},
     {32, irq_stub_32, IDT_GATE_INT},
     {33, irq_stub_33, IDT_GATE_INT},
+    {37, irq_stub_37, IDT_GATE_INT},
+    {42, irq_stub_42, IDT_GATE_INT},
+    {43, irq_stub_43, IDT_GATE_INT},
     {44, irq_stub_44, IDT_GATE_INT},
     {SYSCALL_VECTOR_LEGACY, syscall_stub, IDT_GATE_TRAP_USER},
     {SYSCALL_VECTOR, syscall_stub, IDT_GATE_TRAP_USER},

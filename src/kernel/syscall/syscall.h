@@ -16,6 +16,11 @@ struct syscall_gfx_info {
     uint32_t pitch;
     uint32_t bpp;
 };
+struct syscall_shm_mapping {
+    uint32_t token;
+    uint32_t address;
+    uint32_t size;
+};
 
 enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_SPAWN=6, SYS_YIELD=7, SYS_JOIN=8, SYS_SLEEP=9, SYS_KILL=10,
@@ -32,11 +37,15 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_GFX_CLEAR=44, SYS_GFX_PUTPIXEL=45,
        SYS_GFX_FILL_RECT=46, SYS_GFX_TEXT=47, SYS_FB_BLIT=48,
        SYS_MOUSE_GET=49, SYS_FSSTAT=50, SYS_FUTEX_WAIT_TIMEOUT=51,
-       SYS_GFX_INFO=52, SYS_FONT_GLYPH=53 };
+       SYS_GFX_INFO=52, SYS_FONT_GLYPH=53, SYS_SBRK=54,
+       SYS_MONOTONIC_MS=55, SYS_REALTIME=56,
+       SYS_SHM_CREATE=57, SYS_SHM_MAP=58, SYS_SHM_UNMAP=59,
+       SYS_AUDIO_WRITE=60 };
 
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);
 void syscall_reset_process(int task_id);
+void syscall_set_heap_start(int task_id, uint32_t start);
 void syscall_cleanup_process(int task_id);
 void syscall_release_thread(int task_id);
 #endif

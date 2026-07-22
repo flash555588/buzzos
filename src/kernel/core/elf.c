@@ -35,7 +35,9 @@ static int entry_in_segment(uint32_t entry, const struct elf32_phdr *phdr) {
     return entry >= phdr->p_vaddr && entry < end;
 }
 
-uint32_t elf_load(const uint8_t *buf, size_t size) {
+uint32_t elf_load(const uint8_t *buf, size_t size, uint32_t *image_end_out) {
+    if (image_end_out)
+        *image_end_out = 0;
     if (!buf || size < sizeof(struct elf32_ehdr))
         return 0;
 
@@ -64,6 +66,7 @@ uint32_t elf_load(const uint8_t *buf, size_t size) {
 
     int saw_load = 0;
     int entry_ok = 0;
+    uint32_t image_end = USER_LOAD_START;
 
     /* Validate all loadable segments before writing anything. */
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
@@ -80,6 +83,9 @@ uint32_t elf_load(const uint8_t *buf, size_t size) {
             return 0;
         if (!user_range_ok(phdr->p_vaddr, phdr->p_memsz))
             return 0;
+        uint32_t segment_end = phdr->p_vaddr + phdr->p_memsz;
+        if (segment_end > image_end)
+            image_end = segment_end;
         if (paging_map_user_range(phdr->p_vaddr, phdr->p_memsz) < 0)
             return 0;
         if ((phdr->p_flags & PF_X) && entry_in_segment(ehdr->e_entry, phdr))
@@ -133,5 +139,7 @@ uint32_t elf_load(const uint8_t *buf, size_t size) {
             return 0;
     }
 
+    if (image_end_out)
+        *image_end_out = image_end;
     return ehdr->e_entry;
 }

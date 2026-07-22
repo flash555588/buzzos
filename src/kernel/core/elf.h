@@ -51,6 +51,6 @@ enum {
 
 /* Parse, validate, and load an ELF image from `buf`. Returns the entry point
  * virtual address, or 0 on error. */
-uint32_t elf_load(const uint8_t *buf, size_t size);
+uint32_t elf_load(const uint8_t *buf, size_t size, uint32_t *image_end_out);
 
 #endif /* BUZZOS_ELF_H */

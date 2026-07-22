@@ -1,21 +1,39 @@
 #include "minifs.h"
 #include "block/ata.h"
 #include "block/cache.h"
-#include "irq.h"
 #include "serial.h"
+#include "task.h"
 
 #define MINIFS_MAGIC       0x5346424Du /* MBFS */
 #define MINIFS_BLOCK_SIZE  512
-#define MINIFS_INODES      128
+#define MINIFS_INODES      2048
 #define MINIFS_META_FREE   (MINIFS_SECTORS - 1 - MINIFS_INODES)
 #define MINIFS_BITMAP_SECTORS ((MINIFS_META_FREE + MINIFS_BLOCK_SIZE) / (MINIFS_BLOCK_SIZE + 1))
 #define MINIFS_BLOCKS      (MINIFS_META_FREE - MINIFS_BITMAP_SECTORS)
 #define MINIFS_DIRECT      8
 #define MINIFS_INDIRECT_ENTRIES (MINIFS_BLOCK_SIZE / (int)sizeof(uint16_t))
-#define MINIFS_MAX_FILE_BLOCKS  (MINIFS_DIRECT + MINIFS_INDIRECT_ENTRIES)
+#define MINIFS_SINGLE_BLOCKS    (MINIFS_DIRECT + MINIFS_INDIRECT_ENTRIES)
+#define MINIFS_DOUBLE_ENTRIES   (MINIFS_INDIRECT_ENTRIES * MINIFS_INDIRECT_ENTRIES)
+#define MINIFS_ADDRESSABLE_BLOCKS (MINIFS_SINGLE_BLOCKS + MINIFS_DOUBLE_ENTRIES)
+#define MINIFS_MAX_FILE_BLOCKS  MINIFS_BLOCKS
 #define MINIFS_MAX_FILE_SIZE    ((size_t)MINIFS_MAX_FILE_BLOCKS * MINIFS_BLOCK_SIZE)
 #define MINIFS_ROOT_INO    1
 #define MINIFS_NAME_LEN    24
+#define MINIFS_V1_INODES 128
+#define MINIFS_LEGACY_SECTORS 4096
+#define MINIFS_V1_META_FREE (MINIFS_SECTORS - 1 - MINIFS_V1_INODES)
+#define MINIFS_V1_BITMAP_SECTORS \
+    ((MINIFS_V1_META_FREE + MINIFS_BLOCK_SIZE) / (MINIFS_BLOCK_SIZE + 1))
+#define MINIFS_V1_BLOCKS (MINIFS_V1_META_FREE - MINIFS_V1_BITMAP_SECTORS)
+#define MINIFS_V1_DATA_LBA \
+    (MINIFS_LBA_START + 1 + MINIFS_V1_INODES + MINIFS_V1_BITMAP_SECTORS)
+#define MINIFS_LEGACY_META_FREE (MINIFS_LEGACY_SECTORS - 1 - MINIFS_V1_INODES)
+#define MINIFS_LEGACY_BITMAP_SECTORS \
+    ((MINIFS_LEGACY_META_FREE + MINIFS_BLOCK_SIZE) / (MINIFS_BLOCK_SIZE + 1))
+#define MINIFS_LEGACY_BLOCKS \
+    (MINIFS_LEGACY_META_FREE - MINIFS_LEGACY_BITMAP_SECTORS)
+#define MINIFS_LEGACY_DATA_LBA \
+    (MINIFS_LBA_START + 1 + MINIFS_V1_INODES + MINIFS_LEGACY_BITMAP_SECTORS)
 
 enum {
     MINIFS_FREE = 0,
@@ -37,11 +55,15 @@ struct minifs_inode {
     uint32_t size;
     uint16_t block[MINIFS_DIRECT];
     uint16_t indirect;
+    uint16_t double_indirect;
 };
 
 _Static_assert(MINIFS_BITMAP_SECTORS > 0, "minifs needs bitmap sectors");
 _Static_assert(MINIFS_BLOCKS <= MINIFS_BITMAP_SECTORS * MINIFS_BLOCK_SIZE,
                "minifs block bitmap must fit in reserved sectors");
+_Static_assert(MINIFS_BLOCKS <= 65535, "minifs block numbers must fit uint16_t");
+_Static_assert(MINIFS_BLOCKS <= MINIFS_ADDRESSABLE_BLOCKS,
+               "minifs inode addressing must cover the filesystem");
 _Static_assert(sizeof(struct minifs_inode) <= MINIFS_BLOCK_SIZE, "minifs inode must fit in one sector");
 
 struct minifs_dirent_disk {
@@ -54,21 +76,19 @@ struct minifs_dirent_disk {
 static struct minifs_super sb;
 static struct minifs_inode inodes[MINIFS_INODES];
 static uint8_t block_used[MINIFS_BLOCKS];
+static int alloc_cursor;
 static int mounted;
 static volatile int minifs_locked;
-static uint32_t minifs_irq_flags;
 
 static void minifs_lock(void) {
-    uint32_t flags = irq_save();
+    task_preempt_disable();
     while (__sync_lock_test_and_set(&minifs_locked, 1))
         __asm__ volatile("pause");
-    minifs_irq_flags = flags;
 }
 
 static void minifs_unlock(void) {
-    uint32_t flags = minifs_irq_flags;
     __sync_lock_release(&minifs_locked);
-    irq_restore(flags);
+    task_preempt_enable();
 }
 
 static int nameeq(const char *name, const char *part, int len) {
@@ -143,6 +163,20 @@ static int flush_bitmap(void) {
     return 0;
 }
 
+static int flush_bitmap_entry(int block) {
+    if (block < 0 || block >= MINIFS_BLOCKS)
+        return -1;
+    int bitmap_sector = block / MINIFS_BLOCK_SIZE;
+    uint8_t sector[MINIFS_BLOCK_SIZE];
+    zero(sector, sizeof(sector));
+    for (int i = 0; i < MINIFS_BLOCK_SIZE; i++) {
+        int idx = bitmap_sector * MINIFS_BLOCK_SIZE + i;
+        if (idx < MINIFS_BLOCKS)
+            sector[i] = block_used[idx];
+    }
+    return block_write_sector(bitmap_lba() + (uint32_t)bitmap_sector, sector);
+}
+
 static int read_block(int block, void *buf) {
     if (block < 0 || block >= MINIFS_BLOCKS)
         return -1;
@@ -172,11 +206,20 @@ static int alloc_inode(uint8_t type, uint16_t parent) {
 static int alloc_block(void) {
     uint8_t zero_sector[512];
     zero(zero_sector, sizeof(zero_sector));
-    for (int i = 0; i < MINIFS_BLOCKS; i++) {
+    for (int scanned = 0; scanned < MINIFS_BLOCKS; scanned++) {
+        int i = alloc_cursor + scanned;
+        if (i >= MINIFS_BLOCKS)
+            i -= MINIFS_BLOCKS;
         if (!block_used[i]) {
             block_used[i] = 1;
-            flush_bitmap();
-            write_block(i, zero_sector);
+            if (flush_bitmap_entry(i) < 0 || write_block(i, zero_sector) < 0) {
+                block_used[i] = 0;
+                (void)flush_bitmap_entry(i);
+                return -1;
+            }
+            alloc_cursor = i + 1;
+            if (alloc_cursor >= MINIFS_BLOCKS)
+                alloc_cursor = 0;
             return i;
         }
     }
@@ -204,7 +247,31 @@ static void free_inode_blocks(int ino) {
         block_used[indirect_block] = 0;
         inodes[ino].indirect = 0;
     }
+    if (inodes[ino].double_indirect) {
+        uint8_t outer_sector[MINIFS_BLOCK_SIZE];
+        int outer_block = inodes[ino].double_indirect - 1;
+        if (read_block(outer_block, outer_sector) == 0) {
+            uint16_t *outer = (uint16_t *)outer_sector;
+            for (int i = 0; i < MINIFS_INDIRECT_ENTRIES; i++) {
+                if (!outer[i])
+                    continue;
+                uint8_t inner_sector[MINIFS_BLOCK_SIZE];
+                int inner_block = outer[i] - 1;
+                if (read_block(inner_block, inner_sector) == 0) {
+                    uint16_t *inner = (uint16_t *)inner_sector;
+                    for (int j = 0; j < MINIFS_INDIRECT_ENTRIES; j++) {
+                        if (inner[j])
+                            block_used[inner[j] - 1] = 0;
+                    }
+                }
+                block_used[inner_block] = 0;
+            }
+        }
+        block_used[outer_block] = 0;
+        inodes[ino].double_indirect = 0;
+    }
     inodes[ino].size = 0;
+    alloc_cursor = 0;
     flush_bitmap();
 }
 
@@ -217,16 +284,98 @@ static int block_for_logical(int ino, int logical) {
         return inodes[ino].block[logical] - 1;
     }
 
-    if (!inodes[ino].indirect)
+    if (logical < MINIFS_SINGLE_BLOCKS) {
+        if (!inodes[ino].indirect)
+            return -1;
+        uint8_t sector[MINIFS_BLOCK_SIZE];
+        if (read_block(inodes[ino].indirect - 1, sector) < 0)
+            return -1;
+        uint16_t *entries = (uint16_t *)sector;
+        int index = logical - MINIFS_DIRECT;
+        if (!entries[index])
+            return -1;
+        return entries[index] - 1;
+    }
+
+    if (!inodes[ino].double_indirect)
         return -1;
+    int index = logical - MINIFS_SINGLE_BLOCKS;
+    int outer_index = index / MINIFS_INDIRECT_ENTRIES;
+    int inner_index = index % MINIFS_INDIRECT_ENTRIES;
+    uint8_t outer_sector[MINIFS_BLOCK_SIZE];
+    if (read_block(inodes[ino].double_indirect - 1, outer_sector) < 0)
+        return -1;
+    uint16_t inner_raw = ((uint16_t *)outer_sector)[outer_index];
+    if (!inner_raw)
+        return -1;
+    uint8_t inner_sector[MINIFS_BLOCK_SIZE];
+    if (read_block(inner_raw - 1, inner_sector) < 0)
+        return -1;
+    uint16_t data_raw = ((uint16_t *)inner_sector)[inner_index];
+    return data_raw ? data_raw - 1 : -1;
+}
+
+static int migrate_v1_layout(void) {
     uint8_t sector[MINIFS_BLOCK_SIZE];
-    if (read_block(inodes[ino].indirect - 1, sector) < 0)
+    uint8_t zero_sector[MINIFS_BLOCK_SIZE];
+    zero(zero_sector, sizeof(zero_sector));
+    uint32_t old_data_lba = sb.data_lba;
+    uint32_t old_blocks = sb.block_count;
+    uint32_t old_bitmap_sectors =
+        old_data_lba - (MINIFS_LBA_START + 1 + MINIFS_V1_INODES);
+    uint32_t new_data_lba =
+        MINIFS_LBA_START + 1 + MINIFS_INODES + MINIFS_BITMAP_SECTORS;
+
+    if (!((old_blocks == MINIFS_LEGACY_BLOCKS &&
+           old_data_lba == MINIFS_LEGACY_DATA_LBA) ||
+          (old_blocks == MINIFS_V1_BLOCKS &&
+           old_data_lba == MINIFS_V1_DATA_LBA)))
         return -1;
-    uint16_t *entries = (uint16_t *)sector;
-    int index = logical - MINIFS_DIRECT;
-    if (!entries[index])
+
+    serial_puts("[minifs] migrating inode table 128 -> 2048\n");
+
+    zero(block_used, sizeof(block_used));
+    for (uint32_t s = 0; s < old_bitmap_sectors; s++) {
+        if (block_read_sector(MINIFS_LBA_START + 1 + MINIFS_V1_INODES + s,
+                              sector) < 0)
+            return -1;
+        for (int i = 0; i < MINIFS_BLOCK_SIZE; i++) {
+            uint32_t idx = s * MINIFS_BLOCK_SIZE + (uint32_t)i;
+            if (idx >= old_blocks)
+                break;
+            if (sector[i] > 1)
+                return -1;
+            if (idx >= MINIFS_BLOCKS) {
+                if (sector[i])
+                    return -1;
+            } else {
+                block_used[idx] = sector[i];
+            }
+        }
+    }
+
+    /* Moving upward overlaps the old data range. Copy used blocks backward;
+     * block indices remain unchanged, so inode pointers need no rewrite. */
+    for (int block = MINIFS_BLOCKS - 1; block >= 0; block--) {
+        if (block_used[block]) {
+            if (block_read_sector(old_data_lba + (uint32_t)block, sector) < 0 ||
+                block_write_sector(new_data_lba + (uint32_t)block, sector) < 0)
+                return -1;
+        }
+    }
+
+    for (int ino = MINIFS_V1_INODES; ino < MINIFS_INODES; ino++) {
+        if (block_write_sector(inode_lba(ino), zero_sector) < 0)
+            return -1;
+    }
+
+    sb.inode_count = MINIFS_INODES;
+    sb.block_count = MINIFS_BLOCKS;
+    sb.data_lba = new_data_lba;
+    if (flush_bitmap() < 0 || flush_super() < 0)
         return -1;
-    return entries[index] - 1;
+    serial_puts("[minifs] inode migration complete\n");
+    return 0;
 }
 
 static int ensure_block(int ino, int logical) {
@@ -243,7 +392,7 @@ static int ensure_block(int ino, int logical) {
         return inodes[ino].block[logical] - 1;
     }
 
-    if (!inodes[ino].indirect) {
+    if (logical < MINIFS_SINGLE_BLOCKS && !inodes[ino].indirect) {
         int table = alloc_block();
         if (table < 0)
             return -1;
@@ -251,20 +400,59 @@ static int ensure_block(int ino, int logical) {
         flush_inode(ino);
     }
 
-    uint8_t sector[MINIFS_BLOCK_SIZE];
-    if (read_block(inodes[ino].indirect - 1, sector) < 0)
-        return -1;
-    uint16_t *entries = (uint16_t *)sector;
-    int index = logical - MINIFS_DIRECT;
-    if (!entries[index]) {
-        int b = alloc_block();
-        if (b < 0)
+    if (logical < MINIFS_SINGLE_BLOCKS) {
+        uint8_t sector[MINIFS_BLOCK_SIZE];
+        if (read_block(inodes[ino].indirect - 1, sector) < 0)
             return -1;
-        entries[index] = (uint16_t)(b + 1);
-        if (write_block(inodes[ino].indirect - 1, sector) < 0)
+        uint16_t *entries = (uint16_t *)sector;
+        int index = logical - MINIFS_DIRECT;
+        if (!entries[index]) {
+            int b = alloc_block();
+            if (b < 0)
+                return -1;
+            entries[index] = (uint16_t)(b + 1);
+            if (write_block(inodes[ino].indirect - 1, sector) < 0)
+                return -1;
+        }
+        return entries[index] - 1;
+    }
+
+    if (!inodes[ino].double_indirect) {
+        int table = alloc_block();
+        if (table < 0)
+            return -1;
+        inodes[ino].double_indirect = (uint16_t)(table + 1);
+        flush_inode(ino);
+    }
+
+    int index = logical - MINIFS_SINGLE_BLOCKS;
+    int outer_index = index / MINIFS_INDIRECT_ENTRIES;
+    int inner_index = index % MINIFS_INDIRECT_ENTRIES;
+    uint8_t outer_sector[MINIFS_BLOCK_SIZE];
+    if (read_block(inodes[ino].double_indirect - 1, outer_sector) < 0)
+        return -1;
+    uint16_t *outer = (uint16_t *)outer_sector;
+    if (!outer[outer_index]) {
+        int inner_block = alloc_block();
+        if (inner_block < 0)
+            return -1;
+        outer[outer_index] = (uint16_t)(inner_block + 1);
+        if (write_block(inodes[ino].double_indirect - 1, outer_sector) < 0)
             return -1;
     }
-    return entries[index] - 1;
+    uint8_t inner_sector[MINIFS_BLOCK_SIZE];
+    if (read_block(outer[outer_index] - 1, inner_sector) < 0)
+        return -1;
+    uint16_t *inner = (uint16_t *)inner_sector;
+    if (!inner[inner_index]) {
+        int data_block = alloc_block();
+        if (data_block < 0)
+            return -1;
+        inner[inner_index] = (uint16_t)(data_block + 1);
+        if (write_block(outer[outer_index] - 1, inner_sector) < 0)
+            return -1;
+    }
+    return inner[inner_index] - 1;
 }
 
 static int dir_entry_count(int dir_ino) {
@@ -422,6 +610,7 @@ static void format_fs(void) {
     zero(&sb, sizeof(sb));
     zero(inodes, sizeof(inodes));
     zero(block_used, sizeof(block_used));
+    alloc_cursor = 0;
     sb.magic = MINIFS_MAGIC;
     sb.inode_count = MINIFS_INODES;
     sb.block_count = MINIFS_BLOCKS;
@@ -438,8 +627,8 @@ static void format_fs(void) {
 int minifs_mount(void) {
     uint8_t sector[512];
     minifs_locked = 0;
-    minifs_irq_flags = 0;
     mounted = 0;
+    alloc_cursor = 0;
     minifs_lock();
     if (ata_init() < 0)
     {
@@ -453,6 +642,13 @@ int minifs_mount(void) {
         return -1;
     }
     sb = *(struct minifs_super *)sector;
+    if (sb.magic == MINIFS_MAGIC && sb.inode_count == MINIFS_V1_INODES) {
+        if (migrate_v1_layout() < 0) {
+            serial_puts("[minifs] inode migration failed\n");
+            minifs_unlock();
+            return -1;
+        }
+    }
     if (sb.magic != MINIFS_MAGIC || sb.inode_count != MINIFS_INODES ||
         sb.block_count != MINIFS_BLOCKS) {
         serial_puts("[minifs] formatting disk area\n");
@@ -476,6 +672,10 @@ int minifs_mount(void) {
                     block_used[idx] = sector[i];
             }
         }
+        while (alloc_cursor < MINIFS_BLOCKS && block_used[alloc_cursor])
+            alloc_cursor++;
+        if (alloc_cursor >= MINIFS_BLOCKS)
+            alloc_cursor = 0;
     }
     mounted = 1;
     serial_puts("[minifs] mounted /fs\n");

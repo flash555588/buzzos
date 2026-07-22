@@ -1,6 +1,7 @@
 #include "appui.h"
 #include "guiapp.h"
 #include "libc.h"
+#include "lodepng.h"
 
 enum {
     MAX_W = GUIAPP_MAX_W,
@@ -8,13 +9,17 @@ enum {
     URL_CAP = 256,
     HOST_CAP = 96,
     PATH_CAP = 256,
-    RESPONSE_CAP = 32768,
+    RESPONSE_INITIAL = 16384,
+    RESPONSE_MAX = 1024 * 1024,
     TEXT_CAP = 24576,
     HISTORY_MAX = 12,
+    IMAGE_MAX = 8,
+    IMAGE_SOURCE_CAP = 256,
+    IMAGE_MAX_PIXELS = 1024 * 1024,
+    IMAGE_MARKER = 1,
 };
 
 static uint8_t pixels[MAX_W * MAX_H];
-static char response[RESPONSE_CAP];
 static char page_text[TEXT_CAP];
 static char url[URL_CAP] = "http://example.com/";
 static char history[HISTORY_MAX][URL_CAP];
@@ -22,13 +27,33 @@ static char status[96] = "Enter an http:// URL";
 static char title[GUIAPP_TITLE_MAX] = "Browser";
 static int url_len;
 static int text_len;
-static int response_len;
 static int scroll_y;
 static int w = 640;
 static int h = 420;
 static int prev_buttons;
 static int history_pos = -1;
 static int enter_armed = 1;
+
+struct http_response {
+    uint8_t *data;
+    int length;
+    int body;
+};
+
+struct page_image {
+    char source[IMAGE_SOURCE_CAP];
+    uint8_t *pixels;
+    int width;
+    int height;
+    int loaded;
+};
+
+static struct page_image page_images[IMAGE_MAX];
+static int image_count;
+
+void *lodepng_malloc(size_t size) { return malloc(size); }
+void *lodepng_realloc(void *ptr, size_t size) { return realloc(ptr, size); }
+void lodepng_free(void *ptr) { free(ptr); }
 
 static int clamp_int(int value, int lo, int hi) {
     if (value < lo) return lo;
@@ -136,7 +161,30 @@ static int send_all(int socket_fd, const char *buffer, int length) {
     return 0;
 }
 
-static int http_get(const char *host, int port, const char *path) {
+static int find_body(const uint8_t *data, int length) {
+    for (int i = 0; i + 3 < length; i++)
+        if (data[i] == '\r' && data[i + 1] == '\n' &&
+            data[i + 2] == '\r' && data[i + 3] == '\n')
+            return i + 4;
+    for (int i = 0; i + 1 < length; i++)
+        if (data[i] == '\n' && data[i + 1] == '\n')
+            return i + 2;
+    return 0;
+}
+
+static void http_response_free(struct http_response *out) {
+    if (out->data)
+        free(out->data);
+    out->data = 0;
+    out->length = 0;
+    out->body = 0;
+}
+
+static int http_get(const char *host, int port, const char *path,
+                    struct http_response *out) {
+    out->data = 0;
+    out->length = 0;
+    out->body = 0;
     uint32_t ip;
     set_status("Resolving host...");
     if (parse_ipv4(host, &ip) < 0 && dns_resolve(host, &ip) < 0) {
@@ -179,26 +227,52 @@ static int http_get(const char *host, int port, const char *path) {
         set_status("HTTP request failed");
         return -1;
     }
+    int capacity = RESPONSE_INITIAL;
+    uint8_t *data = malloc((size_t)capacity + 1u);
+    if (!data) {
+        closesocket(sd);
+        set_status("Out of memory");
+        return -1;
+    }
     set_status("Receiving...");
-    response_len = 0;
-    while (response_len < RESPONSE_CAP - 1) {
-        int got = recv(sd, response + response_len,
-                       (size_t)(RESPONSE_CAP - 1 - response_len), 0);
+    int length = 0;
+    for (;;) {
+        if (length == capacity) {
+            if (capacity >= RESPONSE_MAX) {
+                free(data);
+                closesocket(sd);
+                set_status("Response exceeds 1 MiB limit");
+                return -1;
+            }
+            int next = capacity * 2;
+            if (next > RESPONSE_MAX)
+                next = RESPONSE_MAX;
+            uint8_t *grown = realloc(data, (size_t)next + 1u);
+            if (!grown) {
+                free(data);
+                closesocket(sd);
+                set_status("Out of memory");
+                return -1;
+            }
+            data = grown;
+            capacity = next;
+        }
+        int got = recv(sd, data + length, (size_t)(capacity - length), 0);
         if (got < 0) {
+            free(data);
             closesocket(sd);
             set_status("Receive failed");
             return -1;
         }
         if (got == 0)
             break;
-        response_len += got;
+        length += got;
     }
     closesocket(sd);
-    response[response_len] = 0;
-    if (response_len == RESPONSE_CAP - 1)
-        set_status("Loaded (response truncated)");
-    else
-        set_status("Loaded");
+    data[length] = 0;
+    out->data = data;
+    out->length = length;
+    out->body = find_body(data, length);
     return 0;
 }
 
@@ -252,7 +326,84 @@ static int decode_entity(const char *p, int remaining, char *value) {
     return 0;
 }
 
-static void html_to_text(const char *body, int length) {
+static void clear_images(void) {
+    for (int i = 0; i < image_count; i++) {
+        free(page_images[i].pixels);
+        page_images[i].pixels = 0;
+    }
+    image_count = 0;
+}
+
+static int attr_name_is(const char *value, int length, const char *name) {
+    int n = (int)strlen(name);
+    if (length != n)
+        return 0;
+    for (int i = 0; i < n; i++)
+        if (ascii_lower(value[i]) != name[i])
+            return 0;
+    return 1;
+}
+
+static int tag_attribute(const char *tag, int length, const char *name,
+                         char *out, int cap) {
+    int pos = 0;
+    while (pos < length && tag[pos] != ' ' && tag[pos] != '\t' && tag[pos] != '/')
+        pos++;
+    while (pos < length) {
+        while (pos < length && (tag[pos] == ' ' || tag[pos] == '\t' || tag[pos] == '/'))
+            pos++;
+        int begin = pos;
+        while (pos < length && tag[pos] != '=' && tag[pos] != ' ' && tag[pos] != '\t')
+            pos++;
+        int name_length = pos - begin;
+        while (pos < length && (tag[pos] == ' ' || tag[pos] == '\t'))
+            pos++;
+        if (pos >= length || tag[pos] != '=') {
+            while (pos < length && tag[pos] != ' ' && tag[pos] != '\t') pos++;
+            continue;
+        }
+        pos++;
+        while (pos < length && (tag[pos] == ' ' || tag[pos] == '\t'))
+            pos++;
+        char quote = 0;
+        if (pos < length && (tag[pos] == '\'' || tag[pos] == '"'))
+            quote = tag[pos++];
+        int value_begin = pos;
+        if (quote) {
+            while (pos < length && tag[pos] != quote) pos++;
+        } else {
+            while (pos < length && tag[pos] != ' ' && tag[pos] != '\t' && tag[pos] != '>') pos++;
+        }
+        if (attr_name_is(tag + begin, name_length, name)) {
+            int n = pos - value_begin;
+            if (n >= cap) n = cap - 1;
+            for (int i = 0; i < n; i++) out[i] = tag[value_begin + i];
+            out[n] = 0;
+            return n;
+        }
+        if (quote && pos < length) pos++;
+    }
+    out[0] = 0;
+    return 0;
+}
+
+static void add_image_marker(const char *tag, int tag_length) {
+    if (image_count >= IMAGE_MAX || text_len >= TEXT_CAP - 1)
+        return;
+    struct page_image *image = &page_images[image_count];
+    if (!tag_attribute(tag, tag_length, "src", image->source, sizeof(image->source)))
+        return;
+    text_char('\n');
+    page_text[text_len++] = IMAGE_MARKER;
+    image->pixels = 0;
+    image->width = 160;
+    image->height = 36;
+    image->loaded = 0;
+    image_count++;
+}
+
+static void html_to_page(const char *body, int length) {
+    clear_images();
     text_len = 0;
     int skip = 0;
     for (int i = 0; i < length && text_len < TEXT_CAP - 1;) {
@@ -278,6 +429,8 @@ static void html_to_text(const char *body, int length) {
                        tag_name_is(body + begin, tag_len, "h2") ||
                        tag_name_is(body + begin, tag_len, "h3")))
                 text_char('\n');
+            else if (!skip && !closing && tag_name_is(body + begin, tag_len, "img"))
+                add_image_marker(body + begin, tag_len);
             i = end < length ? end + 1 : length;
             continue;
         }
@@ -302,6 +455,133 @@ static void html_to_text(const char *body, int length) {
     page_text[text_len] = 0;
 }
 
+static void copy_path_part(char *out, int *length, int cap, const char *value) {
+    for (int i = 0; value[i] && *length < cap - 1; i++) {
+        if (value[i] == '#')
+            break;
+        out[(*length)++] = value[i];
+    }
+    out[*length] = 0;
+}
+
+static int resolve_image_url(const char *source, const char *base_host, int base_port,
+                             const char *base_path, char *host, int *port, char *path) {
+    if (starts_with(source, "http://"))
+        return parse_url(source, host, port, path);
+    if (starts_with(source, "https://") || starts_with(source, "data:") ||
+        starts_with(source, "//"))
+        return -1;
+    appui_copy_text(host, base_host, HOST_CAP);
+    *port = base_port;
+    int length = 0;
+    if (source[0] == '/') {
+        copy_path_part(path, &length, PATH_CAP, source);
+    } else {
+        int slash = 0;
+        for (int i = 0; base_path[i]; i++)
+            if (base_path[i] == '/') slash = i;
+        for (int i = 0; i <= slash && length < PATH_CAP - 1; i++)
+            path[length++] = base_path[i];
+        path[length] = 0;
+        copy_path_part(path, &length, PATH_CAP, source);
+    }
+    return path[0] == '/' ? 0 : -1;
+}
+
+static int http_success(const struct http_response *response) {
+    return response->length >= 12 && starts_with((const char *)response->data, "HTTP/") &&
+           response->data[9] == '2';
+}
+
+static int palette_color(unsigned r, unsigned g, unsigned b, unsigned a) {
+    r = (r * a + 255u * (255u - a)) / 255u;
+    g = (g * a + 255u * (255u - a)) / 255u;
+    b = (b * a + 255u * (255u - a)) / 255u;
+    return appui_rgb6((int)((r * 5u + 127u) / 255u),
+                      (int)((g * 5u + 127u) / 255u),
+                      (int)((b * 5u + 127u) / 255u));
+}
+
+static int decode_png_image(struct page_image *image, const uint8_t *data, int length,
+                            int available_width) {
+    unsigned source_w = 0;
+    unsigned source_h = 0;
+    LodePNGState state;
+    lodepng_state_init(&state);
+    unsigned error = lodepng_inspect(&source_w, &source_h, &state, data, (size_t)length);
+    lodepng_state_cleanup(&state);
+    if (error || !source_w || !source_h || source_w > 4096u || source_h > 4096u ||
+        source_w > IMAGE_MAX_PIXELS / source_h)
+        return -1;
+
+    unsigned char *rgba = 0;
+    error = lodepng_decode32(&rgba, &source_w, &source_h, data, (size_t)length);
+    if (error || !rgba) {
+        free(rgba);
+        return -1;
+    }
+
+    int draw_w = (int)source_w;
+    int draw_h = (int)source_h;
+    if (draw_w > available_width) {
+        draw_h = (int)(source_h * (unsigned)available_width / source_w);
+        draw_w = available_width;
+    }
+    if (draw_h > 480) {
+        draw_w = draw_w * 480 / draw_h;
+        draw_h = 480;
+    }
+    if (draw_w < 1) draw_w = 1;
+    if (draw_h < 1) draw_h = 1;
+    if ((size_t)draw_w > (size_t)-1 / (size_t)draw_h) {
+        free(rgba);
+        return -1;
+    }
+    uint8_t *indexed = malloc((size_t)draw_w * (size_t)draw_h);
+    if (!indexed) {
+        free(rgba);
+        return -1;
+    }
+    for (int y = 0; y < draw_h; y++) {
+        unsigned sy = (unsigned)y * source_h / (unsigned)draw_h;
+        for (int x = 0; x < draw_w; x++) {
+            unsigned sx = (unsigned)x * source_w / (unsigned)draw_w;
+            const unsigned char *pixel = rgba + ((size_t)sy * source_w + sx) * 4u;
+            indexed[y * draw_w + x] = (uint8_t)palette_color(
+                pixel[0], pixel[1], pixel[2], pixel[3]);
+        }
+    }
+    free(rgba);
+    image->pixels = indexed;
+    image->width = draw_w;
+    image->height = draw_h;
+    image->loaded = 1;
+    return 0;
+}
+
+static int load_page_images(const char *base_host, int base_port, const char *base_path) {
+    int loaded = 0;
+    int available_width = w - 52;
+    if (available_width < 32) available_width = 32;
+    for (int i = 0; i < image_count; i++) {
+        char host[HOST_CAP];
+        char path[PATH_CAP];
+        int port;
+        if (resolve_image_url(page_images[i].source, base_host, base_port, base_path,
+                              host, &port, path) < 0)
+            continue;
+        struct http_response resource;
+        if (http_get(host, port, path, &resource) < 0)
+            continue;
+        if (http_success(&resource) && resource.body < resource.length &&
+            decode_png_image(&page_images[i], resource.data + resource.body,
+                             resource.length - resource.body, available_width) == 0)
+            loaded++;
+        http_response_free(&resource);
+    }
+    return loaded;
+}
+
 static struct appui_rect page_rect(void) {
     return (struct appui_rect){10, 58, w - 20, h - 84};
 }
@@ -312,34 +592,41 @@ static int line_width(void) {
     return value > KFONT_WIDTH * 8 ? value : KFONT_WIDTH * 8;
 }
 
-static int visual_lines(void) {
+static int content_height(void) {
     int x = 0;
-    int lines = 1;
+    int y = 16;
     int limit = line_width();
     int pos = 0;
+    int image_index = 0;
     while (pos < text_len) {
         const char *p = page_text + pos;
         uint32_t cp = appui_utf8_next(&p);
         pos = (int)(p - page_text);
         if (cp == '\n') {
-            lines++;
+            y += KFONT_HEIGHT + 4;
             x = 0;
+        } else if (cp == IMAGE_MARKER) {
+            if (x > 0)
+                y += KFONT_HEIGHT + 4;
+            int image_h = image_index < image_count ? page_images[image_index].height : 36;
+            y += image_h + 4;
+            x = 0;
+            image_index++;
         } else {
             int glyph_w = appui_codepoint_width(cp);
             if (x > 0 && x + glyph_w > limit) {
-                lines++;
+                y += KFONT_HEIGHT + 4;
                 x = 0;
             }
             x += glyph_w;
         }
     }
-    return lines;
+    return y + KFONT_HEIGHT + 4;
 }
 
 static int max_scroll(void) {
     struct appui_rect page = page_rect();
-    int content = visual_lines() * (KFONT_HEIGHT + 4) + 16;
-    return appui_max(0, content - page.h);
+    return appui_max(0, content_height() - page.h);
 }
 
 static void clamp_scroll(void) {
@@ -354,6 +641,7 @@ static void draw_page(void) {
     int x = clip.x;
     int y = clip.y - scroll_y;
     int pos = 0;
+    int image_index = 0;
     while (pos < text_len) {
         const char *p = page_text + pos;
         uint32_t cp = appui_utf8_next(&p);
@@ -361,6 +649,32 @@ static void draw_page(void) {
         if (cp == '\n') {
             x = clip.x;
             y += KFONT_HEIGHT + 4;
+            continue;
+        }
+        if (cp == IMAGE_MARKER) {
+            if (x > clip.x)
+                y += KFONT_HEIGHT + 4;
+            x = clip.x;
+            struct page_image *image = image_index < image_count ?
+                &page_images[image_index] : 0;
+            if (image && image->loaded) {
+                for (int iy = 0; iy < image->height; iy++) {
+                    int dy = y + iy;
+                    if (dy < clip.y || dy >= clip.y + clip.h)
+                        continue;
+                    int copy_w = appui_min(image->width, clip.w);
+                    for (int ix = 0; ix < copy_w; ix++)
+                        pixels[dy * w + clip.x + ix] = image->pixels[iy * image->width + ix];
+                }
+            } else if (image) {
+                struct appui_rect missing = {clip.x, y, appui_min(image->width, clip.w), image->height};
+                appui_fill(pixels, w, h, missing, appui_gray(2));
+                appui_border(pixels, w, h, missing, appui_gray(8), appui_gray(1));
+                appui_text(pixels, w, h, missing.x + 6, missing.y + 7, "PNG unavailable",
+                           appui_gray(10), -1, clip);
+            }
+            y += (image ? image->height : 36) + 4;
+            image_index++;
             continue;
         }
         int glyph_w = appui_codepoint_width(cp);
@@ -378,7 +692,7 @@ static void draw_page(void) {
     if (max_scroll() > 0) {
         int track_h = page.h - 4;
         int thumb_h = appui_max(24, track_h * page.h /
-                                appui_max(page.h, visual_lines() * (KFONT_HEIGHT + 4)));
+                                appui_max(page.h, content_height()));
         int thumb_y = page.y + 2 + scroll_y * (track_h - thumb_h) / max_scroll();
         appui_fill(pixels, w, h, (struct appui_rect){page.x + page.w - 7, page.y + 2, 5, track_h},
                    appui_gray(3));
@@ -408,17 +722,6 @@ static void render(void) {
                (struct appui_rect){8, h - 21, w - 16, 20});
 }
 
-static int find_body(void) {
-    for (int i = 0; i + 3 < response_len; i++)
-        if (response[i] == '\r' && response[i + 1] == '\n' &&
-            response[i + 2] == '\r' && response[i + 3] == '\n')
-            return i + 4;
-    for (int i = 0; i + 1 < response_len; i++)
-        if (response[i] == '\n' && response[i + 1] == '\n')
-            return i + 2;
-    return 0;
-}
-
 static void remember_url(void) {
     if (history_pos >= 0 && strcmp(history[history_pos], url) == 0)
         return;
@@ -438,27 +741,32 @@ static void load_url(int remember) {
     int port;
     if (parse_url(url, host, &port, path) < 0)
         return;
-    if (http_get(host, port, path) < 0)
+    struct http_response response;
+    if (http_get(host, port, path, &response) < 0)
         return;
-    int body = find_body();
-    html_to_text(response + body, response_len - body);
+    html_to_page((const char *)response.data + response.body,
+                 response.length - response.body);
+    int loaded_images = load_page_images(host, port, path);
     scroll_y = 0;
     appui_copy_text(title, "Browser - ", sizeof(title));
     appui_append_text(title, host, sizeof(title));
     if (remember)
         remember_url();
-    if (response_len >= 12 && starts_with(response, "HTTP/")) {
+    if (response.length >= 12 && starts_with((const char *)response.data, "HTTP/")) {
         char http_status[64] = "HTTP ";
         int j = 5;
-        while (j < response_len && response[j] != ' ') j++;
-        if (j < response_len) j++;
+        while (j < response.length && response.data[j] != ' ') j++;
+        if (j < response.length) j++;
         int n = (int)strlen(http_status);
-        while (j < response_len && response[j] != '\r' && response[j] != '\n' &&
+        while (j < response.length && response.data[j] != '\r' && response.data[j] != '\n' &&
                n < (int)sizeof(http_status) - 1)
-            http_status[n++] = response[j++];
+            http_status[n++] = (char)response.data[j++];
         http_status[n] = 0;
+        if (loaded_images > 0)
+            appui_append_text(http_status, " + PNG", sizeof(http_status));
         set_status(http_status);
     }
+    http_response_free(&response);
 }
 
 static void go_back(void) {
@@ -539,7 +847,7 @@ int main(int argc, char **argv) {
     url_len = (int)strlen(url);
     appui_copy_text(page_text,
         "BuzzOS Browser\n\nType an http:// address above and press Enter or Go.\n"
-        "This browser renders safe text from HTML. HTTPS, images, CSS, and JavaScript "
+        "This browser renders HTML text and PNG images. HTTPS, CSS, and JavaScript "
         "are not supported yet.", sizeof(page_text));
     text_len = (int)strlen(page_text);
     for (;;) {

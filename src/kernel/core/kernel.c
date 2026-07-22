@@ -7,8 +7,10 @@
 #include "mouse.h"
 #include "net.h"
 #include "paging.h"
+#include "fpu.h"
 #include "pmm.h"
 #include "serial.h"
+#include "ac97.h"
 #include "syscall.h"
 #include "task.h"
 #include "timer.h"
@@ -151,8 +153,32 @@ static void seed_file_if_missing_or_size_changed(const char *path,
                                                  const void *data,
                                                  size_t size) {
     struct stat st;
-    if (vfs_stat(path, &st) == 0 && st.st_size == size)
-        return;
+    if (vfs_stat(path, &st) == 0 && st.st_size == size) {
+        int fd = vfs_open(path);
+        if (fd >= 0) {
+            uint8_t buffer[512];
+            const uint8_t *expected = (const uint8_t *)data;
+            size_t offset = 0;
+            int equal = 1;
+            while (offset < size) {
+                size_t want = size - offset;
+                if (want > sizeof(buffer)) want = sizeof(buffer);
+                int got = vfs_read(fd, buffer, want);
+                if (got != (int)want) { equal = 0; break; }
+                for (size_t i = 0; i < want; i++) {
+                    if (buffer[i] != expected[offset + i]) {
+                        equal = 0;
+                        break;
+                    }
+                }
+                if (!equal) break;
+                offset += want;
+            }
+            vfs_close(fd);
+            if (equal)
+                return;
+        }
+    }
     int written = vfs_write_file(path, data, size);
     if (written != (int)size) {
         serial_puts("[boot] failed to refresh ");
@@ -186,18 +212,15 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     gdt_install();
     idt_install();
 
-    /* Enable x87 FPU: clear CR0.EM (bit 2), set CR0.MP (bit 1),
-     * then finit to reset the FPU state. */
-    {
-        uint32_t cr0;
-        __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-        cr0 = (cr0 & ~(1u << 2)) | (1u << 1);  /* clear EM, set MP */
-        __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
-        __asm__ volatile("finit");
-        serial_puts("[boot] x87 FPU enabled\n");
+    if (fpu_init())
+        serial_puts("[boot] x87 + SSE/SSE2 FPU context enabled\n");
+    else {
+        serial_puts("[boot] CPU lacks required FXSR/SSE/SSE2\n");
+        halt_forever();
     }
     syscall_init();
     pmm_init();
+    (void)ac97_init();
     if (boot_fb.present)
         paging_set_framebuffer((uintptr_t)boot_fb.addr, boot_fb.pitch * boot_fb.height);
     paging_init();
@@ -213,6 +236,7 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     vfs_init();
     serial_puts("[boot] vfs init ok\n");
     vfs_mkdir("/bin");
+    vfs_mkdir("/share");
     ramfs_register("/hello", initrd_hello_data, INITRD_HELLO_SIZE);
     ramfs_register("/bin/sh", initrd_bin_sh_data, INITRD_BIN_SH_SIZE);
     ramfs_register("/bin/nano", initrd_bin_nano_data, INITRD_BIN_NANO_SIZE);
@@ -224,6 +248,13 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     ramfs_register("/bin/echo", initrd_bin_echo_data, INITRD_BIN_ECHO_SIZE);
     ramfs_register("/bin/faulttest", initrd_bin_faulttest_data, INITRD_BIN_FAULTTEST_SIZE);
     ramfs_register("/bin/socketleak", initrd_bin_socketleak_data, INITRD_BIN_SOCKETLEAK_SIZE);
+    ramfs_register("/bin/heaptest", initrd_bin_heaptest_data, INITRD_BIN_HEAPTEST_SIZE);
+    ramfs_register("/bin/audiotest", initrd_bin_audiotest_data, INITRD_BIN_AUDIOTEST_SIZE);
+    ramfs_register("/bin/nsporttest", initrd_bin_nsporttest_data, INITRD_BIN_NSPORTTEST_SIZE);
+    ramfs_register("/bin/nshtmltest", initrd_bin_nshtmltest_data, INITRD_BIN_NSHTMLTEST_SIZE);
+    ramfs_register("/bin/netsurf", initrd_bin_netsurf_data, INITRD_BIN_NETSURF_SIZE);
+    ramfs_register("/share/buzzos-demo.wav", initrd_share_buzzos_demo_wav_data,
+                   INITRD_SHARE_BUZZOS_DEMO_WAV_SIZE);
     serial_puts("[boot] initrd files registered\n");
     seed_user_apps();
     serial_puts("[boot] user apps seeded\n");

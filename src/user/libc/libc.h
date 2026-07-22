@@ -51,6 +51,7 @@ struct stat {
     uint32_t st_mode;
     uint32_t st_size;
     uint32_t st_type;
+    int32_t st_mtime;
 };
 
 struct fs_info {
@@ -89,6 +90,11 @@ struct gfx_info {
     uint32_t pitch;
     uint32_t bpp;
 };
+struct shm_mapping {
+    uint32_t token;
+    void *address;
+    uint32_t size;
+};
 
 #define FONT_GLYPH_HEIGHT 22
 #define FONT_GLYPH_MAX_WIDTH 24
@@ -97,7 +103,8 @@ struct gfx_info {
 
 /* --- Syscalls --- */
 void exit(int code) __attribute__((noreturn));
-int  open(const char *path, int flags);
+int  atexit(void (*function)(void));
+int  open(const char *path, int flags, ...);
 int  close(int fd);
 int  dup(int fd);
 int  dup2(int oldfd, int newfd);
@@ -109,6 +116,7 @@ int  spawn_process_args(const char *path, char *const argv[], int argc, int flag
 int  ps(char *buf, size_t size, int show_dead);
 void reboot(void) __attribute__((noreturn));
 int  mkdir(const char *path);
+int  buzz_mkdir_mode(const char *path, unsigned int mode);
 int  unlink(const char *path);
 int  rmdir(const char *path);
 int  rename(const char *old_path, const char *new_path);
@@ -126,6 +134,11 @@ int  pipe(int fds[2]);
 int  futex_wait(int *addr, int expected);
 int  futex_wait_timeout(int *addr, int expected, unsigned int timeout_ms);
 int  futex_wake(int *addr, int count);
+int  shm_create(size_t size, struct shm_mapping *mapping);
+int  shm_map(uint32_t token, struct shm_mapping *mapping);
+int  shm_unmap(uint32_t token);
+/* Fixed-format system PCM stream: 11025 Hz, unsigned 8-bit, mono. */
+int  audio_write(const uint8_t *samples, size_t count);
 int  socket(int domain, int type, int protocol);
 int  bind(int sd, const struct sockaddr_in *addr, size_t addrlen);
 int  connect(int sd, const struct sockaddr_in *addr, size_t addrlen);
@@ -157,30 +170,85 @@ int  spawn(thread_fn func);   /* create thread, returns tid */
 void yield(void);             /* yield CPU */
 int  join(int tid);           /* wait for thread to exit */
 void sleep_ms(unsigned int ms);
+uint32_t monotonic_ms(void);
+int32_t time(int32_t *result);
+struct timeval;
+int gettimeofday(struct timeval *value, void *timezone);
 
 /* --- Standard I/O (uses /dev/console) --- */
 int  putchar(int c);
 int  puts(const char *s);
 int  printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+int  snprintf(char *buffer, size_t size, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
 
 /* --- String --- */
 size_t strlen(const char *s);
 void  *memset(void *d, int c, size_t n);
 void  *memcpy(void *d, const void *s, size_t n);
 int    strcmp(const char *a, const char *b);
+int    strncmp(const char *a, const char *b, size_t n);
+int    strcasecmp(const char *a, const char *b);
+int    strncasecmp(const char *a, const char *b, size_t n);
 char  *strcpy(char *dst, const char *src);
+char  *strncpy(char *dst, const char *src, size_t n);
+char  *strchr(const char *s, int c);
+char  *strrchr(const char *s, int c);
+char  *strstr(const char *haystack, const char *needle);
+char  *strpbrk(const char *s, const char *accept);
+size_t strspn(const char *s, const char *accept);
+size_t strcspn(const char *s, const char *reject);
+char  *strtok(char *s, const char *delimiters);
+char  *strerror(int error);
+char  *strdup(const char *s);
+void  *memmove(void *dst, const void *src, size_t n);
+int    memcmp(const void *a, const void *b, size_t n);
+void  *memchr(const void *memory, int value, size_t size);
 
 /* --- Utility --- */
 int    atoi(const char *s);
+double atof(const char *s);
+int    abs(int value);
+long   strtol(const char *s, char **end, int base);
+unsigned long strtoul(const char *s, char **end, int base);
+long long strtoll(const char *s, char **end, int base);
+unsigned long long strtoull(const char *s, char **end, int base);
+double strtod(const char *s, char **end);
+float strtof(const char *s, char **end);
+void  *bsearch(const void *key, const void *base, size_t count, size_t size,
+               int (*compare)(const void *, const void *));
+void   qsort(void *base, size_t count, size_t size,
+             int (*compare)(const void *, const void *));
+void   abort(void) __attribute__((noreturn));
+char  *getenv(const char *name);
+char  *realpath(const char *path, char *resolved);
+int    access(const char *path, int mode);
+int    tolower(int c);
+int    toupper(int c);
+int    isalpha(int c);
+int    isalnum(int c);
+int    isspace(int c);
+int    isdigit(int c);
+int    isxdigit(int c);
+int    isascii(int c);
 
-/* --- Memory allocation (simple bump allocator, 64 KiB heap) --- */
+/* --- Memory allocation --- */
 void  *malloc(size_t size);
 void   free(void *ptr);
+void  *calloc(size_t count, size_t size);
+void  *realloc(void *ptr, size_t size);
 
 /* --- Math (x87 FPU) --- */
 double sin(double x);
 double cos(double x);
 double sqrt(double x);
 double fabs(double x);
+double tan(double x);
+double floor(double x);
+double ceil(double x);
+float ceilf(float x);
+double round(double x);
+double fmod(double x, double divisor);
+double pow(double x, double exponent);
 
 #endif /* BUZZOS_LIBC_H */

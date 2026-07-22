@@ -18,9 +18,12 @@ def read_old_fs(out_path: Path, fs_start: int, fs_sectors: int):
     data = out_path.read_bytes()
     offset = fs_start * SECTOR_SIZE
     length = fs_sectors * SECTOR_SIZE
-    if offset + length > len(data):
+    if offset >= len(data):
         return None
-    return data[offset:offset + length]
+    # Preserve an older, smaller filesystem when the raw partition grows.
+    # The kernel migrates its metadata/data layout on the next mount.
+    old = data[offset:min(offset + length, len(data))]
+    return old + bytes(length - len(old))
 
 
 def lba_to_chs(lba: int):

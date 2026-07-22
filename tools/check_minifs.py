@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 SECTOR_SIZE = 512
 MINIFS_MAGIC = 0x5346424D
-MINIFS_INODES = 128
+MINIFS_INODES = 2048
 MINIFS_DIRECT = 8
 MINIFS_NAME_LEN = 24
 MINIFS_DIR = 1
@@ -64,8 +64,12 @@ class MiniFsImage:
         self.image = image
         self.fs_start = fs_start
         self.fs_sectors = fs_sectors
-        self.expected_blocks = fs_sectors - 1 - MINIFS_INODES - 1
-        self.expected_data_lba = fs_start + 1 + MINIFS_INODES + 1
+        meta_free = fs_sectors - 1 - MINIFS_INODES
+        self.expected_bitmap_sectors = (meta_free + SECTOR_SIZE) // (SECTOR_SIZE + 1)
+        self.expected_blocks = meta_free - self.expected_bitmap_sectors
+        self.expected_data_lba = (
+            fs_start + 1 + MINIFS_INODES + self.expected_bitmap_sectors
+        )
         self.super = {}
         self.inodes = []
         self.bitmap = []
@@ -104,16 +108,17 @@ class MiniFsImage:
             "size": 0,
             "blocks": [0] * MINIFS_DIRECT,
             "indirect": 0,
+            "double_indirect": 0,
         }
         self.repairs.append(reason)
 
     def write_bitmap(self, reason):
         self.require_mutable()
         off = self.bitmap_offset()
-        sector = bytearray(SECTOR_SIZE)
+        sector = bytearray(self.expected_bitmap_sectors * SECTOR_SIZE)
         for i, value in enumerate(self.bitmap):
             sector[i] = 1 if value else 0
-        self.image[off:off + SECTOR_SIZE] = sector
+        self.image[off:off + len(sector)] = sector
         self.repairs.append(reason)
 
     def reset_walk_state(self):
@@ -148,6 +153,7 @@ class MiniFsImage:
             used, typ, parent, size = struct.unpack_from("<BBHI", sector, 0)
             blocks = list(struct.unpack_from("<8H", sector, 8))
             indirect = struct.unpack_from("<H", sector, 24)[0]
+            double_indirect = struct.unpack_from("<H", sector, 26)[0]
             self.inodes.append({
                 "ino": ino,
                 "used": used,
@@ -156,10 +162,13 @@ class MiniFsImage:
                 "size": size,
                 "blocks": blocks,
                 "indirect": indirect,
+                "double_indirect": double_indirect,
             })
 
-        bitmap_sector = read_sector(self.image, self.fs_start + 1 + MINIFS_INODES)
-        self.bitmap = list(bitmap_sector[:self.expected_blocks])
+        bitmap_off = self.bitmap_offset()
+        bitmap_size = self.expected_bitmap_sectors * SECTOR_SIZE
+        self.bitmap = list(self.image[bitmap_off:bitmap_off + bitmap_size]
+                           [:self.expected_blocks])
         for i, value in enumerate(self.bitmap):
             if value not in (0, 1):
                 if not allow_invalid_bitmap:
@@ -196,6 +205,36 @@ class MiniFsImage:
                     if note_refs:
                         self.note_block_ref(block_index, f"inode {inode['ino']} indirect[{i}]")
                     result.append((logical, block_index))
+        if inode["double_indirect"]:
+            outer_index = inode["double_indirect"] - 1
+            if include_indirect_table and note_refs:
+                self.note_block_ref(
+                    outer_index, f"inode {inode['ino']} double-indirect-table"
+                )
+            outer = self.data_sector(outer_index)
+            for i in range(SECTOR_SIZE // 2):
+                inner_raw = struct.unpack_from("<H", outer, i * 2)[0]
+                if not inner_raw:
+                    continue
+                inner_index = inner_raw - 1
+                if include_indirect_table and note_refs:
+                    self.note_block_ref(
+                        inner_index,
+                        f"inode {inode['ino']} double-indirect[{i}]-table",
+                    )
+                inner = self.data_sector(inner_index)
+                for j in range(SECTOR_SIZE // 2):
+                    raw = struct.unpack_from("<H", inner, j * 2)[0]
+                    if raw:
+                        block_index = raw - 1
+                        logical = (MINIFS_DIRECT + SECTOR_SIZE // 2 +
+                                   i * (SECTOR_SIZE // 2) + j)
+                        if note_refs:
+                            self.note_block_ref(
+                                block_index,
+                                f"inode {inode['ino']} double-indirect[{i}][{j}]",
+                            )
+                        result.append((logical, block_index))
         return result
 
     def read_file_bytes(self, inode):
@@ -249,7 +288,9 @@ class MiniFsImage:
             if inode["used"] not in (0, 1):
                 fail(f"inode {ino} has invalid used flag {inode['used']}")
             if not inode["used"]:
-                if inode["type"] or inode["parent"] or inode["size"] or inode["indirect"] or any(inode["blocks"]):
+                if (inode["type"] or inode["parent"] or inode["size"] or
+                        inode["indirect"] or inode["double_indirect"] or
+                        any(inode["blocks"])):
                     if repair:
                         self.zero_inode_sector(ino, f"zeroed stale free inode {ino}")
                         continue
@@ -262,7 +303,7 @@ class MiniFsImage:
                     fail(f"inode {ino} has invalid parent {inode['parent']}")
                 if self.inodes[inode["parent"]]["type"] != MINIFS_DIR:
                     fail(f"inode {ino} parent {inode['parent']} is not a directory")
-            max_file_blocks = MINIFS_DIRECT + (SECTOR_SIZE // 2)
+            max_file_blocks = self.expected_blocks
             if inode["size"] > max_file_blocks * SECTOR_SIZE:
                 fail(f"inode {ino} exceeds max file size")
 

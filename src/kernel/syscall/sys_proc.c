@@ -3,11 +3,14 @@
 #include "exec.h"
 #include "irq.h"
 #include "paging.h"
+#include "pmm.h"
 #include "reboot.h"
 #include "serial.h"
 #include "syscall_internal.h"
+#include "sys_shm.h"
 #include "task.h"
 #include "timer.h"
+#include "rtc.h"
 #include "user.h"
 #include "vfs.h"
 
@@ -15,6 +18,11 @@ static volatile int exec_syscall_lock;
 static char exec_path_buf[256];
 static char exec_argv_storage[16][256];
 static const char *exec_argv_ptrs[16];
+
+int sys_monotonic_ms(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+    (void)a; (void)b; (void)c; (void)d; (void)e;
+    return (int)(timer_ticks() * (1000u / TIMER_HZ));
+}
 
 static void exec_lock(void) {
     while (__sync_lock_test_and_set(&exec_syscall_lock, 1))
@@ -37,19 +45,32 @@ static void copy_user_cstr_256(char *dst, const char *src) {
 }
 
 static int spawn_proc_common_locked(const char *path, int flags, int argc, const char *const argv[]) {
-    static uint8_t elf_buf[262144];
+    struct stat st;
+    if (vfs_stat(path, &st) < 0 || st.st_size < 52 ||
+        st.st_size > USER_LOAD_END - USER_LOAD_START)
+        return -1;
+
+    size_t elf_pages = ((size_t)st.st_size + PAGE_SIZE - 1u) / PAGE_SIZE;
+    uint8_t *elf_buf = (uint8_t *)(uintptr_t)pmm_alloc_pages(elf_pages);
+    if (!elf_buf)
+        return -1;
 
     int fd = vfs_open_flags(path, O_RDONLY);
-    if (fd < 0)
+    if (fd < 0) {
+        pmm_free_pages((uintptr_t)elf_buf, elf_pages);
         return -1;
+    }
 
-    int total = 0;
-    int n;
-    while ((n = vfs_read(fd, elf_buf + total, sizeof(elf_buf) - (size_t)total)) > 0)
-        total += n;
+    size_t total = 0;
+    int n = 0;
+    while (total < st.st_size &&
+           (n = vfs_read(fd, elf_buf + total, (size_t)st.st_size - total)) > 0)
+        total += (size_t)n;
     vfs_close(fd);
-    if (n < 0 || total < 52 || total == (int)sizeof(elf_buf))
+    if (n < 0 || total != st.st_size) {
+        pmm_free_pages((uintptr_t)elf_buf, elf_pages);
         return -1;
+    }
 
     const char *name = path;
     for (int i = 0; path && path[i]; i++)
@@ -62,6 +83,7 @@ static int spawn_proc_common_locked(const char *path, int flags, int argc, const
     int pid = exec_start_args_with_fds(elf_buf, (size_t)total, name, silent,
                                        argc, argv, inherit_owner,
                                        inherit_stdio && !inherit_all);
+    pmm_free_pages((uintptr_t)elf_buf, elf_pages);
     return pid;
 }
 
@@ -155,22 +177,64 @@ struct thread_info {
 
 static struct thread_info thread_infos[MAX_TASKS];
 static uint32_t process_thread_slots[MAX_TASKS];
+static uint32_t process_heap_base[MAX_TASKS];
+static uint32_t process_heap_break[MAX_TASKS];
 
 void syscall_reset_process(int task_id) {
     if (task_id < 0 || task_id >= MAX_TASKS)
         return;
     process_thread_slots[task_id] = 0;
+    process_heap_base[task_id] = 0;
+    process_heap_break[task_id] = 0;
+}
+
+void syscall_set_heap_start(int task_id, uint32_t start) {
+    if (task_id < 0 || task_id >= MAX_TASKS || start < USER_LOAD_START ||
+        start > USER_LOAD_END)
+        return;
+    process_heap_base[task_id] = start;
+    process_heap_break[task_id] = start;
 }
 
 void syscall_cleanup_process(int task_id) {
     if (task_id < 0 || task_id >= MAX_TASKS)
         return;
     sys_net_cleanup_owner(task_id);
+    shm_cleanup_owner(task_id);
     process_thread_slots[task_id] = 0;
+    process_heap_base[task_id] = 0;
+    process_heap_break[task_id] = 0;
     for (int i = 0; i < MAX_TASKS; i++) {
         if (thread_infos[i].used && thread_infos[i].owner == task_id)
             thread_infos[i].used = 0;
     }
+}
+
+int sys_sbrk(uint32_t increment_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+    (void)b; (void)c; (void)d; (void)e;
+    int owner = task_get_pid();
+    if (owner <= 0 || owner >= MAX_TASKS || !process_heap_base[owner])
+        return -1;
+
+    int32_t increment = (int32_t)increment_arg;
+    uint32_t old_break = process_heap_break[owner];
+    uint32_t new_break;
+    if (increment >= 0) {
+        uint32_t amount = (uint32_t)increment;
+        if (amount > USER_LOAD_END - old_break)
+            return -1;
+        new_break = old_break + amount;
+        if (new_break > old_break &&
+            paging_map_user_range(old_break, new_break - old_break) < 0)
+            return -1;
+    } else {
+        uint32_t amount = 0u - (uint32_t)increment;
+        if (amount > old_break - process_heap_base[owner])
+            return -1;
+        new_break = old_break - amount;
+    }
+    process_heap_break[owner] = new_break;
+    return (int)old_break;
 }
 
 void syscall_release_thread(int task_id) {
@@ -263,6 +327,11 @@ int sys_sleep(uint32_t ms, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
     (void)b; (void)c; (void)d; (void)e;
     timer_sleep_ms(ms);
     return 0;
+}
+
+int sys_realtime(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+    (void)a; (void)b; (void)c; (void)d; (void)e;
+    return rtc_unix_time();
 }
 
 int sys_kill(uint32_t pid, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {

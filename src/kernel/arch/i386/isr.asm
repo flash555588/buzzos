@@ -113,10 +113,50 @@ irq_stub_32:
     iret
 
 %assign i 34
-%rep 10
+%rep 3
   DUMMY_IRQ i
   %assign i i+1
 %endrep
+
+; Unused legacy IRQ5. Keep a harmless PIC acknowledgement gate installed.
+global irq_stub_37
+irq_stub_37:
+    pusha
+    mov al, 0x20
+    out 0x20, al
+    popa
+    iret
+
+%assign i 38
+%rep 4
+  DUMMY_IRQ i
+  %assign i i+1
+%endrep
+
+; NE2000 IRQ10 (slave PIC IRQ2 -> INT 42). The driver drains the small NIC
+; ring into a software queue before acknowledging the PIC.
+extern ne2000_irq_handler
+global irq_stub_42
+irq_stub_42:
+    pusha
+    call ne2000_irq_handler
+    mov al, 0x20
+    out 0xA0, al
+    out 0x20, al
+    popa
+    iret
+
+; Intel ICH AC97 PCI IRQ11.
+extern ac97_irq_handler
+global irq_stub_43
+irq_stub_43:
+    pusha
+    call ac97_irq_handler
+    mov al, 0x20
+    out 0xA0, al
+    out 0x20, al
+    popa
+    iret
 
 extern mouse_handler
 global irq_stub_44

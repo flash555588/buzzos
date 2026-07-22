@@ -1,5 +1,5 @@
 #include "vfs_internal.h"
-#include "irq.h"
+#include "task.h"
 
 struct vfs_mount {
     int used;
@@ -13,20 +13,17 @@ int fd_open_file[MAX_TASKS][MAX_FD];
 int fd_used[MAX_TASKS][MAX_FD];
 static struct vfs_mount mounts[MAX_MOUNTS];
 static volatile int vfs_locked;
-static uint32_t vfs_irq_flags;
 
 void vfs_lock(void) {
-    uint32_t flags = irq_save();
+    task_preempt_disable();
     while (__sync_lock_test_and_set(&vfs_locked, 1)) {
         __asm__ volatile("pause");
     }
-    vfs_irq_flags = flags;
 }
 
 void vfs_unlock(void) {
-    uint32_t flags = vfs_irq_flags;
     __sync_lock_release(&vfs_locked);
-    irq_restore(flags);
+    task_preempt_enable();
 }
 
 int nameeq(const char *name, const char *part, int len) {
