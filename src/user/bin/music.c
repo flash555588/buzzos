@@ -202,24 +202,40 @@ static void format_time(char *buf, int cap, uint32_t sample_pos) {
     snprintf(buf, (size_t)cap, "%u:%02u", (unsigned)m, (unsigned)s);
 }
 
+/* Progress/seek math: pos * width can exceed 2^32 around ~3 minutes at
+ * 44.1 kHz (e.g. 8e6 * 600). Always multiply in 64-bit. */
+static uint32_t scale_u32(uint32_t value, uint32_t numer, uint32_t denom) {
+    if (!denom)
+        return 0;
+    return (uint32_t)(((uint64_t)value * (uint64_t)numer) / (uint64_t)denom);
+}
+
 static uint32_t queued_samples(void) {
     int q = audio_queued();
     return q > 0 ? (uint32_t)q : 0;
 }
 
+/* Heard sample index ≈ written - still-queued. Queue can briefly exceed the
+ * write cursor around seeks (DMA estimate + old FIFO); never wrap that into
+ * a false jump back to zero. */
 static uint32_t hardware_playhead(void) {
     uint32_t written = position;
+    if (written > sample_count)
+        written = sample_count;
+
+    /* While a flush/seek is in flight, trust the held target, not the queue. */
+    if (flush_audio) {
+        uint32_t held = ui_hold_pos_valid ? ui_hold_pos :
+                        (flush_absolute ? flush_pos : written);
+        if (held > sample_count)
+            held = sample_count;
+        return held;
+    }
+
     uint32_t q = queued_samples();
-    uint32_t hw;
-    if (q == 0)
-        hw = written;
-    else if (q >= written)
-        hw = 0;
-    else
-        hw = written - q;
-    if (hw > sample_count)
-        hw = sample_count;
-    return hw;
+    if (q > written)
+        q = written;
+    return written - q;
 }
 
 static void ui_resync(uint32_t pos) {
@@ -246,25 +262,39 @@ static uint32_t display_playhead(void) {
     }
 
     uint32_t now = monotonic_ms();
-    uint32_t est = ui_anchor_pos + ((now - ui_anchor_ms) * rate) / 1000u;
+    uint32_t elapsed_ms = now - ui_anchor_ms;
+    uint32_t est = ui_anchor_pos +
+                   (uint32_t)(((uint64_t)elapsed_ms * (uint64_t)rate) / 1000u);
+
+    /* Catch up if we fell behind the device estimate. */
     if (est < hw) {
         ui_resync(hw);
         est = hw;
     }
-    if (est > hw + rate / 25u) {
-        ui_resync(hw);
-        est = hw;
-    }
+    /* If the wall clock runs ahead of what we have submitted, cap to written.
+     * Do NOT snap to a glitchy low hardware estimate — that caused the bar to
+     * jump back to the start when queued > position around seeks. */
     if (est > written)
         est = written;
     if (est > sample_count)
         est = sample_count;
+
+    /* Soft-correct if we drift more than ~0.5s ahead of a sane playhead. */
+    if (hw > 0 && est > hw + rate / 2u) {
+        uint32_t soft = hw + rate / 10u;
+        if (soft > written)
+            soft = written;
+        ui_resync(soft);
+        est = soft;
+    }
     return est;
 }
 
 static void request_flush_absolute(uint32_t pos) {
     if (pos > sample_count)
         pos = sample_count;
+    /* Hold UI at the seek target; write cursor is applied on the audio thread
+     * so we never observe "new position + old FIFO" in the playhead math. */
     ui_hold_pos = pos;
     ui_hold_pos_valid = 1;
     ui_resync(pos);
@@ -289,12 +319,9 @@ static void apply_flush(void) {
             position = sample_count;
     } else {
         uint32_t q = queued_samples();
-        if (q > 0) {
-            if (q <= position)
-                position -= q;
-            else
-                position = 0;
-        }
+        if (q > position)
+            q = position;
+        position -= q;
     }
     (void)audio_config(sample_rate);
     ui_resync(position);
@@ -696,10 +723,12 @@ static void seek_from_x(int x) {
     if (!samples || sample_count == 0 || bar.w <= 0)
         return;
     int rel = clamp_int(x - bar.x, 0, bar.w);
-    uint32_t pos = ((uint32_t)rel * sample_count) / (uint32_t)bar.w;
+    uint32_t pos = scale_u32((uint32_t)rel, sample_count, (uint32_t)bar.w);
     if (pos >= sample_count && sample_count > 0)
         pos = sample_count - 1;
-    position = pos;
+    /* Do not poke `position` here: until the audio thread flushes the FIFO,
+     * pairing a new write cursor with the old queue made the playhead wrap
+     * to zero and the track appear to restart. */
     request_flush_absolute(pos);
 }
 
@@ -837,7 +866,7 @@ static void draw_waveform(int w, int h, uint32_t pos) {
 
     play_bar = 0;
     if (sample_count)
-        play_bar = (int)((pos * (uint32_t)bars) / sample_count);
+        play_bar = (int)scale_u32(pos, (uint32_t)bars, sample_count);
     if (play_bar >= bars)
         play_bar = bars - 1;
 
@@ -889,7 +918,7 @@ static void draw_progress(int w, int h, uint32_t pos) {
     }
     appui_fill_round(pixels, w, h, track, appui_gray(4));
     if (sample_count)
-        fill_w = (int)((pos * (uint32_t)track.w) / sample_count);
+        fill_w = (int)scale_u32(pos, (uint32_t)track.w, sample_count);
     if (fill_w > track.w) fill_w = track.w;
     if (fill_w > 0) {
         appui_fill_round(pixels, w, h,
