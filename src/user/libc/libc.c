@@ -64,7 +64,7 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_MOUSE_GET=49, SYS_FSSTAT=50, SYS_FUTEX_WAIT_TIMEOUT=51,
        SYS_GFX_INFO=52, SYS_FONT_GLYPH=53, SYS_SBRK=54,
        SYS_SHM_CREATE=57, SYS_SHM_MAP=58, SYS_SHM_UNMAP=59,
-       SYS_AUDIO_WRITE=60 };
+       SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62 };
 
 static void (*exit_handlers[16])(void);
 static int exit_handler_count;
@@ -273,6 +273,15 @@ int fb_blit(int x, int y, int w, int h, const uint8_t *pixels) {
                     (int)(uintptr_t)pixels);
 }
 
+int fb_blit_stride(int x, int y, int w, int h, const uint8_t *pixels,
+                   int stride) {
+    if (w <= 0 || h <= 0 || w > 0xFFFF || h > 0xFFFF || stride < w)
+        return -1;
+    unsigned int packed = (unsigned int)w | ((unsigned int)h << 16);
+    return syscall5(SYS_FB_BLIT_STRIDE, x + gfx_origin_x, y + gfx_origin_y,
+                    (int)packed, (int)(uintptr_t)pixels, stride);
+}
+
 int mouse_get(struct mouse_state *out) {
     int ret = syscall1(SYS_MOUSE_GET, (int)(uintptr_t)out);
     if (ret == 0 && out) {
@@ -385,6 +394,10 @@ int audio_write(const uint8_t *samples, size_t count) {
     return syscall2(SYS_AUDIO_WRITE, (int)(uintptr_t)samples, (int)count);
 }
 
+int audio_config(unsigned int sample_rate) {
+    return syscall1(SYS_AUDIO_CONFIG, (int)sample_rate);
+}
+
 uint32_t monotonic_ms(void) {
     return (uint32_t)syscall0(SYS_MONOTONIC_MS);
 }
@@ -420,14 +433,35 @@ size_t strlen(const char *s) {
 
 void *memset(void *d, int c, size_t n) {
     unsigned char *p = (unsigned char *)d;
-    while (n--) *p++ = (unsigned char)c;
+    size_t words = n >> 2;
+    uint32_t value = (uint8_t)c;
+    value |= value << 8;
+    value |= value << 16;
+    __asm__ volatile ("cld; rep stosl"
+                      : "+D"(p), "+c"(words)
+                      : "a"(value)
+                      : "memory");
+    n &= 3u;
+    __asm__ volatile ("rep stosb"
+                      : "+D"(p), "+c"(n)
+                      : "a"((uint8_t)c)
+                      : "memory");
     return d;
 }
 
 void *memcpy(void *d, const void *s, size_t n) {
     unsigned char *dp = (unsigned char *)d;
     const unsigned char *sp = (const unsigned char *)s;
-    while (n--) *dp++ = *sp++;
+    size_t words = n >> 2;
+    __asm__ volatile ("cld; rep movsl"
+                      : "+D"(dp), "+S"(sp), "+c"(words)
+                      :
+                      : "memory");
+    n &= 3u;
+    __asm__ volatile ("rep movsb"
+                      : "+D"(dp), "+S"(sp), "+c"(n)
+                      :
+                      : "memory");
     return d;
 }
 
@@ -930,70 +964,14 @@ int vsnprintf(char *buffer, size_t size, const char *fmt,
 
 int printf(const char *fmt, ...) {
     if (ensure_console() < 0) return -1;
-
     char out[512];
-    int pos = 0;
-
     __builtin_va_list ap;
     __builtin_va_start(ap, fmt);
-
-    for (; *fmt; fmt++) {
-        if (*fmt != '%') {
-            out_ch(out, &pos, (int)sizeof(out), *fmt);
-            continue;
-        }
-        fmt++;
-        switch (*fmt) {
-        case 'd': case 'i': {
-            int v = __builtin_va_arg(ap, int);
-            if (v < 0) {
-                out_ch(out, &pos, (int)sizeof(out), '-');
-                v = -v;
-            }
-            out_uint(out, &pos, (int)sizeof(out), (unsigned)v, 10);
-            break;
-        }
-        case 'u':
-            out_uint(out, &pos, (int)sizeof(out),
-                     __builtin_va_arg(ap, unsigned int), 10);
-            break;
-        case 'x':
-            out_uint(out, &pos, (int)sizeof(out),
-                     __builtin_va_arg(ap, unsigned int), 16);
-            break;
-        case 's': {
-            const char *s = __builtin_va_arg(ap, const char *);
-            if (!s) s = "(null)";
-            out_str(out, &pos, (int)sizeof(out), s);
-            break;
-        }
-        case 'c':
-            out_ch(out, &pos, (int)sizeof(out),
-                   (char)__builtin_va_arg(ap, int));
-            break;
-        case 'f': {
-            double v = __builtin_va_arg(ap, double);
-            out_double(out, &pos, (int)sizeof(out), v, 6);
-            break;
-        }
-        case '%':
-            out_ch(out, &pos, (int)sizeof(out), '%');
-            break;
-        default:
-            out_ch(out, &pos, (int)sizeof(out), '%');
-            out_ch(out, &pos, (int)sizeof(out), *fmt);
-            break;
-        }
-    }
+    int length = vsnprintf(out, sizeof(out), fmt, ap);
     __builtin_va_end(ap);
-
-    int n = pos;
-    if (n > (int)sizeof(out) - 1)
-        n = (int)sizeof(out) - 1;
-    out[n] = 0;
-    if (n > 0)
-        write(console_fd, out, (size_t)n);
-    return pos;
+    int written = length < (int)sizeof(out) ? length : (int)sizeof(out) - 1;
+    if (written > 0) write(console_fd, out, (size_t)written);
+    return length;
 }
 
 static FILE standard_input = { 0, 0, 0 };

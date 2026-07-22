@@ -2,12 +2,15 @@
 #include "io.h"
 
 #define BUF_SIZE 256
+#define EVENT_DOWN 0x8000u
 
 static volatile uint8_t buf[BUF_SIZE];
 static volatile int     head, tail;
 static volatile int     shift_down;
 static volatile int     ctrl_down;
 static volatile int     extended_prefix;
+static volatile uint16_t event_buf[BUF_SIZE];
+static volatile int event_head, event_tail;
 
 static void enqueue_char(char c) {
     int next = (tail + 1) % BUF_SIZE;
@@ -20,6 +23,14 @@ static void enqueue_char(char c) {
 static void enqueue_seq(const char *s) {
     while (*s)
         enqueue_char(*s++);
+}
+
+static void enqueue_event(uint16_t key, int pressed) {
+    int next = (event_tail + 1) % BUF_SIZE;
+    if (!key || next == event_head)
+        return;
+    event_buf[event_tail] = (uint16_t)(key | (pressed ? EVENT_DOWN : 0u));
+    event_tail = next;
 }
 
 /* US QWERTY scancode → ASCII (scancode set 1, unshifted) */
@@ -47,6 +58,7 @@ void keyboard_init(void) {
     shift_down = 0;
     ctrl_down = 0;
     extended_prefix = 0;
+    event_head = event_tail = 0;
 }
 
 void keyboard_handler(uint8_t scancode) {
@@ -69,21 +81,33 @@ void keyboard_handler(uint8_t scancode) {
         return;
     }
     if (extended) {
-        if (released)
-            return;
+        uint16_t key = 0;
         switch (code) {
-        case 0x48: enqueue_seq("\x1B[A"); return; /* Up */
-        case 0x50: enqueue_seq("\x1B[B"); return; /* Down */
-        case 0x4D: enqueue_seq("\x1B[C"); return; /* Right */
-        case 0x4B: enqueue_seq("\x1B[D"); return; /* Left */
-        case 0x47: enqueue_seq("\x1B[H"); return; /* Home */
-        case 0x4F: enqueue_seq("\x1B[F"); return; /* End */
-        case 0x53: enqueue_seq("\x1B[3~"); return; /* Delete */
+        case 0x48: key = 256; break; /* Up */
+        case 0x50: key = 257; break; /* Down */
+        case 0x4D: key = 258; break; /* Right */
+        case 0x4B: key = 259; break; /* Left */
+        case 0x47: key = 260; break; /* Home */
+        case 0x4F: key = 261; break; /* End */
+        case 0x53: key = 262; break; /* Delete */
+        default: return;
+        }
+        enqueue_event(key, !released);
+        if (released) return;
+        switch (code) {
+        case 0x48: enqueue_seq("\x1B[A"); return;
+        case 0x50: enqueue_seq("\x1B[B"); return;
+        case 0x4D: enqueue_seq("\x1B[C"); return;
+        case 0x4B: enqueue_seq("\x1B[D"); return;
+        case 0x47: enqueue_seq("\x1B[H"); return;
+        case 0x4F: enqueue_seq("\x1B[F"); return;
+        case 0x53: enqueue_seq("\x1B[3~"); return;
         default: return;
         }
     }
+    uint16_t logical = (uint8_t)scancode_ascii[code];
+    enqueue_event(logical, !released);
     if (released) return;
-    if (scancode >= 128) return;
     char c = shift_down ? scancode_ascii_shift[scancode] : scancode_ascii[scancode];
     if (c == 0) return;
     if (ctrl_down) {
@@ -112,4 +136,11 @@ int keyboard_getchar(void) {
     int c = buf[head];
     head = (head + 1) % BUF_SIZE;
     return c;
+}
+
+int keyboard_getevent(void) {
+    if (event_head == event_tail) return -1;
+    int event = event_buf[event_head];
+    event_head = (event_head + 1) % BUF_SIZE;
+    return event;
 }

@@ -24,6 +24,9 @@ static int          num_tasks;
 static int          current_id;
 struct task        *current_task;
 static uint32_t preempt_depth;
+static uint32_t sched_slice_ticks;
+
+#define SCHED_SLICE_TICKS ((TIMER_HZ * 4u + 999u) / 1000u)
 
 #define PROC_UNUSED 0
 #define PROC_RUNNING 1
@@ -265,21 +268,28 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
 /*  Round-robin scheduler                                               */
 /* ------------------------------------------------------------------ */
 
-static void schedule(void) {
-    uint32_t irq_flags = irq_save();
-
-    uint32_t now = timer_ticks();
+static int wake_expired_tasks(uint32_t now) {
+    int woke = 0;
     for (int i = 0; i < num_tasks; i++) {
         if (tasks[i].state == TASK_SLEEPING && (int32_t)(now - tasks[i].wake_tick) >= 0) {
             tasks[i].state = TASK_READY;
             tasks[i].wake_tick = 0;
+            woke = 1;
         }
         if (tasks[i].state == TASK_BLOCKED && tasks[i].wake_tick &&
             (int32_t)(now - tasks[i].wake_tick) >= 0) {
             tasks[i].state = TASK_READY;
             tasks[i].wake_tick = 0;
+            woke = 1;
         }
     }
+    return woke;
+}
+
+static void schedule(void) {
+    uint32_t irq_flags = irq_save();
+
+    (void)wake_expired_tasks(timer_ticks());
 
     int next = -1;
     for (int i = 1; i <= num_tasks; i++) {
@@ -329,12 +339,23 @@ static void schedule(void) {
 void task_yield(void) {
     if (preempt_depth)
         return;
+    sched_slice_ticks = 0;
     schedule();
 }
 
 void sched_tick(void) {
     if (preempt_depth)
         return;
+    /* Keep a 4 ms CPU quantum independent of the PIT frequency.  Newly
+     * expired sleepers are still eligible on the first timer interrupt. */
+    if (wake_expired_tasks(timer_ticks())) {
+        sched_slice_ticks = 0;
+        schedule();
+        return;
+    }
+    if (++sched_slice_ticks < SCHED_SLICE_TICKS)
+        return;
+    sched_slice_ticks = 0;
     schedule();
 }
 

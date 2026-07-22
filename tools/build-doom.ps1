@@ -25,8 +25,9 @@ $names = @(
 )
 $flags = @(
     "--target=i386-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
-    "-fno-stack-protector", "-fno-pic", "-mno-sse", "-mno-mmx", "-mfpmath=387",
-    "-O2", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-unused-variable",
+    "-fno-stack-protector", "-fno-pic", "-march=pentium3", "-mtune=generic",
+    "-fomit-frame-pointer", "-mno-sse", "-mno-mmx", "-mfpmath=387",
+    "-O3", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-unused-variable",
     "-Wno-unused-function", "-DNORMALUNIX", "-DLINUX", "-D__BUZZOS__", "-D_DEFAULT_SOURCE",
     "-DDOOMGENERIC_RESX=320", "-DDOOMGENERIC_RESY=200", "-DFEATURE_SOUND",
     "-Isrc/user/libc", "-Isrc/user/third_party/doomgeneric/doomgeneric"

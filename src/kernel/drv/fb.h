@@ -20,6 +20,8 @@ int  fb_clear(uint8_t color);
 int  fb_putpixel(int x, int y, uint8_t color);
 int  fb_fill_rect(int x, int y, int w, int h, uint8_t color);
 int  fb_blit8(int x, int y, int w, int h, const uint8_t *pixels);
+int  fb_blit8_stride(int x, int y, int w, int h,
+                     const uint8_t *pixels, int stride);
 int  fb_text(int x, int y, const char *s, uint8_t fg, int bg);
 
 void fb_console_clear(void);

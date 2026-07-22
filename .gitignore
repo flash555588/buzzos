@@ -5,3 +5,10 @@ build-*/
 __pycache__/
 /third_party/netsurf-reference/
 /third_party/netsurf-workspace/
+
+# User-supplied game ROMs and emulator save data are installed into MiniFS,
+# not redistributed from the source repository.
+/*.gb
+/*.gbc
+/*.gba
+/*.sav

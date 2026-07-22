@@ -8,3 +8,9 @@ int sys_audio_write(uint32_t data_arg, uint32_t size,
         return -1;
     return ac97_write((const uint8_t *)(uintptr_t)data_arg, size);
 }
+
+int sys_audio_config(uint32_t rate, uint32_t b,
+                     uint32_t c, uint32_t d, uint32_t e) {
+    (void)b; (void)c; (void)d; (void)e;
+    return ac97_set_rate(rate);
+}

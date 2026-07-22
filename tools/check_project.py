@@ -146,7 +146,7 @@ def check_kernel_memory_layout():
         fail("missing build/obj/kernel/kernel.elf; run make first")
     text_start, _text_end = elf_section_range(kernel_elf, ".text")
     _bss_start, bss_end = elf_section_range(kernel_elf, ".bss")
-    stack_top = parse_boot_stack_top(boot)
+    stack_start, stack_top = elf_section_range(kernel_elf, ".boot_stack")
     managed_limit = parse_define_number(pmm_c, "PMM_MANAGED_LIMIT")
     stack_reserve = 0x10000
     vga_hole_start = 0xA0000
@@ -155,9 +155,14 @@ def check_kernel_memory_layout():
         fail(f"kernel image 0x{text_start:X}..0x{bss_end:X} overlaps VGA/BIOS hole 0x{vga_hole_start:X}..0x{vga_hole_end:X}")
     if stack_top > managed_limit:
         fail(f"boot stack top 0x{stack_top:X} exceeds PMM managed limit 0x{managed_limit:X}")
-    if bss_end > stack_top - stack_reserve:
-        fail(f"kernel .bss ends at 0x{bss_end:X}, overlapping 64KiB boot stack below 0x{stack_top:X}")
-    ok(f"kernel memory: image 0x{text_start:06X}..0x{bss_end:06X}, boot stack 0x{stack_top - stack_reserve:06X}..0x{stack_top:06X}")
+    if stack_top - stack_start < stack_reserve:
+        fail(f"boot stack is only {stack_top - stack_start} bytes")
+    if bss_end > stack_start:
+        fail(f"kernel .bss ends at 0x{bss_end:X}, overlapping boot stack at 0x{stack_start:X}")
+    for snippet in ["__kernel_end", "kernel_end - kernel_start"]:
+        if snippet not in pmm_c:
+            fail(f"PMM does not reserve linker-placed boot stack: missing {snippet}")
+    ok(f"kernel memory: image 0x{text_start:06X}..0x{bss_end:06X}, boot stack 0x{stack_start:06X}..0x{stack_top:06X}")
 
 
 def check_user_bounds():

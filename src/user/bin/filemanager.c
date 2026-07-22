@@ -225,6 +225,20 @@ static int has_gui_manifest(const char *path) {
     return stat(manifest, &st) == 0 && st.st_type == DT_REG;
 }
 
+static int has_extension(const char *path, const char *extension) {
+    size_t path_len = strlen(path);
+    size_t extension_len = strlen(extension);
+    if (path_len < extension_len) return 0;
+    const char *tail = path + path_len - extension_len;
+    for (size_t i = 0; i < extension_len; i++) {
+        char a = tail[i], b = extension[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
 static void open_selected(struct guiapp_ctx *ctx) {
     if (selected < 0 || selected >= entry_count)
         return;
@@ -253,6 +267,13 @@ static void open_selected(struct guiapp_ctx *ctx) {
             else
                 set_status("Running in Terminal");
         }
+        return;
+    }
+    if (has_extension(path, ".gb") || has_extension(path, ".gbc")) {
+        if (guiapp_request_launch(ctx, "/fs/apps/gameboy", path) < 0)
+            set_status("Could not launch Game Boy");
+        else
+            set_status("Opened in Game Boy");
         return;
     }
     if (guiapp_request_launch(ctx, "/fs/apps/textedit", path) < 0) {

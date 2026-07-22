@@ -50,6 +50,7 @@ int sys_shm_create(uint32_t size, uint32_t out_arg, uint32_t c, uint32_t d, uint
 int sys_shm_map(uint32_t token, uint32_t out_arg, uint32_t c, uint32_t d, uint32_t e);
 int sys_shm_unmap(uint32_t token, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_audio_write(uint32_t data_arg, uint32_t size, uint32_t c, uint32_t d, uint32_t e);
+int sys_audio_config(uint32_t rate, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 
 int sys_socket(uint32_t domain, uint32_t type, uint32_t protocol, uint32_t d, uint32_t e);
 int sys_connect(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen, uint32_t d, uint32_t e);
@@ -72,6 +73,8 @@ int sys_gfx_putpixel(uint32_t x, uint32_t y, uint32_t color, uint32_t d, uint32_
 int sys_gfx_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
 int sys_gfx_text(uint32_t x, uint32_t y, uint32_t s_arg, uint32_t fg, uint32_t bg);
 int sys_fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t pixels_arg);
+int sys_fb_blit_stride(uint32_t x, uint32_t y, uint32_t packed_wh,
+                       uint32_t pixels_arg, uint32_t stride);
 int sys_mouse_get(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_gfx_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_font_glyph(uint32_t codepoint, uint32_t out_arg, uint32_t cap,

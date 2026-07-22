@@ -30,7 +30,10 @@ static int ansi_seen_digit;
 static char console_chars[FB_CONSOLE_MAX_ROWS][FB_CONSOLE_MAX_COLS];
 static uint8_t console_colors[FB_CONSOLE_MAX_ROWS][FB_CONSOLE_MAX_COLS];
 
-static uint32_t palette_rgb(uint8_t index) {
+static uint32_t palette_lut[256];
+static int palette_lut_ready;
+
+static uint32_t palette_rgb_compute(uint8_t index) {
     static const uint32_t base[25] = {
         0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
         0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
@@ -56,6 +59,19 @@ static uint32_t palette_rgb(uint8_t index) {
         b = b * 51u;
         return (r << 16) | (g << 8) | b;
     }
+}
+
+static void palette_init(void) {
+    if (palette_lut_ready)
+        return;
+    for (uint32_t i = 0; i < 256u; i++)
+        palette_lut[i] = palette_rgb_compute((uint8_t)i);
+    palette_lut_ready = 1;
+}
+
+static uint32_t palette_rgb(uint8_t index) {
+    palette_init();
+    return palette_lut[index];
 }
 
 static void fb_store_rgb(int x, int y, uint32_t rgb) {
@@ -400,17 +416,41 @@ int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
     return 0;
 }
 
-int fb_blit8(int x, int y, int w, int h, const uint8_t *pixels) {
-    if (!fb_ready || !pixels || x < 0 || y < 0 || w <= 0 || h <= 0)
+int fb_blit8_stride(int x, int y, int w, int h,
+                    const uint8_t *pixels, int stride) {
+    if (!fb_ready || !pixels || x < 0 || y < 0 || w <= 0 || h <= 0 ||
+        stride < w)
         return -1;
     if (x + w > (int)fb_info.width || y + h > (int)fb_info.height)
         return -1;
+    palette_init();
+    if (fb_info.bpp == 32) {
+        for (int yy = 0; yy < h; yy++) {
+            const uint8_t *src = pixels + yy * stride;
+            volatile uint32_t *dst = (volatile uint32_t *)(fb_mem +
+                (uint32_t)(y + yy) * fb_info.pitch) + x;
+            int xx = 0;
+            for (; xx + 4 <= w; xx += 4) {
+                dst[xx] = palette_lut[src[xx]];
+                dst[xx + 1] = palette_lut[src[xx + 1]];
+                dst[xx + 2] = palette_lut[src[xx + 2]];
+                dst[xx + 3] = palette_lut[src[xx + 3]];
+            }
+            for (; xx < w; xx++)
+                dst[xx] = palette_lut[src[xx]];
+        }
+        return 0;
+    }
     for (int yy = 0; yy < h; yy++) {
-        const uint8_t *src = pixels + yy * w;
+        const uint8_t *src = pixels + yy * stride;
         for (int xx = 0; xx < w; xx++)
             fb_store_rgb(x + xx, y + yy, palette_rgb(src[xx]));
     }
     return 0;
+}
+
+int fb_blit8(int x, int y, int w, int h, const uint8_t *pixels) {
+    return fb_blit8_stride(x, y, w, h, pixels, w);
 }
 
 int fb_text(int x, int y, const char *s, uint8_t fg, int bg) {

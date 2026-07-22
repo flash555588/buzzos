@@ -78,14 +78,17 @@ static void gui_event_reader(void) {
         } else if (event.type == GUIAPP_EVT_KEY) {
             unsigned char key = doom_key(event.key);
             if (key) {
-                uint32_t now = monotonic_ms();
-                if (!held_keys[key]) {
-                    held_keys[key] = 1;
-                    queue_key(1, key);
+                if (event.buttons) {
+                    if (!held_keys[key]) {
+                        held_keys[key] = 1;
+                        queue_key(1, key);
+                    }
+                    release_at[key] = monotonic_ms() + 350u;
+                } else if (held_keys[key]) {
+                    held_keys[key] = 0;
+                    release_at[key] = 0;
+                    queue_key(0, key);
                 }
-                /* Keyboard repeat refreshes the hold. This is replaced by
-                 * real release events when the desktop input ABI grows one. */
-                release_at[key] = now + 350u;
             }
         }
     }

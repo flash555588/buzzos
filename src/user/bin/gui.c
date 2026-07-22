@@ -63,6 +63,13 @@ struct app_session {
     int from_fd;
     int surface_w;
     int surface_h;
+    int source_w;
+    int source_h;
+    int scaled_surface;
+    int scale_map_w;
+    int scale_map_h;
+    int scale_source_w;
+    int scale_source_h;
     int want_w;
     int want_h;
     int resize_dirty;
@@ -72,6 +79,8 @@ struct app_session {
     uint32_t shm_token;
     struct guiapp_shared_surface *shared;
     int front_buffer;
+    uint16_t xmap[APP_SURFACE_MAX_W];
+    uint16_t ymap[APP_SURFACE_MAX_H];
     char title[GUIAPP_TITLE_MAX];
 };
 
@@ -116,6 +125,7 @@ static int term_in_fd = -1;
 static int term_out_fd = -1;
 static int term_pid = -1;
 static int term_reader_tid = -1;
+static int keyevent_fd = -1;
 static char term_input[512];
 static int term_input_len;
 static int term_select_anchor_row;
@@ -128,6 +138,9 @@ static int term_ansi_param;
 static unsigned int tick;
 static unsigned int last_render_tick;
 static volatile int desktop_dirty = 1;
+static volatile uint32_t app_frame_dirty_mask;
+static int partial_app_render;
+static uint8_t scaled_scanline[APP_SURFACE_MAX_W];
 static uint32_t last_wheel_seq;
 static int last_wheel_value;
 static int ime_enabled;
@@ -290,8 +303,7 @@ static void fill(struct rect r, int color) {
         return;
     for (int yy = 0; yy < r.h; yy++) {
         uint8_t *row = fb + (r.y + yy) * sw + r.x;
-        for (int xx = 0; xx < r.w; xx++)
-            row[xx] = (uint8_t)color;
+        memset(row, color, (size_t)r.w);
     }
 }
 
@@ -744,18 +756,32 @@ static int app_read_frame(int slot) {
     if (frame.width <= 0 || frame.height <= 0 ||
         frame.width > APP_SURFACE_MAX_W || frame.height > APP_SURFACE_MAX_H)
         return -1;
-    if (frame.type != GUIAPP_FRAME_SHARED ||
+    if ((frame.type != GUIAPP_FRAME_SHARED && frame.type != GUIAPP_FRAME_SCALED) ||
         frame.buffer_index < 0 || frame.buffer_index >= GUIAPP_SHARED_BUFFERS ||
         !app_sessions[slot].shared)
         return -1;
+    if (frame.type == GUIAPP_FRAME_SCALED &&
+        (frame.dirty_w <= 0 || frame.dirty_h <= 0 ||
+         frame.dirty_w > APP_SURFACE_MAX_W || frame.dirty_h > APP_SURFACE_MAX_H))
+        return -1;
+    int full_change = app_sessions[slot].surface_w != frame.width ||
+        app_sessions[slot].surface_h != frame.height ||
+        app_sessions[slot].scaled_surface != (frame.type == GUIAPP_FRAME_SCALED) ||
+        strcmp(app_sessions[slot].title, frame.title) != 0;
     app_sessions[slot].front_buffer = frame.buffer_index;
     app_sessions[slot].surface_w = frame.width;
     app_sessions[slot].surface_h = frame.height;
+    app_sessions[slot].scaled_surface = frame.type == GUIAPP_FRAME_SCALED;
+    app_sessions[slot].source_w = app_sessions[slot].scaled_surface ? frame.dirty_w : frame.width;
+    app_sessions[slot].source_h = app_sessions[slot].scaled_surface ? frame.dirty_h : frame.height;
     copy_text(app_sessions[slot].title, frame.title, sizeof(app_sessions[slot].title));
     windows[WIN_APP_BASE + slot].title = app_sessions[slot].title[0]
         ? app_sessions[slot].title : "Application";
     clamp_scroll(WIN_APP_BASE + slot);
-    desktop_dirty = 1;
+    if (full_change)
+        desktop_dirty = 1;
+    else
+        __sync_fetch_and_or(&app_frame_dirty_mask, 1u << slot);
     return 0;
 }
 
@@ -1309,14 +1335,18 @@ static void draw_app_window(int id) {
     if (slot < 0 || !app_sessions[slot].used ||
         !windows[id].visible || windows[id].minimized)
         return;
-    draw_window_frame(id);
+    if (!partial_app_render)
+        draw_window_frame(id);
     struct rect c = content_rect(id);
-    fill(c, gray(2));
+    if (!app_sessions[slot].scaled_surface)
+        fill(c, gray(2));
     struct rect clip = c;
     int ox = c.x;
     int oy = c.y;
     int aw = app_sessions[slot].surface_w;
     int ah = app_sessions[slot].surface_h;
+    int source_w = app_sessions[slot].source_w;
+    int source_h = app_sessions[slot].source_h;
     struct guiapp_shared_surface *shared = app_sessions[slot].shared;
     if (!shared || aw <= 0 || ah <= 0)
         return;
@@ -1332,16 +1362,79 @@ static void draw_app_window(int id) {
     }
     const uint8_t *pixels = (const uint8_t *)shared +
         GUIAPP_SHARED_HEADER_SIZE + front * GUIAPP_SHARED_PIXELS;
-    for (int y = 0; y < ah; y++) {
-        int dy = oy + y;
-        if (dy < clip.y || dy >= clip.y + clip.h)
-            continue;
-        for (int x = 0; x < aw; x++) {
-            int dx = ox + x;
-            if (dx < clip.x || dx >= clip.x + clip.w)
-                continue;
-            pixel(dx, dy, pixels[y * aw + x]);
+    if (app_sessions[slot].scaled_surface && source_w > 0 && source_h > 0) {
+        int vw = aw, vh = aw * source_h / source_w;
+        if (vh > ah) { vh = ah; vw = ah * source_w / source_h; }
+        int dx = ox + (aw - vw) / 2, dy = oy + (ah - vh) / 2;
+        fill((struct rect){ox, oy, aw, ah}, gray(0));
+        struct rect visible = intersect_rect((struct rect){dx, dy, vw, vh}, clip);
+        if (app_sessions[slot].scale_map_w != vw ||
+            app_sessions[slot].scale_map_h != vh ||
+            app_sessions[slot].scale_source_w != source_w ||
+            app_sessions[slot].scale_source_h != source_h) {
+            for (int x = 0; x < vw; x++)
+                app_sessions[slot].xmap[x] = (uint16_t)(x * source_w / vw);
+            for (int y = 0; y < vh; y++)
+                app_sessions[slot].ymap[y] = (uint16_t)(y * source_h / vh);
+            app_sessions[slot].scale_map_w = vw;
+            app_sessions[slot].scale_map_h = vh;
+            app_sessions[slot].scale_source_w = source_w;
+            app_sessions[slot].scale_source_h = source_h;
         }
+        int xscale = vw / source_w, yscale = vh / source_h;
+        if (xscale > 0 && yscale > 0 &&
+            xscale * source_w == vw && yscale * source_h == vh) {
+            /* Expand each source row only once, then reuse it for all of its
+             * vertically repeated rows.  The old loop expanded every output
+             * row separately (and made tens of thousands of tiny memset
+             * calls per second for a 4x Game Boy surface). */
+            int first_x = visible.x - dx;
+            int cached_sy = -1;
+            for (int y = 0; y < visible.h; y++) {
+                uint8_t *dst = fb + (visible.y + y) * sw + visible.x;
+                int sy = (visible.y + y - dy) / yscale;
+                if (sy != cached_sy) {
+                    const uint8_t *src = pixels + sy * source_w;
+                    int out = 0, pos = first_x;
+                    while (out < visible.w) {
+                        int sx = pos / xscale;
+                        int run = xscale - pos % xscale;
+                        if (run > visible.w - out) run = visible.w - out;
+                        memset(scaled_scanline + out, src[sx], (size_t)run);
+                        out += run;
+                        pos += run;
+                    }
+                    cached_sy = sy;
+                }
+                memcpy(dst, scaled_scanline, (size_t)visible.w);
+            }
+        } else {
+            int cached_sy = -1;
+            for (int y = 0; y < visible.h; y++) {
+                uint8_t *dst = fb + (visible.y + y) * sw + visible.x;
+                int sy = app_sessions[slot].ymap[visible.y + y - dy];
+                if (sy != cached_sy) {
+                    const uint8_t *src = pixels + sy * source_w;
+                    int sx = visible.x - dx;
+                    for (int x = 0; x < visible.w; x++)
+                        scaled_scanline[x] =
+                            src[app_sessions[slot].xmap[sx + x]];
+                    cached_sy = sy;
+                }
+                memcpy(dst, scaled_scanline, (size_t)visible.w);
+            }
+        }
+        __sync_synchronize();
+        shared->reader = 0xFFFFFFFFu;
+        return;
+    }
+    struct rect visible = intersect_rect((struct rect){ox, oy, aw, ah}, clip);
+    if (visible.w > 0 && visible.h > 0) {
+        int sx = visible.x - ox;
+        int sy = visible.y - oy;
+        for (int y = 0; y < visible.h; y++)
+            memcpy(fb + (visible.y + y) * sw + visible.x,
+                   pixels + (sy + y) * aw + sx, (size_t)visible.w);
     }
     __sync_synchronize();
     shared->reader = 0xFFFFFFFFu;
@@ -1535,6 +1628,39 @@ static void render(void) {
     draw_context_menu();
     draw_pointer();
     fb_blit(0, 0, sw, sh, fb);
+}
+
+static int render_app_partial(int slot) {
+    int id = WIN_APP_BASE + slot;
+    if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used ||
+        !windows[id].visible || windows[id].minimized)
+        return -1;
+    /* Partial composition is safe only for the uppermost window. Covered
+     * applications fall back to normal z-ordered desktop composition. */
+    int top = -1;
+    for (int zi = WIN_COUNT - 1; zi >= 0; zi--) {
+        int candidate = z_order[zi];
+        if (windows[candidate].visible && !windows[candidate].minimized) {
+            top = candidate;
+            break;
+        }
+    }
+    if (top != id) return -1;
+    partial_app_render = 1;
+    draw_app_window(id);
+    partial_app_render = 0;
+    draw_dock();
+    draw_ime();
+    draw_context_menu();
+    draw_pointer();
+    /* The frame and title bar are unchanged for an ordinary app frame.  Only
+     * move the content pixels; mouse/window operations request a full desktop
+     * redraw separately. */
+    struct rect area = intersect_rect(content_rect(id),
+                                      (struct rect){0, 0, sw, sh});
+    if (area.w <= 0 || area.h <= 0) return 0;
+    return fb_blit_stride(area.x, area.y, area.w, area.h,
+                          fb + area.y * sw + area.x, sw);
 }
 
 static int top_window_at(int x, int y) {
@@ -2048,7 +2174,22 @@ static void handle_key(int k) {
     }
     int slot = app_slot_for_win(focus);
     if (slot >= 0 && app_sessions[slot].used) {
-        if (app_send_event(slot, GUIAPP_EVT_KEY, 0, 0, k, 0, 0) < 0)
+        if (app_send_event(slot, GUIAPP_EVT_KEY, 0, 0, k, 1, 0) < 0)
+            app_sessions[slot].reader_dead = 1;
+    }
+}
+
+static void forward_key_releases(void) {
+    if (keyevent_fd < 0)
+        return;
+    uint16_t event;
+    while (read(keyevent_fd, &event, sizeof(event)) == (int)sizeof(event)) {
+        if (event & 0x8000u)
+            continue;
+        int slot = app_slot_for_win(focus);
+        if (slot >= 0 && app_sessions[slot].used &&
+            app_send_event(slot, GUIAPP_EVT_KEY, 0, 0,
+                           event & 0x7FFFu, 0, 0) < 0)
             app_sessions[slot].reader_dead = 1;
     }
 }
@@ -2302,6 +2443,7 @@ static void init_desktop(void) {
     for (int i = 0; i < TERM_LINES; i++)
         term_lines[i][0] = 0;
     scan_apps();
+    keyevent_fd = open("/dev/keyevent", O_RDONLY);
     layout();
     scroll_y[WIN_TERMINAL] = max_scroll_y(WIN_TERMINAL);
     scroll_x[WIN_TERMINAL] = 0;
@@ -2310,6 +2452,10 @@ static void init_desktop(void) {
 }
 
 static void shutdown_desktop(void) {
+    if (keyevent_fd >= 0) {
+        close(keyevent_fd);
+        keyevent_fd = -1;
+    }
     for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
         if (app_sessions[slot].used)
             close_window(WIN_APP_BASE + slot);
@@ -2339,6 +2485,8 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
     init_desktop();
+    uint32_t frame_deadline = monotonic_ms();
+    uint32_t frame_fraction = 0;
     while (running) {
         reap_dead_apps();
         int key;
@@ -2346,15 +2494,49 @@ int main(int argc, char **argv) {
             desktop_dirty = 1;
             handle_key(key);
         }
+        forward_key_releases();
         handle_mouse();
         flush_pending_app_resizes();
+        uint32_t app_dirty = __sync_lock_test_and_set(&app_frame_dirty_mask, 0);
         if (desktop_dirty || tick - last_render_tick >= 60u) {
             desktop_dirty = 0;
             render();
             last_render_tick = tick;
+        } else if (app_dirty) {
+            if ((app_dirty & (app_dirty - 1u)) != 0) {
+                render();
+                last_render_tick = tick;
+            } else {
+                int slot = 0;
+                while (!(app_dirty & (1u << slot))) slot++;
+                if (render_app_partial(slot) < 0) {
+                    render();
+                    last_render_tick = tick;
+                }
+            }
         }
         tick++;
-        sleep_ms(app_mouse_capture >= 0 ? 2 : 16);
+        if (app_mouse_capture >= 0) {
+            frame_deadline += 4u;
+        } else {
+            /* 60 Hz = 16 2/3 ms. Use an absolute 16,17,17 ms cadence so
+             * composition time is part of the budget instead of being added
+             * after every frame. */
+            frame_deadline += 16u;
+            frame_fraction += 2u;
+            if (frame_fraction >= 3u) {
+                frame_deadline++;
+                frame_fraction -= 3u;
+            }
+        }
+        uint32_t now = monotonic_ms();
+        if ((int32_t)(frame_deadline - now) > 0) {
+            sleep_ms(frame_deadline - now);
+        } else {
+            yield();
+            if ((int32_t)(now - frame_deadline) > 100)
+                frame_deadline = now;
+        }
     }
     shutdown_desktop();
     return 0;

@@ -10,9 +10,9 @@
  * preemptive scheduler. This is the foundation for uptime, sleep, and any
  * future time-based facility. */
 
-/* 250 Hz is the conventional desktop-oriented compromise: Doom's 35 Hz
- * cadence is quantized to 4 ms instead of 10 ms, while the simple i386
- * scheduler avoids the overhead of a 1000 Hz context-switch clock. */
+/* 250 Hz gives a 4 ms desktop clock.  A 1000 Hz PIT looked attractive for
+ * millisecond sleeps, but under TCG the extra interrupt/scheduler traffic
+ * made guest virtual time fall far behind the host audio clock. */
 #define TIMER_HZ 250u
 
 /* Program the PIT and unmask IRQ0 on the PIC. Call after idt_install()

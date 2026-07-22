@@ -104,6 +104,27 @@ static const struct vnode_ops console_dev_ops = {
     .close = console_close,
 };
 
+static int keyevent_read(vnode_t *vn, void *buf, size_t count) {
+    (void)vn;
+    if (count < sizeof(uint16_t)) return 0;
+    int event = keyboard_getevent();
+    if (event < 0) return 0;
+    *(uint16_t *)buf = (uint16_t)event;
+    return (int)sizeof(uint16_t);
+}
+
+static int keyevent_write(vnode_t *vn, const void *buf, size_t count) {
+    (void)vn; (void)buf; (void)count;
+    return -1;
+}
+
+static const struct vnode_ops keyevent_dev_ops = {
+    .open = console_open,
+    .read = keyevent_read,
+    .write = keyevent_write,
+    .close = console_close,
+};
+
 static int null_open(vnode_t *vn)   { (void)vn; return 0; }
 static int null_close(vnode_t *vn)  { (void)vn; return 0; }
 
@@ -287,6 +308,7 @@ void devfs_init(void) {
 
     devfs_register("serial",  &serial_dev_ops,  0);
     devfs_register("console", &console_dev_ops, 0);
+    devfs_register("keyevent", &keyevent_dev_ops, 0);
     devfs_register("null",    &null_dev_ops,    0);
     vfs_mount("/dev", &devfs_ops);
 }

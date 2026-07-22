@@ -1,0 +1,17 @@
+Game Boy for BuzzOS
+
+This application uses the MIT-licensed binjgb emulator core and supports
+original Game Boy (DMG) and Game Boy Color (CGB) ROMs. Game data is not included.
+
+Place a legally obtained .gb ROM in /fs/games/gameboy/. The emulator opens
+game.gb first, or otherwise the first .gb file it finds. Battery-backed
+cartridge RAM is saved by ROM name in /fs/games/gameboy/ as a .sav file.
+
+Controls:
+  Arrow keys  D-pad
+  Z           B
+  X           A
+  Enter       Start
+  Backspace   Select
+Maximize the window from the desktop to play full-screen. Game audio uses the
+BuzzOS AC97 PCM driver.

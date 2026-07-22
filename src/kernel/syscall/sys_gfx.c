@@ -63,6 +63,23 @@ int sys_fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t pixels_
     return fb_blit8((int)x, (int)y, (int)w, (int)h, pixels);
 }
 
+int sys_fb_blit_stride(uint32_t x, uint32_t y, uint32_t packed_wh,
+                       uint32_t pixels_arg, uint32_t stride) {
+    struct gfx_info info;
+    uint32_t w = packed_wh & 0xFFFFu, h = packed_wh >> 16;
+    if (!w || !h || stride < w) return -1;
+    fb_get_info(&info);
+    if (x >= info.width || y >= info.height ||
+        w > info.width || h > info.height ||
+        x + w > info.width || y + h > info.height)
+        return -1;
+    uint32_t bytes = (h - 1u) * stride + w;
+    if (bytes < w || !user_range_ok(pixels_arg, bytes)) return -1;
+    const uint8_t *pixels = (const uint8_t *)(uintptr_t)pixels_arg;
+    return fb_blit8_stride((int)x, (int)y, (int)w, (int)h,
+                           pixels, (int)stride);
+}
+
 int sys_mouse_get(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
     (void)b; (void)c; (void)d; (void)e;
     if (!user_range_writable(out_arg, sizeof(struct mouse_state)))

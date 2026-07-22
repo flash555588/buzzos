@@ -3,21 +3,19 @@
 #include "irq.h"
 #include "pmm.h"
 #include "serial.h"
+#include "timer.h"
 
 enum {
     PCI_ADDR = 0xCF8, PCI_DATA = 0xCFC,
     AC97_VENDOR = 0x8086, AC97_DEVICE = 0x2415,
     DESCRIPTORS = 32, ACTIVE_DESCRIPTORS = 4,
-    OUTPUT_RATE = 44100, UPSAMPLE = 4,
-    FRAMES_PER_BUFFER = 512, FIFO_BYTES = 4096,
-    /* Keep one source-side reserve block after priming DMA.  Doom submits
-     * 315 samples at a time, while each descriptor consumes 128; without a
-     * reserve an IRQ can land between two game tics and bake silence into a
-     * buffer that will only play later. */
-    SOURCE_RESERVE = 256,
-    START_THRESHOLD = ACTIVE_DESCRIPTORS * FRAMES_PER_BUFFER / UPSAMPLE +
-                      SOURCE_RESERVE,
+    OUTPUT_RATE = 44100,
+    FRAMES_PER_BUFFER = 512, FIFO_BYTES = 8192,
 };
+
+/* Enable temporarily when diagnosing DMA/FIFO behaviour.  Register polling
+ * and serial formatting do not belong in the normal real-time audio path. */
+#define AC97_DIAGNOSTICS 0
 
 struct ac97_desc {
     uint32_t address;
@@ -33,6 +31,44 @@ static uint8_t irq_line;
 static int ready, playing;
 static int16_t current_sample;
 static uint8_t repeat_left;
+static uint32_t input_rate = 11025;
+static uint8_t input_upsample = 4;
+#if AC97_DIAGNOSTICS
+static uint32_t stat_since, stat_underruns, stat_irqs, stat_fifo_errors;
+static uint32_t stat_restarts, stat_refills, stat_written;
+
+static void report_stats(void) {
+    uint32_t now = timer_ticks();
+    if (!stat_since) stat_since = now;
+    if (now - stat_since < TIMER_HZ * 2u) return;
+    serial_puts("[audiostat] rate="); serial_puthex(input_rate);
+    serial_puts(" fifo="); serial_puthex(fifo_count);
+    serial_puts(" underrun="); serial_puthex(stat_underruns);
+    serial_puts(" irq="); serial_puthex(stat_irqs);
+    serial_puts(" refill="); serial_puthex(stat_refills);
+    serial_puts(" written="); serial_puthex(stat_written);
+    serial_puts(" fifoerr="); serial_puthex(stat_fifo_errors);
+    serial_puts(" restart="); serial_puthex(stat_restarts);
+    serial_puts(" codec="); serial_puthex(inw(nam + 0x2C));
+    serial_puts(" sr="); serial_puthex(inw(nabm + 0x16));
+    serial_puts(" civ="); serial_puthex(inb(nabm + 0x14));
+    serial_puts(" lvi="); serial_puthex(inb(nabm + 0x15));
+    serial_puts(" picb="); serial_puthex(inw(nabm + 0x18));
+    serial_puts("\n");
+    stat_since = now;
+    stat_underruns = stat_irqs = stat_fifo_errors = 0;
+    stat_restarts = stat_refills = stat_written = 0;
+}
+#define AUDIO_STAT(expr) do { expr; } while (0)
+#else
+#define AUDIO_STAT(expr) do { } while (0)
+#endif
+
+static uint32_t start_threshold(void) {
+    /* About 46 ms already staged in DMA plus 31 ms left in the source FIFO. */
+    return ACTIVE_DESCRIPTORS * FRAMES_PER_BUFFER / input_upsample +
+           (input_rate + 31u) / 32u;
+}
 
 static uint32_t pci_read(uint8_t dev, uint8_t fn, uint8_t reg) {
     outl(PCI_ADDR, 0x80000000u | ((uint32_t)dev << 11) |
@@ -71,14 +107,44 @@ static uint32_t fill_buffer(uint32_t index) {
                 source_samples++;
             } else {
                 current_sample = 0;
+                AUDIO_STAT(stat_underruns++);
             }
-            repeat_left = UPSAMPLE;
+            repeat_left = input_upsample;
         }
         dst[frame * 2u] = current_sample;
         dst[frame * 2u + 1u] = current_sample;
         repeat_left--;
     }
     return source_samples;
+}
+
+/* Maintain a short hardware DMA window from the producer's write path.  AC97
+ * still transfers samples autonomously; only descriptor retirement is polled.
+ * This deliberately avoids routing the shared PCI IRQ through the young IRQ
+ * return path, where a bad first IRQ used to corrupt the saved iret frame. */
+static void reconcile_dma_locked(void) {
+    if (!playing) return;
+    uint16_t status = inw(nabm + 0x16);
+    uint8_t civ = inb(nabm + 0x14) & (DESCRIPTORS - 1u);
+    uint8_t lvi = inb(nabm + 0x15) & (DESCRIPTORS - 1u);
+    uint8_t queued = (status & 0x01u) ? 0u :
+        (uint8_t)(((lvi - civ) & (DESCRIPTORS - 1u)) + 1u);
+    if (queued > ACTIVE_DESCRIPTORS) return;
+    while (queued < ACTIVE_DESCRIPTORS) {
+        uint8_t index = (uint8_t)((lvi + 1u) & (DESCRIPTORS - 1u));
+        fill_buffer(index);
+        AUDIO_STAT(stat_refills++);
+        outb(nabm + 0x15, index);
+        lvi = index;
+        queued++;
+    }
+    if (status & 0x1Cu)
+        outw(nabm + 0x16, status & 0x1Cu);
+    uint8_t control = inb(nabm + 0x1B);
+    if (!(control & 0x01u)) {
+        AUDIO_STAT(stat_restarts++);
+        outb(nabm + 0x1B, 0x01u);
+    }
 }
 
 int ac97_init(void) {
@@ -101,7 +167,8 @@ int ac97_init(void) {
         return -1;
     }
     uint32_t cmd = pci_read(dev, fn, 0x04);
-    pci_write(dev, fn, 0x04, cmd | 0x00000005u); /* I/O + bus master */
+    /* I/O + bus master, with legacy PCI INTx disabled. */
+    pci_write(dev, fn, 0x04, cmd | 0x00000405u);
 
     uintptr_t bdl_page = pmm_alloc_pages(1);
     if (!bdl_page) return -1;
@@ -112,7 +179,9 @@ int ac97_init(void) {
         buffers[i] = (int16_t *)page;
         bdl[i].address = (uint32_t)page;
         /* Length is in 16-bit samples: frames x two channels. */
-        bdl[i].control_length = 0x80000000u | (FRAMES_PER_BUFFER * 2u);
+        /* Do not request per-descriptor completion interrupts.  The producer
+         * advances LVI while the bus-master engine consumes this ring. */
+        bdl[i].control_length = FRAMES_PER_BUFFER * 2u;
         for (uint32_t j = 0; j < FRAMES_PER_BUFFER * 2u; j++) buffers[i][j] = 0;
     }
 
@@ -122,10 +191,8 @@ int ac97_init(void) {
     outw(nam + 0x02, 0); /* master volume unmuted */
     outw(nam + 0x18, 0); /* PCM volume unmuted */
     outw(nam + 0x2A, inw(nam + 0x2A) | 1u); /* variable rate audio */
-    /* Doom and the user ABI are 11025 Hz unsigned mono.  AC97 emits a
-     * standard 44100 Hz stream, using exact 4x expansion in fill_buffer().
-     * This avoids fractional host resampling and keeps 315 samples exactly
-     * equal to one 35 Hz Doom tic. */
+    /* Hardware always emits standard 44.1 kHz stereo. The source stream is
+     * unsigned mono at a configurable exact divisor of this rate. */
     outw(nam + 0x2C, OUTPUT_RATE);
 
     outb(nabm + 0x1B, 0x02); /* reset PCM-out engine */
@@ -133,11 +200,11 @@ int ac97_init(void) {
     outl(nabm + 0x10, (uint32_t)bdl);
     outw(nabm + 0x16, 0x1Cu);
 
-    /* PCI IRQ11 is slave PIC IRQ3; keep the cascade and IRQ11 enabled. */
-    outb(0x21, (uint8_t)(inb(0x21) & ~(1u << 2)));
-    outb(0xA1, (uint8_t)(inb(0xA1) & ~(1u << 3)));
+    /* Keep PCI IRQ11 masked as a second line of defence.  Descriptor
+     * maintenance is producer-driven; bus-master DMA remains asynchronous. */
+    outb(0xA1, (uint8_t)(inb(0xA1) | (1u << 3)));
     ready = 1;
-    serial_puts("[audio] Intel AC97 44100 Hz output, 11025 Hz PCM input\n");
+    serial_puts("[audio] Intel AC97 44100 Hz output\n");
     return 0;
 }
 
@@ -146,7 +213,7 @@ static void start_playback(void) {
     outl(nabm + 0x10, (uint32_t)bdl);
     outb(nabm + 0x15, ACTIVE_DESCRIPTORS - 1u);
     outw(nabm + 0x16, 0x1Cu);
-    outb(nabm + 0x1B, 0x1Du); /* run + completion/FIFO/LVI interrupts */
+    outb(nabm + 0x1B, 0x01u); /* run, with all AC97 interrupt enables off */
     playing = 1;
     serial_puts("[audio] PCM playback started (AC97 bus master)\n");
 }
@@ -161,44 +228,53 @@ int ac97_write(const uint8_t *data, size_t size) {
         fifo_write = (fifo_write + 1u) & (FIFO_BYTES - 1u);
     }
     fifo_count += (uint32_t)written;
+    AUDIO_STAT(stat_written += (uint32_t)written);
     /* Do not start from the first tiny game-tick write.  Prime the hardware
      * window and retain a small source-side reserve for bursty producers. */
-    if (!playing && fifo_count >= START_THRESHOLD) start_playback();
+    if (!playing && fifo_count >= start_threshold()) start_playback();
+    else if (playing) reconcile_dma_locked();
     irq_restore(flags);
+#if AC97_DIAGNOSTICS
+    /* Serial output is intentionally outside the audio critical section. */
+    report_stats();
+#endif
     return (int)written;
+}
+
+int ac97_set_rate(uint32_t rate) {
+    if (!ready || (rate != 11025u && rate != 22050u && rate != 44100u))
+        return -1;
+    uint32_t flags = irq_save();
+    outb(nabm + 0x1B, 0x00); /* stop PCM-out before replacing stream state */
+    outb(nabm + 0x1B, 0x02);
+    for (uint32_t i = 0; i < 100000u && (inb(nabm + 0x1B) & 0x02u); i++)
+        io_wait();
+    outl(nabm + 0x10, (uint32_t)bdl);
+    outw(nabm + 0x16, 0x1Cu);
+    fifo_read = fifo_write = fifo_count = 0;
+    current_sample = 0;
+    repeat_left = 0;
+    input_rate = rate;
+    input_upsample = (uint8_t)(OUTPUT_RATE / rate);
+    playing = 0;
+    AUDIO_STAT(stat_since = timer_ticks());
+    AUDIO_STAT(stat_underruns = stat_irqs = stat_fifo_errors = 0);
+    AUDIO_STAT(stat_restarts = stat_refills = stat_written = 0);
+    irq_restore(flags);
+    return 0;
+}
+
+void ac97_poll(void) {
+    /* IRQ0 is already running with interrupts disabled.  audio_write() also
+     * excludes interrupts, so this cannot race the FIFO producer. */
+    if (ready && playing)
+        reconcile_dma_locked();
 }
 
 void ac97_irq_handler(void) {
     if (!ready) return;
     uint16_t status = inw(nabm + 0x16);
-    if (!(status & 0x1Cu)) return;
-    /* Restore the complete look-ahead window, even when several completion
-     * IRQs were coalesced while another interrupt or kernel section ran.
-     * CIV is the descriptor currently consumed and LVI is the last valid
-     * descriptor.  The old one-buffer-per-IRQ scheme permanently lost DMA
-     * depth whenever CIV advanced by more than one, causing rare dropouts. */
-    uint8_t civ = inb(nabm + 0x14) & (DESCRIPTORS - 1u);
-    uint8_t lvi = inb(nabm + 0x15) & (DESCRIPTORS - 1u);
-    uint32_t valid = ((uint32_t)lvi - civ) & (DESCRIPTORS - 1u);
-    valid++;
-
-    /* CIV one past LVI represents a drained/halted ring, not 32 queued
-     * buffers in this deliberately short-window design. */
-    if (valid > ACTIVE_DESCRIPTORS)
-        valid = 0;
-
-    while (valid < ACTIVE_DESCRIPTORS) {
-        uint8_t index = valid ? (uint8_t)((lvi + 1u) & (DESCRIPTORS - 1u))
-                              : civ;
-        fill_buffer(index);
-        lvi = index;
-        valid++;
-    }
-    outb(nabm + 0x15, lvi);
-    outw(nabm + 0x16, status & 0x1Cu);
-
-    /* A delayed interrupt can let the engine halt at LVI.  Updating LVI is
-     * sufficient on ICH, but ensure the run bit remains asserted as well. */
-    uint8_t control = inb(nabm + 0x1B);
-    if (!(control & 0x01u)) outb(nabm + 0x1B, control | 0x01u);
+    /* IRQ11 stays masked, but acknowledge a stale status defensively if a
+     * platform happens to deliver the shared line during early bring-up. */
+    if (status & 0x1Cu) outw(nabm + 0x16, status & 0x1Cu);
 }

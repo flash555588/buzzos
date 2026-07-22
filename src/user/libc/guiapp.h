@@ -70,6 +70,7 @@ enum {
     GUIAPP_FRAME_CLIPBOARD = 4,
     GUIAPP_FRAME_EXEC = 5,
     GUIAPP_FRAME_SHARED = 6,
+    GUIAPP_FRAME_SCALED = 7,
 };
 
 struct guiapp_shared_surface {
@@ -89,6 +90,9 @@ int guiapp_parse_args(int argc, char **argv, struct guiapp_ctx *ctx);
 int guiapp_read_event(struct guiapp_ctx *ctx, struct guiapp_event *ev);
 int guiapp_send_frame(struct guiapp_ctx *ctx, const char *title,
                       int width, int height, const uint8_t *pixels);
+int guiapp_send_scaled_frame(struct guiapp_ctx *ctx, const char *title,
+                             int width, int height, const uint8_t *pixels,
+                             int source_width, int source_height);
 int guiapp_send_dirty(struct guiapp_ctx *ctx, const char *title,
                       int width, int height, int x, int y, int dirty_w, int dirty_h,
                       const uint8_t *pixels, int stride);

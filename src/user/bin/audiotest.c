@@ -7,6 +7,7 @@ int main(void) {
     uint32_t phase = 0;
     int total = 0;
 
+    if (audio_config(SAMPLE_RATE) < 0) return 1;
     puts("audiotest: starting 3 second PCM stream");
     for (int block = 0; block < BLOCKS; block++) {
         for (int i = 0; i < BLOCK_SAMPLES; i++) {

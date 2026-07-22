@@ -89,12 +89,14 @@ KERNEL_INCLUDES := \
 	-I$(GENERATED_DIR)
 
 CFLAGS  := --target=i386-none-elf -std=c11 -ffreestanding -fno-builtin \
-	-fno-stack-protector -fno-pic -mno-sse -mno-mmx -O2 -Wall -Wextra \
+	-fno-stack-protector -fno-pic -march=pentium3 -mtune=generic \
+	-fomit-frame-pointer -mno-sse -mno-mmx -O2 -Wall -Wextra \
 	$(KERNEL_INCLUDES)
 
 # User programs may use x87 and SSE; the scheduler preserves full FXSAVE state.
 UCFLAGS := --target=i386-none-elf -std=c11 -ffreestanding -fno-builtin \
-	-fno-stack-protector -fno-pic -mno-sse -mno-mmx -mfpmath=387 -O2 \
+	-fno-stack-protector -fno-pic -march=pentium3 -mtune=generic \
+	-fomit-frame-pointer -mno-sse -mno-mmx -mfpmath=387 -O3 \
 	-Wall -Wextra -Isrc/user/libc
 LDFLAGS := -m elf_i386 -T linker.ld -nostdlib
 
@@ -117,7 +119,7 @@ NETSURF_PORT_OBJ := $(BUILD)/user/netsurf_buzzos_platform.o
 NSHTMLTEST_ELF := $(BUILD)/user/nshtmltest.elf
 NETSURF_ELF := $(BUILD)/user/netsurf.elf
 NSMONKEY_ELF := $(BUILD)/user/nsmonkey.elf
-GUI_APP_NAMES := textedit paint calculator filemanager browser doom music
+GUI_APP_NAMES := textedit paint calculator filemanager browser doom music gameboy
 GUI_APP_ELFS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).elf)
 GUI_APP_SRCS := $(foreach app,$(GUI_APP_NAMES),src/user/bin/$(app).c)
 GUI_APP_OBJS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).o)
@@ -128,6 +130,12 @@ LODEPNG_FLAGS := -I$(LODEPNG_DIR) -DLODEPNG_NO_COMPILE_DISK \
 	-DLODEPNG_NO_COMPILE_ALLOCATORS
 DOOM_DIR := src/user/third_party/doomgeneric/doomgeneric
 DOOM_SRCS := $(wildcard $(DOOM_DIR)/*.c $(DOOM_DIR)/*.h) src/user/bin/doom.c src/user/bin/doom_audio.c tools/build-doom.ps1
+BINJGB_DIR := src/user/third_party/binjgb/src
+BINJGB_FLAGS := -I$(BINJGB_DIR) -include stdbool.h -DNDEBUG \
+	-DBINJGB_BUZZOS_INDEXED_COLOR -O3 \
+	-fomit-frame-pointer -flto \
+	-Wno-unused-function -Wno-unused-variable -Wno-unused-parameter
+BINJGB_OBJS := $(BUILD)/user/binjgb_common.o $(BUILD)/user/binjgb_emulator.o
 DEMO_WAV := $(BUILD)/assets/buzzos-demo.wav
 USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(GUI_APP_ELFS)
 USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
@@ -142,7 +150,7 @@ FONT_H := src/kernel/drv/font_builtin.h
 UNICODE_FONT_H := src/kernel/drv/font_unicode_data.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
-.PHONY: all clean help doctor run run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke gui-smoke report verify image-reset-fs new-app doom-install
+.PHONY: all clean help doctor run run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke gui-smoke report verify image-reset-fs new-app doom-install gameboy-install
 
 # These objects are prerequisites of pattern-built user ELFs, not disposable
 # intermediates. Keeping them makes source timestamp changes rebuild reliably.
@@ -151,13 +159,17 @@ GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).ap
 	$(BUILD)/user/faulttest.o $(BUILD)/user/socketleak.o $(BUILD)/user/heaptest.o \
 	$(BUILD)/user/audiotest.o \
 	$(BUILD)/user/nsporttest.o $(NETSURF_PORT_OBJ) \
-	$(LODEPNG_OBJ)
+	$(LODEPNG_OBJ) $(BINJGB_OBJS)
 
 all: $(IMAGE)
 
 doom-install: $(IMAGE)
 	powershell -NoProfile -ExecutionPolicy Bypass -File tools/fetch-doom-shareware.ps1 -Output build/downloads/doom1.wad
 	$(PYTHON) tools/install_doom_wad.py --image $(IMAGE) --wad build/downloads/doom1.wad
+	$(PYTHON) tools/check_minifs.py --image $(IMAGE)
+
+gameboy-install: $(IMAGE)
+	$(PYTHON) tools/install_gameboy_rom.py --image $(IMAGE) --rom "$(ROM)"
 	$(PYTHON) tools/check_minifs.py --image $(IMAGE)
 
 help:
@@ -312,6 +324,23 @@ $(BUILD)/user/doom.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/
 		$(DOOM_SRCS) $(BUILD)/user/user.ld | $(BUILD)/user
 	powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-doom.ps1 -Output $@
 
+$(BUILD)/user/binjgb_common.o: $(BINJGB_DIR)/common.c $(BINJGB_DIR)/common.h $(BINJGB_DIR)/memory.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) $(BINJGB_FLAGS) -c $< -o $@
+
+$(BUILD)/user/binjgb_emulator.o: $(BINJGB_DIR)/emulator.c $(BINJGB_DIR)/emulator.h \
+		$(BINJGB_DIR)/common.h $(BINJGB_DIR)/builtin-palettes.def | $(BUILD)/user
+	$(CC) $(UCFLAGS) $(BINJGB_FLAGS) -c $< -o $@
+
+$(BUILD)/user/gameboy.o: src/user/bin/gameboy.c $(USER_HEADERS) $(BINJGB_DIR)/emulator.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) $(BINJGB_FLAGS) -c $< -o $@
+
+$(BUILD)/user/gameboy.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
+		$(BUILD)/user/gameboy.o $(BINJGB_OBJS) $(BUILD)/user/user.ld | $(BUILD)/user
+	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
+		$(BUILD)/user/gameboy.o $(BINJGB_OBJS)
+	$(OBJCOPY) --strip-sections $@
+
 $(NSPORTTEST_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		$(BUILD)/user/nsporttest.o $(NETSURF_PORT_OBJ) $(BUILD)/user/user.ld | $(BUILD)/user
 	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
@@ -392,11 +421,11 @@ doctor:
 	$(PYTHON) tools/doctor.py --python "$(PYTHON)" --make "$(MAKE)" --qemu "$(QEMU)"
 
 run: $(IMAGE)
-	$(QEMU) -cpu max -m 256 -drive format=raw,file=$(IMAGE) -serial stdio -no-reboot -vga std -audiodev dsound,id=audio0 -device AC97,audiodev=audio0 -netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
+	$(QEMU) -accel tcg,tb-size=512 -cpu max -m 256 -drive format=raw,file=$(IMAGE) -serial stdio -no-reboot -vga std -audiodev dsound,id=audio0 -device AC97,audiodev=audio0 -netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
 
 run-current:
 	powershell -NoProfile -Command "if (!(Test-Path '$(IMAGE)')) { throw '$(IMAGE) does not exist. Run make first.' }"
-	$(QEMU) -cpu max -m 256 -drive format=raw,file=$(IMAGE) -serial stdio -no-reboot -vga std -audiodev dsound,id=audio0 -device AC97,audiodev=audio0 -netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
+	$(QEMU) -accel tcg,tb-size=512 -cpu max -m 256 -drive format=raw,file=$(IMAGE) -serial stdio -no-reboot -vga std -audiodev dsound,id=audio0 -device AC97,audiodev=audio0 -netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
 
 run-local:
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-local.ps1 -Qemu "$(QEMU)"

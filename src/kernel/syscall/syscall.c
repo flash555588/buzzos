@@ -115,5 +115,7 @@ void syscall_init(void) {
     syscall_table[SYS_SHM_MAP] = sys_shm_map;
     syscall_table[SYS_SHM_UNMAP] = sys_shm_unmap;
     syscall_table[SYS_AUDIO_WRITE] = sys_audio_write;
+    syscall_table[SYS_AUDIO_CONFIG] = sys_audio_config;
+    syscall_table[SYS_FB_BLIT_STRIDE] = sys_fb_blit_stride;
     serial_puts("[syscall] VFS-backed syscalls ready\n");
 }

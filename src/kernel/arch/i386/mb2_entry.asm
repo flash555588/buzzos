@@ -2,6 +2,7 @@ bits 32
 
 global _start
 extern kernel_main
+extern __boot_stack_top
 
 section .multiboot
 align 8
@@ -29,7 +30,8 @@ mb2_header_end:
 section .text.entry
 _start:
     cli
-    mov esp, 0x700000
+    mov esp, __boot_stack_top
+    xor ebp, ebp
     push ebx
     push eax
     call kernel_main

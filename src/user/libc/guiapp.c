@@ -108,6 +108,37 @@ int guiapp_send_frame(struct guiapp_ctx *ctx, const char *title,
     return publish_frame(ctx, title, width, height, pixels, width);
 }
 
+int guiapp_send_scaled_frame(struct guiapp_ctx *ctx, const char *title,
+                             int width, int height, const uint8_t *pixels,
+                             int source_width, int source_height) {
+    struct guiapp_frame frame;
+    if (!ctx || !ctx->shared || !pixels || width <= 0 || height <= 0 ||
+        source_width <= 0 || source_height <= 0 ||
+        source_width > GUIAPP_MAX_W || source_height > GUIAPP_MAX_H)
+        return -1;
+    uint32_t front = ctx->shared->front, reader = ctx->shared->reader;
+    int index = 0;
+    while ((uint32_t)index == front || (uint32_t)index == reader) index++;
+    if (index >= GUIAPP_SHARED_BUFFERS)
+        index = (int)((front + 1u) % GUIAPP_SHARED_BUFFERS);
+    uint8_t *dst = shared_buffer(ctx, index);
+    for (int y = 0; y < source_height; y++)
+        memcpy(dst + y * source_width, pixels + y * source_width,
+               (size_t)source_width);
+    __sync_synchronize();
+    ctx->shared->front = (uint32_t)index;
+    ctx->shared->sequence++;
+    __sync_synchronize();
+    init_frame(&frame, GUIAPP_FRAME_SCALED);
+    frame.width = width > GUIAPP_MAX_W ? GUIAPP_MAX_W : width;
+    frame.height = height > GUIAPP_MAX_H ? GUIAPP_MAX_H : height;
+    frame.dirty_w = source_width;
+    frame.dirty_h = source_height;
+    frame.buffer_index = index;
+    copy_field(frame.title, title, GUIAPP_TITLE_MAX);
+    return write_full(ctx->frame_fd, &frame, (int)sizeof(frame));
+}
+
 int guiapp_send_dirty(struct guiapp_ctx *ctx, const char *title,
                       int width, int height, int x, int y, int dirty_w, int dirty_h,
                       const uint8_t *pixels, int stride) {

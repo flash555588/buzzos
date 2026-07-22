@@ -137,7 +137,8 @@ int  futex_wake(int *addr, int count);
 int  shm_create(size_t size, struct shm_mapping *mapping);
 int  shm_map(uint32_t token, struct shm_mapping *mapping);
 int  shm_unmap(uint32_t token);
-/* Fixed-format system PCM stream: 11025 Hz, unsigned 8-bit, mono. */
+/* Unsigned 8-bit mono PCM. Select 11025, 22050 or 44100 Hz before writing. */
+int  audio_config(unsigned int sample_rate);
 int  audio_write(const uint8_t *samples, size_t count);
 int  socket(int domain, int type, int protocol);
 int  bind(int sd, const struct sockaddr_in *addr, size_t addrlen);
@@ -158,6 +159,8 @@ int  gfx_putpixel(int x, int y, int color);
 int  gfx_fill_rect(int x, int y, int w, int h, int color);
 int  gfx_text(int x, int y, const char *s, int fg, int bg);
 int  fb_blit(int x, int y, int w, int h, const uint8_t *pixels);
+int  fb_blit_stride(int x, int y, int w, int h, const uint8_t *pixels,
+                    int stride);
 int  mouse_get(struct mouse_state *out);
 int  gfx_info(struct gfx_info *out);
 int  font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap);

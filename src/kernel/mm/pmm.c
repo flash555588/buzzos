@@ -86,7 +86,7 @@ static size_t count_free_pages(void) {
 /*  Initialise                                                         */
 /* ------------------------------------------------------------------ */
 
-extern uint8_t __kernel_start, __bss_end;   /* kernel image reservation */
+extern uint8_t __kernel_start, __kernel_end; /* image plus bootstrap stack */
 
 void pmm_init(void) {
     serial_puts("[pmm] scanning E820 map...\n");
@@ -115,15 +115,11 @@ void pmm_init(void) {
         }
     }
 
-    /* Reserve kernel image, including .bss where the PMM bitmap lives. */
+    /* Reserve the complete kernel allocation, including .bss and the
+     * linker-placed bootstrap/idle stack that follows it. */
     uintptr_t kernel_start = (uintptr_t)&__kernel_start;
-    uintptr_t kernel_end   = (uintptr_t)&__bss_end;
+    uintptr_t kernel_end   = (uintptr_t)&__kernel_end;
     mark_range(kernel_start, kernel_end - kernel_start, 1);
-
-    /* boot.asm enters the kernel on a stack ending at 0x700000. Task 0 keeps
-     * using that stack, so PMM must never hand these pages to user mappings or
-     * later kernel stacks. */
-    mark_range(0x006F0000, 0x00010000, 1);
 
     /* Reserve first 4 KiB (IVT / BDA) */
     mark_range(0, 0x1000, 1);

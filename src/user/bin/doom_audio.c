@@ -39,7 +39,7 @@ static int buzz_get_lump(sfxinfo_t *sfx) {
 static boolean buzz_sound_init(boolean prefix) {
     use_prefix = prefix;
     memset(channels, 0, sizeof(channels));
-    return true;
+    return audio_config(MIX_RATE) == 0;
 }
 
 static void buzz_sound_shutdown(void) {

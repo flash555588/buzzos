@@ -121,6 +121,7 @@ int main(int argc, char **argv) {
     struct guiapp_ctx ctx;
     struct guiapp_event ev;
     if (guiapp_parse_args(argc, argv, &ctx) < 0) return 1;
+    if (audio_config(11025) < 0) return 1;
     (void)load_sample();
     if (samples) {
         puts("music: playing /share/buzzos-demo.wav");
