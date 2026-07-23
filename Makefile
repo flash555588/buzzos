@@ -246,7 +246,7 @@ $(OBJDIR)/core/elf.o: src/kernel/core/elf.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/arch/i386/paging.o: src/kernel/arch/i386/paging.h src/kernel/mm/pmm.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/arch/i386/user.o: src/kernel/arch/i386/user.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/mm/pmm.o: src/kernel/mm/pmm.h
-$(OBJDIR)/drv/fb.o: $(FONT_H) src/kernel/drv/font_unicode.h
+$(OBJDIR)/drv/fb.o: $(FONT_H) src/kernel/drv/font_unicode.h src/kernel/mm/pmm.h
 $(OBJDIR)/drv/font_unicode.o: src/kernel/drv/font_unicode.h $(UNICODE_FONT_H)
 
 $(FONT_H): tools/gen_kernel_font.ps1

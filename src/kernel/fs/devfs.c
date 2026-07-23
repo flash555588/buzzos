@@ -90,10 +90,9 @@ static int console_read(vnode_t *vn, void *buf, size_t count) {
 static int console_write(vnode_t *vn, const void *buf, size_t count) {
     (void)vn;
     const uint8_t *p = (const uint8_t *)buf;
-    for (size_t i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++)
         serial_putc((char)p[i]);
-        fb_console_putc((char)p[i]);
-    }
+    fb_console_write((const char *)p, count);
     return (int)count;
 }
 

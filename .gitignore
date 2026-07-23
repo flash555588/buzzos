@@ -12,3 +12,7 @@ __pycache__/
 /*.gbc
 /*.gba
 /*.sav
+
+# User-supplied music is installed into MiniFS, not redistributed from Git.
+/assets/music/
+/*.mp3

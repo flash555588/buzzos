@@ -3,6 +3,7 @@
 #include "font_builtin.h"
 #include "font_unicode.h"
 #include "paging.h"
+#include "pmm.h"
 
 enum {
     FB_FONT_W = KFONT_WIDTH,
@@ -29,6 +30,17 @@ static int ansi_seen_digit;
 
 static char console_chars[FB_CONSOLE_MAX_ROWS][FB_CONSOLE_MAX_COLS];
 static uint8_t console_colors[FB_CONSOLE_MAX_ROWS][FB_CONSOLE_MAX_COLS];
+
+/*
+ * Reading a write-combining framebuffer is extremely slow on real hardware
+ * and under VMware.  Keep a normal-RAM mirror for the boot console so that
+ * scrolling never has to read pixels back from video memory.
+ */
+static uint8_t *console_shadow;
+static uint32_t console_shadow_size;
+static int console_shadow_capture;
+static int console_write_depth;
+static int console_scroll_pending;
 
 static uint32_t palette_lut[256];
 static int palette_lut_ready;
@@ -74,6 +86,29 @@ static uint32_t palette_rgb(uint8_t index) {
     return palette_lut[index];
 }
 
+static void console_shadow_store_rgb(int x, int y, uint32_t rgb) {
+    if (!console_shadow || !console_shadow_capture ||
+        x < 0 || y < 0 ||
+        x >= (int)fb_info.width || y >= (int)fb_info.height)
+        return;
+    uint8_t *p = console_shadow + (uint32_t)y * fb_info.pitch;
+    if (fb_info.bpp == 32) {
+        ((uint32_t *)p)[x] = rgb;
+    } else if (fb_info.bpp == 24) {
+        p += (uint32_t)x * 3u;
+        p[0] = (uint8_t)(rgb & 0xFFu);
+        p[1] = (uint8_t)((rgb >> 8) & 0xFFu);
+        p[2] = (uint8_t)((rgb >> 16) & 0xFFu);
+    } else if (fb_info.bpp == 16) {
+        uint16_t r = (uint16_t)((rgb >> 19) & 0x1Fu);
+        uint16_t g = (uint16_t)((rgb >> 10) & 0x3Fu);
+        uint16_t b = (uint16_t)((rgb >> 3) & 0x1Fu);
+        ((uint16_t *)p)[x] = (uint16_t)((r << 11) | (g << 5) | b);
+    } else {
+        p[x] = (uint8_t)(rgb & 0xFFu);
+    }
+}
+
 static void fb_store_rgb(int x, int y, uint32_t rgb) {
     if (!fb_ready || x < 0 || y < 0 ||
         x >= (int)fb_info.width || y >= (int)fb_info.height)
@@ -94,6 +129,7 @@ static void fb_store_rgb(int x, int y, uint32_t rgb) {
     } else {
         p[x] = (uint8_t)(rgb & 0xFFu);
     }
+    console_shadow_store_rgb(x, y, rgb);
 }
 
 static uint32_t blend_rgb(uint32_t fg, uint32_t bg, uint32_t alpha) {
@@ -192,11 +228,13 @@ static void draw_cell(uint16_t r, uint16_t c) {
         return;
     int x = c * FB_CONSOLE_FONT_W;
     int y = r * FB_CONSOLE_FONT_H;
+    console_shadow_capture++;
     fb_fill_rect(x, y, FB_CONSOLE_FONT_W, FB_CONSOLE_FONT_H,
                  console_colors[r][c] >> 4);
     draw_glyph(x, y, console_chars[r][c],
                console_colors[r][c] & 0x0F,
                console_colors[r][c] >> 4);
+    console_shadow_capture--;
 }
 
 static void console_sanitize(void) {
@@ -210,12 +248,87 @@ static void console_sanitize(void) {
         console_row = console_rows - 1;
 }
 
+static void console_shadow_init(void) {
+    if (!fb_ready || console_shadow || !fb_info.pitch || !fb_info.height)
+        return;
+    uint64_t bytes = (uint64_t)fb_info.pitch * fb_info.height;
+    if (bytes == 0 || bytes > KERNEL_FB_SIZE)
+        return;
+    size_t pages = ((size_t)bytes + PAGE_SIZE - 1u) / PAGE_SIZE;
+    uintptr_t address = pmm_alloc_pages(pages);
+    if (!address)
+        return;
+    console_shadow = (uint8_t *)address;
+    console_shadow_size = (uint32_t)bytes;
+    for (size_t i = 0; i < pages * PAGE_SIZE; i++)
+        console_shadow[i] = 0;
+}
+
+static void console_shadow_flush(void) {
+    if (!fb_ready || !console_shadow || !console_shadow_size)
+        return;
+    uint32_t words = console_shadow_size / sizeof(uint32_t);
+    volatile uint32_t *dst32 = (volatile uint32_t *)fb_mem;
+    const uint32_t *src32 = (const uint32_t *)console_shadow;
+    uint32_t i = 0;
+    for (; i + 4u <= words; i += 4u) {
+        dst32[i] = src32[i];
+        dst32[i + 1u] = src32[i + 1u];
+        dst32[i + 2u] = src32[i + 2u];
+        dst32[i + 3u] = src32[i + 3u];
+    }
+    for (; i < words; i++)
+        dst32[i] = src32[i];
+    for (uint32_t byte = words * sizeof(uint32_t);
+         byte < console_shadow_size; byte++)
+        fb_mem[byte] = console_shadow[byte];
+    __asm__ volatile("sfence" ::: "memory");
+}
+
+static void console_shadow_fill_rows(uint32_t first_y, uint32_t rows,
+                                     uint32_t rgb) {
+    if (!console_shadow || first_y >= fb_info.height)
+        return;
+    if (rows > fb_info.height - first_y)
+        rows = fb_info.height - first_y;
+    int saved_capture = console_shadow_capture;
+    console_shadow_capture = 1;
+    for (uint32_t y = first_y; y < first_y + rows; y++)
+        for (uint32_t x = 0; x < fb_info.width; x++)
+            console_shadow_store_rgb((int)x, (int)y, rgb);
+    console_shadow_capture = saved_capture;
+}
+
 static void fb_scroll_pixels_up(uint32_t pixels) {
     if (!fb_ready || pixels == 0 || pixels >= fb_info.height)
         return;
     uint32_t src_y = pixels;
     uint32_t copy_rows = fb_info.height - pixels;
     uint32_t bytes = fb_info.pitch;
+    if (console_shadow) {
+        uint32_t src_offset = src_y * bytes;
+        uint32_t copy_bytes = copy_rows * bytes;
+        uint32_t words = copy_bytes / sizeof(uint32_t);
+        uint32_t *dst32 = (uint32_t *)console_shadow;
+        const uint32_t *src32 =
+            (const uint32_t *)(console_shadow + src_offset);
+        uint32_t i = 0;
+        for (; i < words; i++)
+            dst32[i] = src32[i];
+        for (uint32_t byte = words * sizeof(uint32_t);
+             byte < copy_bytes; byte++)
+            console_shadow[byte] = console_shadow[src_offset + byte];
+        console_shadow_fill_rows(copy_rows, pixels,
+                                 palette_rgb(console_color >> 4));
+        if (console_write_depth > 0) {
+            console_scroll_pending = 1;
+        } else {
+            console_shadow_flush();
+        }
+        return;
+    }
+
+    /* Allocation failure fallback.  This is correct but slow on WC memory. */
     for (uint32_t y = 0; y < copy_rows; y++) {
         volatile uint8_t *dst = fb_mem + y * fb_info.pitch;
         volatile uint8_t *src = fb_mem + (src_y + y) * fb_info.pitch;
@@ -374,6 +487,7 @@ void fb_init(void) {
     if (console_rows == 0)
         console_rows = 1;
     ansi_reset();
+    console_shadow_init();
     fb_console_clear();
 }
 
@@ -414,15 +528,28 @@ int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
         for (int yy = 0; yy < h; yy++) {
             volatile uint32_t *dst = (volatile uint32_t *)(fb_mem +
                 (uint32_t)(y + yy) * fb_info.pitch) + x;
+            uint32_t *shadow = console_shadow && console_shadow_capture
+                ? (uint32_t *)(console_shadow +
+                    (uint32_t)(y + yy) * fb_info.pitch) + x
+                : NULL;
             int xx = 0;
             for (; xx + 4 <= w; xx += 4) {
                 dst[xx] = rgb;
                 dst[xx + 1] = rgb;
                 dst[xx + 2] = rgb;
                 dst[xx + 3] = rgb;
+                if (shadow) {
+                    shadow[xx] = rgb;
+                    shadow[xx + 1] = rgb;
+                    shadow[xx + 2] = rgb;
+                    shadow[xx + 3] = rgb;
+                }
             }
-            for (; xx < w; xx++)
+            for (; xx < w; xx++) {
                 dst[xx] = rgb;
+                if (shadow)
+                    shadow[xx] = rgb;
+            }
         }
         return 0;
     }
@@ -492,7 +619,9 @@ int fb_text(int x, int y, const char *s, uint8_t fg, int bg) {
 
 void fb_console_clear(void) {
     console_sanitize();
+    console_shadow_capture++;
     fb_clear(0);
+    console_shadow_capture--;
     for (uint16_t r = 0; r < console_rows; r++) {
         for (uint16_t c = 0; c < console_cols; c++) {
             console_chars[r][c] = ' ';
@@ -529,16 +658,33 @@ void fb_console_putc(char c) {
     console_colors[row][col] = console_color;
     int x = (int)col * FB_CONSOLE_FONT_W;
     int y = (int)row * FB_CONSOLE_FONT_H;
+    console_shadow_capture++;
     fb_fill_rect(x, y, FB_CONSOLE_FONT_W, FB_CONSOLE_FONT_H,
                  console_color >> 4);
     draw_glyph(x, y, c, console_color & 0x0F, console_color >> 4);
+    console_shadow_capture--;
     if (++console_col >= console_cols)
         console_newline();
 }
 
 void fb_console_puts(const char *s) {
-    while (s && *s)
-        fb_console_putc(*s++);
+    size_t count = 0;
+    while (s && s[count])
+        count++;
+    fb_console_write(s, count);
+}
+
+void fb_console_write(const char *s, size_t count) {
+    if (!s || count == 0)
+        return;
+    console_write_depth++;
+    for (size_t i = 0; i < count; i++)
+        fb_console_putc(s[i]);
+    console_write_depth--;
+    if (console_write_depth == 0 && console_scroll_pending) {
+        console_scroll_pending = 0;
+        console_shadow_flush();
+    }
 }
 
 void fb_console_backspace(void) {

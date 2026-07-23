@@ -1,6 +1,7 @@
 #ifndef BUZZOS_FB_H
 #define BUZZOS_FB_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 struct gfx_info {
@@ -27,6 +28,7 @@ int  fb_text(int x, int y, const char *s, uint8_t fg, int bg);
 void fb_console_clear(void);
 void fb_console_putc(char c);
 void fb_console_puts(const char *s);
+void fb_console_write(const char *s, size_t count);
 void fb_console_backspace(void);
 
 #endif /* BUZZOS_FB_H */
