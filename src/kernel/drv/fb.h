@@ -14,8 +14,8 @@ struct gfx_info {
 void fb_set_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
                         uint32_t pitch, uint32_t bpp);
 void fb_init(void);
-void fb_set_color(uint8_t fg, uint8_t bg);
 void fb_get_info(struct gfx_info *out);
+uint32_t fb_palette_rgb(uint8_t index);
 
 int  fb_clear(uint8_t color);
 int  fb_putpixel(int x, int y, uint8_t color);
@@ -24,11 +24,13 @@ int  fb_blit8(int x, int y, int w, int h, const uint8_t *pixels);
 int  fb_blit8_stride(int x, int y, int w, int h,
                      const uint8_t *pixels, int stride);
 int  fb_text(int x, int y, const char *s, uint8_t fg, int bg);
+int  fb_present_rgb32(int x, int y, int width, int height,
+                      const uint32_t *pixels, int stride);
 
-void fb_console_clear(void);
-void fb_console_putc(char c);
-void fb_console_puts(const char *s);
-void fb_console_write(const char *s, size_t count);
-void fb_console_backspace(void);
+/* Exactly one user process may own the scanout. PID 0 denotes the console. */
+int fb_display_acquire(int pid);
+int fb_display_release(int pid);
+int fb_display_user_allowed(int pid);
+int fb_display_console_active(void);
 
 #endif /* BUZZOS_FB_H */

@@ -1,0 +1,5 @@
+Terminal is a GUI front end for /bin/sh.
+
+Every Terminal window starts an independent shell with its own standard input
+and output pipes. Shell output stays in that window; kernel and application
+diagnostics continue to use the serial device.

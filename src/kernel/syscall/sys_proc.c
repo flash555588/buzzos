@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "console.h"
 #include "exec.h"
+#include "fb.h"
 #include "irq.h"
 #include "paging.h"
 #include "pmm.h"
@@ -61,10 +63,11 @@ static int spawn_proc_common_locked(const char *path, int flags, int argc, const
     int silent = (flags & 1u) ? 1 : 0;
     int inherit_all = (flags & 2u) ? 1 : 0;
     int inherit_stdio = (flags & 4u) ? 1 : 0;
+    int serial_stdio = (flags & 8u) ? 1 : 0;
     int inherit_owner = (inherit_all || inherit_stdio) ? current_fd_owner() : -1;
     return exec_start_file_args_with_fds(
         fd, (size_t)st.st_size, name, silent, argc, argv, inherit_owner,
-        inherit_stdio && !inherit_all);
+        inherit_stdio && !inherit_all, serial_stdio);
 }
 
 int sys_exit(uint32_t code, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
@@ -179,6 +182,7 @@ void syscall_set_heap_start(int task_id, uint32_t start) {
 void syscall_cleanup_process(int task_id) {
     if (task_id < 0 || task_id >= MAX_TASKS)
         return;
+    syscall_process_exited(task_id);
     sys_net_cleanup_owner(task_id);
     shm_cleanup_owner(task_id);
     process_thread_slots[task_id] = 0;
@@ -188,6 +192,13 @@ void syscall_cleanup_process(int task_id) {
         if (thread_infos[i].used && thread_infos[i].owner == task_id)
             thread_infos[i].used = 0;
     }
+}
+
+void syscall_process_exited(int task_id) {
+    if (task_id <= 0 || task_id >= MAX_TASKS)
+        return;
+    if (fb_display_release(task_id) == 0)
+        console_activate(0);
 }
 
 int sys_sbrk(uint32_t increment_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {

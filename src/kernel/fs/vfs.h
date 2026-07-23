@@ -102,6 +102,7 @@ int  vfs_getcwd(char *buf, size_t size);
 void vfs_init(void);
 void vfs_task_reset(int task_id);
 int  vfs_setup_stdio(int task_id, int console_silent);
+int  vfs_setup_serial_stdio(int task_id);
 int  current_fd_owner(void);
 int  vfs_clone_fd_table(int dst_task_id, int src_task_id);
 int  vfs_clone_stdio(int dst_task_id, int src_task_id);

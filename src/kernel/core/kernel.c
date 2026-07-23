@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "console.h"
 #include "exec.h"
 #include "apic.h"
 #include "gdt.h"
@@ -234,7 +235,9 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
         fb_set_framebuffer(boot_fb.addr, boot_fb.width, boot_fb.height,
                            boot_fb.pitch, boot_fb.bpp);
     fb_init();
-    fb_set_color(0x0F, 0x00);
+    if (console_init() < 0)
+        serial_puts("[boot] framebuffer console unavailable\n");
+    console_set_color(0x0F, 0x00);
     serial_puts("[boot] framebuffer init ok\n");
     keyboard_init();
     mouse_init();

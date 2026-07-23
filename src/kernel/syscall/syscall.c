@@ -119,5 +119,7 @@ void syscall_init(void) {
     syscall_table[SYS_FB_BLIT_STRIDE] = sys_fb_blit_stride;
     syscall_table[SYS_AUDIO_QUEUED] = sys_audio_queued;
     syscall_table[SYS_AUDIO_FLUSH] = sys_audio_flush;
+    syscall_table[SYS_GFX_ACQUIRE] = sys_gfx_acquire;
+    syscall_table[SYS_GFX_RELEASE] = sys_gfx_release;
     serial_puts("[syscall] VFS-backed syscalls ready\n");
 }

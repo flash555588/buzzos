@@ -59,6 +59,8 @@ KERNEL_SRCS := \
 	src/kernel/drv/hda.c \
 	src/kernel/drv/ac97.c \
 	src/kernel/drv/font_unicode.c \
+	src/kernel/drv/surface.c \
+	src/kernel/drv/console.c \
 	src/kernel/drv/fb.c \
 	src/kernel/drv/reboot.c \
 	src/kernel/drv/pcnet.c \
@@ -151,7 +153,7 @@ NETSURF_PORT_OBJ := $(BUILD)/user/netsurf_buzzos_platform.o
 NSHTMLTEST_ELF := $(BUILD)/user/nshtmltest.elf
 NETSURF_ELF := $(BUILD)/user/netsurf.elf
 NSMONKEY_ELF := $(BUILD)/user/nsmonkey.elf
-GUI_APP_NAMES := textedit paint calculator filemanager browser doom music gameboy
+GUI_APP_NAMES := terminal textedit paint calculator filemanager browser doom music gameboy
 GUI_APP_ELFS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).elf)
 GUI_APP_SRCS := $(foreach app,$(GUI_APP_NAMES),src/user/bin/$(app).c)
 GUI_APP_OBJS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).o)
@@ -227,17 +229,18 @@ $(OBJDIR)/%.o: src/kernel/%.c | $(OBJDIR)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force (Split-Path '$@' -Parent) | Out-Null"
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJDIR)/core/kernel.o: $(INITRD_H) $(APP_REGISTRY_H)
-$(OBJDIR)/core/exec.o: src/kernel/arch/i386/user.h src/kernel/arch/i386/user_bounds.h
-$(OBJDIR)/syscall/sys_proc.o: src/kernel/arch/i386/user.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/drv/timer.h
-$(OBJDIR)/syscall/syscall.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h
+$(OBJDIR)/core/kernel.o: $(INITRD_H) $(APP_REGISTRY_H) src/kernel/drv/console.h
+$(OBJDIR)/core/exec.o: src/kernel/arch/i386/user.h src/kernel/arch/i386/user_bounds.h src/kernel/core/exec.h src/kernel/fs/vfs.h
+$(OBJDIR)/syscall/sys_proc.o: src/kernel/arch/i386/user.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/drv/timer.h src/kernel/drv/console.h src/kernel/drv/fb.h
+$(OBJDIR)/syscall/syscall.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/syscall/syscall.h
 $(OBJDIR)/syscall/sys_net.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/net/net.h
 $(OBJDIR)/syscall/sys_file.o: src/kernel/fs/minifs/minifs.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h
-$(OBJDIR)/syscall/sys_gfx.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/drv/font_unicode.h
-$(OBJDIR)/sched/task.o: src/kernel/syscall/sys_ipc.h src/kernel/sched/task.h
+$(OBJDIR)/syscall/sys_gfx.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/drv/font_unicode.h src/kernel/drv/console.h src/kernel/drv/fb.h src/kernel/sched/task.h
+$(OBJDIR)/sched/task.o: src/kernel/syscall/sys_ipc.h src/kernel/syscall/syscall.h src/kernel/sched/task.h
 $(OBJDIR)/syscall/sys_ipc.o: src/kernel/syscall/sys_ipc.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/sched/task.h src/kernel/drv/timer.h
 $(OBJDIR)/fs/minifs/minifs.o: src/kernel/fs/minifs/minifs.h src/kernel/sched/task.h
-$(OBJDIR)/fs/vfs.o: src/kernel/sched/task.h
+$(OBJDIR)/fs/vfs.o: src/kernel/sched/task.h src/kernel/fs/vfs.h
+$(OBJDIR)/fs/devfs.o: src/kernel/drv/console.h
 $(OBJDIR)/block/cache.o: src/kernel/sched/task.h
 $(OBJDIR)/fs/procfs.o: src/kernel/mm/pmm.h src/kernel/sched/task.h src/kernel/net/net.h src/kernel/syscall/sys_ipc.h
 $(OBJDIR)/net/net.o: src/kernel/net/net.h src/kernel/net/netdev.h src/kernel/sched/task.h src/kernel/drv/timer.h
@@ -246,7 +249,9 @@ $(OBJDIR)/core/elf.o: src/kernel/core/elf.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/arch/i386/paging.o: src/kernel/arch/i386/paging.h src/kernel/mm/pmm.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/arch/i386/user.o: src/kernel/arch/i386/user.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/mm/pmm.o: src/kernel/mm/pmm.h
-$(OBJDIR)/drv/fb.o: $(FONT_H) src/kernel/drv/font_unicode.h src/kernel/mm/pmm.h
+$(OBJDIR)/drv/surface.o: src/kernel/drv/surface.h
+$(OBJDIR)/drv/console.o: $(FONT_H) src/kernel/drv/console.h src/kernel/drv/fb.h src/kernel/drv/surface.h src/kernel/mm/pmm.h
+$(OBJDIR)/drv/fb.o: $(FONT_H) src/kernel/drv/font_unicode.h src/kernel/drv/fb.h
 $(OBJDIR)/drv/font_unicode.o: src/kernel/drv/font_unicode.h $(UNICODE_FONT_H)
 
 $(FONT_H): tools/gen_kernel_font.ps1

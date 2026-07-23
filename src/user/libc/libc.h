@@ -32,6 +32,8 @@
 #define SPAWN_FLAG_SILENT      1
 #define SPAWN_FLAG_INHERIT_FDS 2
 #define SPAWN_FLAG_INHERIT_STDIO 4
+#define SPAWN_FLAG_SERIAL_STDIO 8
+#define WNOHANG 1
 
 #define AF_INET 2
 #define SOCK_STREAM 1
@@ -166,6 +168,8 @@ int  fb_blit_stride(int x, int y, int w, int h, const uint8_t *pixels,
                     int stride);
 int  mouse_get(struct mouse_state *out);
 int  gfx_info(struct gfx_info *out);
+int  gfx_acquire_display(void);
+int  gfx_release_display(void);
 int  font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap);
 void gfx_set_origin(int x, int y);
 void gfx_get_origin(int *x_out, int *y_out);

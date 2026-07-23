@@ -679,6 +679,22 @@ int vfs_setup_stdio(int task_id, int console_silent) {
     return (in_fd == 0 && out_fd == 1 && err_fd == 2) ? 0 : -1;
 }
 
+int vfs_setup_serial_stdio(int task_id) {
+    if (!valid_fd_owner(task_id))
+        return -1;
+
+    vfs_lock();
+    for (int fd = 0; fd < 3; fd++)
+        if (fd_used[task_id][fd])
+            close_fd_locked(task_id, fd);
+    int in_fd = open_abs_for_owner(task_id, "/dev/null", O_RDONLY);
+    int out_fd = open_abs_for_owner(task_id, "/dev/serial", O_WRONLY);
+    int err_fd = open_abs_for_owner(task_id, "/dev/serial", O_WRONLY);
+    vfs_unlock();
+
+    return (in_fd == 0 && out_fd == 1 && err_fd == 2) ? 0 : -1;
+}
+
 void vfs_ls_path(const char *path, void (*putc)(char)) {
     char abs[128];
 

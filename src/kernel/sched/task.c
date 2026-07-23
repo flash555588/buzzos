@@ -480,7 +480,6 @@ static void process_forget(int pid) {
 }
 
 int task_wait_pid(int pid, int *status, int options) {
-    (void)options;
     int parent = current_task ? task_process_owner(current_task) : 0;
     if (pid == 0)
         pid = -1;
@@ -498,6 +497,8 @@ int task_wait_pid(int pid, int *status, int options) {
             process_forget(child);
             return child;
         }
+        if (options & 1)
+            return 0;
         task_yield();
     }
 }
@@ -545,6 +546,7 @@ int task_kill(int id) {
     if (owner > 0 && owner < MAX_TASKS && procs[owner].used) {
         procs[owner].state = PROC_ZOMBIE;
         procs[owner].exit_code = -1;
+        syscall_process_exited(owner);
     }
 
     if (current_task && current_task->state == TASK_DEAD)
@@ -694,6 +696,7 @@ void task_exit_code(int code) {
         !process_has_live_tasks(owner)) {
         procs[owner].state = PROC_ZOMBIE;
         procs[owner].exit_code = code;
+        syscall_process_exited(owner);
     }
     schedule();
     /* Should never reach here */
@@ -717,6 +720,7 @@ void task_exit_process_code(int code) {
     if (owner > 0 && owner < MAX_TASKS && procs[owner].used) {
         procs[owner].state = PROC_ZOMBIE;
         procs[owner].exit_code = code;
+        syscall_process_exited(owner);
     }
     schedule();
     for (;;) __asm__ volatile("hlt");

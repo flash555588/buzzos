@@ -1,5 +1,5 @@
 #include "keyboard.h"
-#include "fb.h"
+#include "console.h"
 #include "serial.h"
 #include "vfs_internal.h"
 
@@ -87,19 +87,19 @@ static int console_read(vnode_t *vn, void *buf, size_t count) {
     return (int)n;
 }
 
-static int console_write(vnode_t *vn, const void *buf, size_t count) {
+static int console_device_write(vnode_t *vn, const void *buf, size_t count) {
     (void)vn;
     const uint8_t *p = (const uint8_t *)buf;
     for (size_t i = 0; i < count; i++)
         serial_putc((char)p[i]);
-    fb_console_write((const char *)p, count);
+    console_write((const char *)p, count);
     return (int)count;
 }
 
 static const struct vnode_ops console_dev_ops = {
     .open  = console_open,
     .read  = console_read,
-    .write = console_write,
+    .write = console_device_write,
     .close = console_close,
 };
 

@@ -10,11 +10,12 @@ int exec_start_args(const uint8_t *elf_data, size_t elf_size, const char *name,
                     int console_silent, int argc, const char *const argv[]);
 int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const char *name,
                              int console_silent, int argc, const char *const argv[],
-                             int inherit_fd_owner, int inherit_stdio_only);
+                             int inherit_fd_owner, int inherit_stdio_only,
+                             int serial_stdio);
 int exec_start_file_args_with_fds(int fd, size_t elf_size, const char *name,
                                   int console_silent, int argc,
                                   const char *const argv[], int inherit_fd_owner,
-                                  int inherit_stdio_only);
+                                  int inherit_stdio_only, int serial_stdio);
 
 /* Start an ELF process and wait for it to exit. Returns its exit code. */
 int exec_elf(const uint8_t *elf_data, size_t elf_size);

@@ -41,7 +41,8 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_MONOTONIC_MS=55, SYS_REALTIME=56,
        SYS_SHM_CREATE=57, SYS_SHM_MAP=58, SYS_SHM_UNMAP=59,
        SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62,
-       SYS_AUDIO_QUEUED=63, SYS_AUDIO_FLUSH=64 };
+       SYS_AUDIO_QUEUED=63, SYS_AUDIO_FLUSH=64,
+       SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66 };
 
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);
@@ -49,4 +50,5 @@ void syscall_reset_process(int task_id);
 void syscall_set_heap_start(int task_id, uint32_t start);
 void syscall_cleanup_process(int task_id);
 void syscall_release_thread(int task_id);
+void syscall_process_exited(int task_id);
 #endif

@@ -13,16 +13,12 @@ enum {
     KEY_LEFT,
 
     WIN_LAUNCHER = 0,
-    WIN_TERMINAL = 1,
-    WIN_STATUS = 2,
-    WIN_APP_BASE = 3,
+    WIN_STATUS = 1,
+    WIN_APP_BASE = 2,
     MAX_GUI_APPS = 10,
     WIN_COUNT = WIN_APP_BASE + MAX_GUI_APPS,
 
     MAX_APPS = 16,
-    TERM_LINES = 256,
-    TERM_COLS = 128,
-    TERM_LINE_BYTES = TERM_COLS * 4,
     APP_DEFAULT_W = 560,
     APP_DEFAULT_H = 360,
     APP_SURFACE_MAX_W = GUIAPP_MAX_W,
@@ -43,6 +39,7 @@ struct rect {
 
 struct window {
     const char *title;
+    const char *dock_label;
     struct rect r;
     struct rect restore;
     int visible;
@@ -92,6 +89,7 @@ static int sw;
 static int sh;
 static uint8_t fb[MAX_SW * MAX_SH];
 static int running = 1;
+static int display_acquired;
 static struct window windows[WIN_COUNT];
 static int z_order[WIN_COUNT];
 static struct app_entry apps[MAX_APPS];
@@ -121,24 +119,7 @@ static int scroll_x[WIN_COUNT];
 static int scroll_y[WIN_COUNT];
 static int focus = WIN_LAUNCHER;
 static int app_mouse_capture = -1;
-static char term_lines[TERM_LINES][TERM_LINE_BYTES + 1];
-static int term_row;
-static int term_col;
-static volatile int term_lock;
-static int term_in_fd = -1;
-static int term_out_fd = -1;
-static int term_pid = -1;
-static int term_reader_tid = -1;
 static int keyevent_fd = -1;
-static char term_input[512];
-static int term_input_len;
-static int term_select_anchor_row;
-static int term_select_anchor_pos;
-static int term_select_row;
-static int term_select_pos;
-static int term_selecting;
-static int term_ansi_state;
-static int term_ansi_param;
 static unsigned int tick;
 static unsigned int last_render_tick;
 static volatile int desktop_dirty = 1;
@@ -465,13 +446,6 @@ static uint32_t gui_utf8_next(const char **text) {
     return cp;
 }
 
-static int gui_utf8_prev(const char *text, int pos) {
-    if (!text || pos <= 0) return 0;
-    pos--;
-    while (pos > 0 && ((uint8_t)text[pos] & 0xC0u) == 0x80u) pos--;
-    return pos;
-}
-
 static int gui_codepoint_width(uint32_t cp) {
     if (cp < 0x80u) return KFONT_WIDTH;
     uint8_t bits[FONT_GLYPH_BYTES];
@@ -668,166 +642,8 @@ static void close_window(int id);
 static void clamp_scroll(int id);
 static void activate(int id);
 static void run_app_with_arg(const char *path, const char *argument);
-static void terminal_execute_path(const char *path);
-
-static void term_lock_enter(void) {
-    while (__sync_lock_test_and_set(&term_lock, 1))
-        yield();
-}
-
-static void term_lock_leave(void) {
-    __sync_lock_release(&term_lock);
-}
-
-static void term_scroll_to_bottom(void) {
-    if (windows[WIN_TERMINAL].r.w > 0) {
-        scroll_y[WIN_TERMINAL] = max_scroll_y(WIN_TERMINAL);
-        scroll_x[WIN_TERMINAL] = 0;
-    }
-}
-
-static void term_newline_locked(void) {
-    term_col = 0;
-    if (term_row + 1 < TERM_LINES) {
-        term_row++;
-    } else {
-        for (int i = 1; i < TERM_LINES; i++)
-            copy_text(term_lines[i - 1], term_lines[i], sizeof(term_lines[i - 1]));
-        term_lines[TERM_LINES - 1][0] = 0;
-    }
-    term_scroll_to_bottom();
-}
-
-static void term_clear_line_from_cursor_locked(void) {
-    for (int i = term_col; i < TERM_LINE_BYTES; i++)
-        term_lines[term_row][i] = 0;
-}
-
-static void term_putc_locked(char ch) {
-    if (term_ansi_state == 1) {
-        if (ch == '[') {
-            term_ansi_state = 2;
-            term_ansi_param = 0;
-        } else {
-            term_ansi_state = 0;
-        }
-        return;
-    }
-    if (term_ansi_state == 2) {
-        if (ch >= '0' && ch <= '9') {
-            term_ansi_param = term_ansi_param * 10 + (ch - '0');
-            return;
-        }
-        int n = term_ansi_param > 0 ? term_ansi_param : 1;
-        if (ch == 'D') {
-            term_col -= n;
-            if (term_col < 0) term_col = 0;
-        } else if (ch == 'C') {
-            term_col += n;
-            if (term_col >= TERM_LINE_BYTES) term_col = TERM_LINE_BYTES - 1;
-        } else if (ch == 'K') {
-            term_clear_line_from_cursor_locked();
-        }
-        term_ansi_state = 0;
-        return;
-    }
-    if ((unsigned char)ch == 0x1B) {
-        term_ansi_state = 1;
-        return;
-    }
-    if (ch == '\r') {
-        term_col = 0;
-        return;
-    }
-    if (ch == '\n') {
-        term_newline_locked();
-        return;
-    }
-    if (ch == '\b' || ch == 127) {
-        if (term_col > 0) {
-            term_col--;
-            term_lines[term_row][term_col] = 0;
-        }
-        return;
-    }
-    if ((unsigned char)ch < 32)
-        return;
-    if (term_col >= TERM_LINE_BYTES - 1)
-        term_newline_locked();
-    term_lines[term_row][term_col++] = ch;
-    term_lines[term_row][term_col] = 0;
-    term_scroll_to_bottom();
-}
-
-static void term_write_text(const char *s) {
-    term_lock_enter();
-    while (s && *s)
-        term_putc_locked(*s++);
-    term_lock_leave();
-}
-
-static void term_log(const char *s) {
-    term_write_text(s);
-    term_write_text("\n");
-}
-
-static void terminal_reader(void) {
-    char buf[96];
-    for (;;) {
-        if (term_out_fd < 0)
-            return;
-        int n = read(term_out_fd, buf, sizeof(buf));
-        if (n <= 0)
-            return;
-        term_lock_enter();
-        for (int i = 0; i < n; i++)
-            term_putc_locked(buf[i]);
-        term_lock_leave();
-        win_damage(WIN_TERMINAL);
-    }
-}
-
-static int start_terminal_shell(void) {
-    int in_pipe[2];
-    int out_pipe[2];
-    if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0)
-        return -1;
-
-    int save0 = dup(0);
-    int save1 = dup(1);
-    int save2 = dup(2);
-    if (save0 < 0 || save1 < 0 || save2 < 0)
-        return -1;
-
-    dup2(in_pipe[0], 0);
-    dup2(out_pipe[1], 1);
-    dup2(out_pipe[1], 2);
-    char *argv[1];
-    argv[0] = "/bin/sh";
-    int pid = spawn_process_args("/bin/sh", argv, 1,
-                                 SPAWN_FLAG_SILENT | SPAWN_FLAG_INHERIT_STDIO);
-    dup2(save0, 0);
-    dup2(save1, 1);
-    dup2(save2, 2);
-    close(save0);
-    close(save1);
-    close(save2);
-    close(in_pipe[0]);
-    close(out_pipe[1]);
-    if (pid < 0) {
-        close(in_pipe[1]);
-        close(out_pipe[0]);
-        return -1;
-    }
-
-    term_pid = pid;
-    term_in_fd = in_pipe[1];
-    term_out_fd = out_pipe[0];
-    term_reader_tid = spawn(terminal_reader);
-    if (term_reader_tid < 0)
-        return -1;
-    term_log("[desktop] attached /bin/sh");
-    return 0;
+static void gui_log(const char *message) {
+    puts(message);
 }
 
 static void scan_apps(void) {
@@ -928,9 +744,9 @@ static int app_read_frame(int slot) {
         }
         if (frame.type == GUIAPP_FRAME_EXEC) {
             if (exec_target_allowed(frame.target))
-                terminal_execute_path(frame.target);
+                run_app_with_arg("/fs/apps/terminal", frame.target);
             else
-                term_log("exec request rejected");
+                gui_log("[gui] exec request rejected");
             continue;
         }
         if (frame.type != GUIAPP_FRAME_LAUNCH)
@@ -938,7 +754,7 @@ static int app_read_frame(int slot) {
         if (app_target_allowed(frame.target))
             run_app_with_arg(frame.target, frame.argument[0] ? frame.argument : 0);
         else
-            term_log("launch request rejected");
+            gui_log("[gui] launch request rejected");
     }
     if (frame.width <= 0 || frame.height <= 0 ||
         frame.width > APP_SURFACE_MAX_W || frame.height > APP_SURFACE_MAX_H)
@@ -1067,14 +883,14 @@ static void run_app_with_arg(const char *path, const char *argument) {
         }
     }
     if (slot < 0) {
-        term_log("no free app window");
+        gui_log("[gui] no free app window");
         return;
     }
 
     struct shm_mapping mapping;
     uint32_t surface_pixels = (uint32_t)sw * (uint32_t)sh;
     if (shm_create(GUIAPP_SHARED_SIZE_FOR_PIXELS(surface_pixels), &mapping) < 0) {
-        term_log("shared surface failed");
+        gui_log("[gui] shared surface failed");
         return;
     }
     struct guiapp_shared_surface *shared =
@@ -1090,7 +906,7 @@ static void run_app_with_arg(const char *path, const char *argument) {
         if (ev_pipe[0] >= 0) close(ev_pipe[0]);
         if (ev_pipe[1] >= 0) close(ev_pipe[1]);
         (void)shm_unmap(mapping.token);
-        term_log("pipe failed");
+        gui_log("[gui] pipe failed");
         return;
     }
 
@@ -1111,16 +927,18 @@ static void run_app_with_arg(const char *path, const char *argument) {
 
     copy_text(msg, "launch ", sizeof(msg));
     append_text(msg, path, sizeof(msg));
-    term_log(msg);
+    gui_log(msg);
     int pid = spawn_process_args(path, argv, argc,
-                                 SPAWN_FLAG_SILENT | SPAWN_FLAG_INHERIT_FDS);
+                                 SPAWN_FLAG_SILENT |
+                                 SPAWN_FLAG_INHERIT_FDS |
+                                 SPAWN_FLAG_SERIAL_STDIO);
     close(ev_pipe[0]);
     close(frame_pipe[1]);
     if (pid < 0) {
         close(ev_pipe[1]);
         close(frame_pipe[0]);
         (void)shm_unmap(mapping.token);
-        term_log("launch failed");
+        gui_log("[gui] launch failed");
         return;
     }
 
@@ -1157,14 +975,14 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].reader_tid = spawn(app_reader_functions[slot]);
     if (app_sessions[slot].reader_tid < 0 ||
         app_send_event(slot, GUIAPP_EVT_INIT, 0, 0, 0, 0, 0) < 0) {
-        term_log("app protocol failed");
+        gui_log("[gui] app protocol failed");
         close_window(id);
         return;
     }
 
     copy_text(msg, "started pid ", sizeof(msg));
     append_uint(msg, (unsigned int)pid, sizeof(msg));
-    term_log(msg);
+    gui_log(msg);
     activate(id);
 }
 
@@ -1202,24 +1020,15 @@ static void layout(void) {
     int content_h = sh - top - dock - margin * 2;
     int left_w = min_i(max_i(360, sw / 3), 520);
     int right_w = min_i(max_i(320, sw / 4), 460);
-    int term_h = min_i(max_i(250, content_h / 2), content_h - 80);
 
     windows[WIN_LAUNCHER].title = "Applications";
+    windows[WIN_LAUNCHER].dock_label = "Apps";
     windows[WIN_LAUNCHER].r = (struct rect){margin, top + margin, left_w, content_h};
     windows[WIN_LAUNCHER].restore = windows[WIN_LAUNCHER].r;
     windows[WIN_LAUNCHER].visible = 1;
 
-    windows[WIN_TERMINAL].title = "Terminal";
-    windows[WIN_TERMINAL].r = (struct rect){
-        margin + left_w + margin,
-        top + margin,
-        max_i(360, sw - left_w - right_w - margin * 4),
-        term_h
-    };
-    windows[WIN_TERMINAL].restore = windows[WIN_TERMINAL].r;
-    windows[WIN_TERMINAL].visible = 1;
-
     windows[WIN_STATUS].title = "System";
+    windows[WIN_STATUS].dock_label = "Sys";
     windows[WIN_STATUS].r = (struct rect){
         sw - right_w - margin,
         top + margin,
@@ -1230,11 +1039,11 @@ static void layout(void) {
     windows[WIN_STATUS].visible = 1;
 
     z_order[0] = WIN_LAUNCHER;
-    z_order[1] = WIN_TERMINAL;
-    z_order[2] = WIN_STATUS;
+    z_order[1] = WIN_STATUS;
     for (int i = 0; i < MAX_GUI_APPS; i++) {
         int id = WIN_APP_BASE + i;
         windows[id].title = "Application";
+        windows[id].dock_label = 0;
         windows[id].r = (struct rect){100 + i * 32, 90 + i * 32, 520, 360};
         windows[id].restore = windows[id].r;
         windows[id].visible = 0;
@@ -1345,8 +1154,6 @@ static int content_width(int id) {
     int slot = app_slot_for_win(id);
     if (slot >= 0 && app_sessions[slot].used)
         return content_rect(id).w;
-    if (id == WIN_TERMINAL)
-        return TERM_COLS * FONT_GLYPH_MAX_WIDTH + 28;
     if (id == WIN_LAUNCHER)
         return 460;
     return 520;
@@ -1358,8 +1165,6 @@ static int content_height(int id) {
         return content_rect(id).h;
     if (id == WIN_LAUNCHER)
         return 28 + max_i(app_count, 1) * 34 + 12;
-    if (id == WIN_TERMINAL)
-        return max_i((term_row + 2) * 22 + 18, 180);
     return 250;
 }
 
@@ -1462,109 +1267,6 @@ static void draw_launcher(void) {
                   selected ? THEME_TEXT : THEME_TEXT_DIM, -1, clip);
     }
     draw_scrollbars(WIN_LAUNCHER);
-}
-
-static void draw_terminal(void) {
-    if (!windows[WIN_TERMINAL].visible || windows[WIN_TERMINAL].minimized)
-        return;
-    draw_window_frame(WIN_TERMINAL);
-    struct rect c = content_rect(WIN_TERMINAL);
-    fill(c, plt_rgb(14, 18, 26));
-    border(c, gray(3), THEME_WIN_BORDER_INACT);
-    struct rect clip = {c.x + 1, c.y + 1, c.w - 2, c.h - 2};
-    int ox = c.x + 10 - scroll_x[WIN_TERMINAL];
-    int y = c.y + 8 - scroll_y[WIN_TERMINAL];
-    term_lock_enter();
-    for (int i = 0; i < TERM_LINES; i++) {
-        if (term_lines[i][0]) {
-            int ar = term_select_anchor_row, ap = term_select_anchor_pos;
-            int br = term_select_row, bp = term_select_pos;
-            if (ar > br || (ar == br && ap > bp)) {
-                int tr = ar, tp = ap; ar = br; ap = bp; br = tr; bp = tp;
-            }
-            int px = ox;
-            int pos = 0;
-            while (term_lines[i][pos]) {
-                int start = pos;
-                const char *p = term_lines[i] + pos;
-                uint32_t cp = gui_utf8_next(&p);
-                pos = (int)(p - term_lines[i]);
-                int glyph_w = gui_codepoint_width(cp);
-                int selected = (i > ar || (i == ar && pos > ap)) &&
-                               (i < br || (i == br && start < bp));
-                if (selected) {
-                    struct rect mark = intersect_rect(
-                        (struct rect){px, y - PLT_FONT_Y_SHIFT, glyph_w, KFONT_HEIGHT}, clip);
-                    if (mark.w > 0 && mark.h > 0)
-                        fill(mark, rgb6(1, 3, 5));
-                }
-                px += glyph_w;
-            }
-            text_clip(ox, y, term_lines[i], rgb6(3, 5, 4), -1, clip);
-        }
-        y += 22;
-    }
-    if ((tick / 30) & 1)
-        fill(intersect_rect((struct rect){
-            ox + gui_text_width(term_lines[term_row]),
-            c.y + 8 + term_row * 22 - scroll_y[WIN_TERMINAL] + 4,
-            8, 16
-        }, clip), 15);
-    term_lock_leave();
-    draw_scrollbars(WIN_TERMINAL);
-}
-
-static void terminal_position_at(int mx, int my, int *row_out, int *pos_out) {
-    struct rect c = content_rect(WIN_TERMINAL);
-    int row = (my - (c.y + 8) + scroll_y[WIN_TERMINAL]) / 22;
-    row = clamp_i(row, 0, TERM_LINES - 1);
-    int target_x = mx - (c.x + 10) + scroll_x[WIN_TERMINAL];
-    if (target_x < 0) target_x = 0;
-    int x = 0;
-    int pos = 0;
-    while (term_lines[row][pos]) {
-        int start = pos;
-        const char *p = term_lines[row] + pos;
-        uint32_t cp = gui_utf8_next(&p);
-        pos = (int)(p - term_lines[row]);
-        int width = gui_codepoint_width(cp);
-        if (target_x < x + width / 2) { pos = start; break; }
-        x += width;
-    }
-    *row_out = row;
-    *pos_out = pos;
-}
-
-static int terminal_has_selection(void) {
-    return term_select_anchor_row != term_select_row ||
-           term_select_anchor_pos != term_select_pos;
-}
-
-static void terminal_copy_selection(void) {
-    int ar = term_select_anchor_row, ap = term_select_anchor_pos;
-    int br = term_select_row, bp = term_select_pos;
-    if (ar > br || (ar == br && ap > bp)) {
-        int tr = ar, tp = ap; ar = br; ap = bp; br = tr; bp = tp;
-    }
-    int out = 0;
-    clipboard[0] = 0;
-    for (int row = ar; row <= br && out + 1 < (int)sizeof(clipboard); row++) {
-        int first = row == ar ? ap : 0;
-        int last = row == br ? bp : (int)strlen(term_lines[row]);
-        int pos = first;
-        while (pos < last) {
-            const char *p = term_lines[row] + pos;
-            (void)gui_utf8_next(&p);
-            int next = (int)(p - term_lines[row]);
-            int bytes = next - pos;
-            if (out + bytes >= (int)sizeof(clipboard)) break;
-            for (int i = 0; i < bytes; i++) clipboard[out++] = term_lines[row][pos + i];
-            pos = next;
-        }
-        if (row < br && out + 1 < (int)sizeof(clipboard))
-            clipboard[out++] = '\n';
-    }
-    clipboard[out] = 0;
 }
 
 static void draw_status(void) {
@@ -1791,10 +1493,11 @@ static void draw_dock(void) {
                  corner_inner, plt_rgb(43, 51, 66));
     line_h(r.x + 5, r.y + 1, r.w - 10, plt_rgb(96, 112, 138));
 
-    static const char *system_labels[] = {"Apps", "Term", "Sys"};
     for (int i = 0; i < WIN_APP_BASE; i++) {
         struct rect b = {x + 12 + i * 70, y + 9, 64, 36};
-        button(b, system_labels[i], windows[i].active || dock_hover == i);
+        const char *label = windows[i].dock_label
+            ? windows[i].dock_label : windows[i].title;
+        button(b, label, windows[i].active || dock_hover == i);
     }
 
     int shown = min_i(app_total, task_cap);
@@ -1928,8 +1631,6 @@ static void compose_scene(void) {
         int id = z_order[i];
         if (id == WIN_LAUNCHER)
             draw_launcher();
-        else if (id == WIN_TERMINAL)
-            draw_terminal();
         else if (id == WIN_STATUS)
             draw_status();
         else if (id >= WIN_APP_BASE)
@@ -2156,8 +1857,19 @@ static void close_window(int id) {
         close(app_sessions[slot].to_fd);
         if (app_sessions[slot].pid > 0) {
             int status;
-            (void)kill(app_sessions[slot].pid);
-            (void)waitpid(app_sessions[slot].pid, &status, 0);
+            int reaped = 0;
+            for (int attempt = 0; attempt < 50; attempt++) {
+                int waited = waitpid(app_sessions[slot].pid, &status, WNOHANG);
+                if (waited == app_sessions[slot].pid || waited < 0) {
+                    reaped = 1;
+                    break;
+                }
+                sleep_ms(2);
+            }
+            if (!reaped) {
+                (void)kill(app_sessions[slot].pid);
+                (void)waitpid(app_sessions[slot].pid, &status, 0);
+            }
         }
         if (app_sessions[slot].reader_tid > 0)
             (void)join(app_sessions[slot].reader_tid);
@@ -2189,8 +1901,7 @@ static void close_window(int id) {
 static void reap_dead_apps(void) {
     for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
         if (app_sessions[slot].used && app_sessions[slot].reader_dead) {
-            term_log("app protocol ended");
-            puts("[gui] app protocol ended");
+            gui_log("[gui] app protocol ended");
             close_window(WIN_APP_BASE + slot);
         }
     }
@@ -2288,84 +1999,25 @@ static void flush_pending_app_resizes(void) {
     }
 }
 
-static void terminal_send(const char *s, int len) {
-    if (term_in_fd >= 0 && s && len > 0)
-        (void)write(term_in_fd, s, (size_t)len);
-}
-
-static void terminal_execute_path(const char *path) {
-    terminal_send("\x15", 1);
-    terminal_send(path, (int)strlen(path));
-    terminal_send("\n", 1);
-    term_input_len = 0;
-    term_input[0] = 0;
-    activate(WIN_TERMINAL);
-}
-
-static void terminal_input_append(const char *s) {
-    int n = (int)strlen(s);
-    if (n <= 0 || term_input_len + n >= (int)sizeof(term_input)) return;
-    for (int i = 0; i < n; i++) term_input[term_input_len++] = s[i];
-    term_input[term_input_len] = 0;
-}
-
-static void terminal_input_backspace(void) {
-    term_input_len = gui_utf8_prev(term_input, term_input_len);
-    term_input[term_input_len] = 0;
-}
-
-static void terminal_send_key(int k) {
-    char ch;
-    if (k == KEY_UP)
-        terminal_send("\x1B[A", 3);
-    else if (k == KEY_DOWN)
-        terminal_send("\x1B[B", 3);
-    else if (k == KEY_RIGHT)
-        terminal_send("\x1B[C", 3);
-    else if (k == KEY_LEFT)
-        terminal_send("\x1B[D", 3);
-    else if (k == KEY_BACKSPACE || k == 127)
-        { terminal_send("\b", 1); terminal_input_backspace(); }
-    else if (k == '\r') {
-        terminal_send("\n", 1);
-        term_input_len = 0; term_input[0] = 0;
-    }
-    else if (k >= 0 && k < 256) {
-        ch = (char)k;
-        terminal_send(&ch, 1);
-        if (k >= 32 && k != 127) {
-            char value[2] = {ch, 0};
-            terminal_input_append(value);
-        }
-    }
-}
-
 static int ime_target_active(void) {
-    if (focus == WIN_TERMINAL)
-        return 1;
     int slot = app_slot_for_win(focus);
     return slot >= 0 && app_sessions[slot].used;
 }
 
 static void ime_submit(const char *value) {
     if (!value || !value[0]) return;
-    if (focus == WIN_TERMINAL) {
-        terminal_send(value, (int)strlen(value));
-        terminal_input_append(value);
-    } else {
-        int slot = app_slot_for_win(focus);
-        while (slot >= 0 && app_sessions[slot].used && *value) {
-            int n = (int)strlen(value);
-            if (n > GUIAPP_TEXT_MAX - 1) n = GUIAPP_TEXT_MAX - 1;
-            while (n > 0 && ((uint8_t)value[n] & 0xC0u) == 0x80u) n--;
-            if (n <= 0) n = GUIAPP_TEXT_MAX - 1;
-            char chunk[GUIAPP_TEXT_MAX];
-            for (int i = 0; i < n; i++) chunk[i] = value[i];
-            chunk[n] = 0;
-            if (app_send_text(slot, chunk) < 0)
-                break;
-            value += n;
-        }
+    int slot = app_slot_for_win(focus);
+    while (slot >= 0 && app_sessions[slot].used && *value) {
+        int n = (int)strlen(value);
+        if (n > GUIAPP_TEXT_MAX - 1) n = GUIAPP_TEXT_MAX - 1;
+        while (n > 0 && ((uint8_t)value[n] & 0xC0u) == 0x80u) n--;
+        if (n <= 0) n = GUIAPP_TEXT_MAX - 1;
+        char chunk[GUIAPP_TEXT_MAX];
+        for (int i = 0; i < n; i++) chunk[i] = value[i];
+        chunk[n] = 0;
+        if (app_send_text(slot, chunk) < 0)
+            break;
+        value += n;
     }
 }
 
@@ -2374,18 +2026,6 @@ static void clipboard_command(int command) {
     activate(context_target);
     if (command == GUIAPP_CMD_PASTE) {
         if (clipboard[0]) ime_submit(clipboard);
-        return;
-    }
-    if (context_target == WIN_TERMINAL) {
-        if (terminal_has_selection())
-            terminal_copy_selection();
-        else
-            copy_text(clipboard, term_input, sizeof(clipboard));
-        if (!terminal_has_selection() && command == GUIAPP_CMD_CUT && term_input_len > 0) {
-            terminal_send("\x15", 1); /* Ctrl+U: clear shell edit line */
-            term_input_len = 0;
-            term_input[0] = 0;
-        }
         return;
     }
     int slot = app_slot_for_win(context_target);
@@ -2503,10 +2143,6 @@ static void handle_key(int k) {
             win_damage(WIN_LAUNCHER);
         return;
     }
-    if (focus == WIN_TERMINAL) {
-        terminal_send_key(k);
-        return;
-    }
     int slot = app_slot_for_win(focus);
     if (slot >= 0 && app_sessions[slot].used) {
         if (app_send_event(slot, GUIAPP_EVT_KEY, 0, 0, k, 1, 0) < 0)
@@ -2553,8 +2189,8 @@ static void handle_mouse(void) {
 
     if (right && !(prev_buttons & 2)) {
         int target = hit_window(pointer_x, pointer_y);
-        if (target == WIN_TERMINAL ||
-            (target >= WIN_APP_BASE && inside(pointer_x, pointer_y, content_rect(target)))) {
+        if (target >= WIN_APP_BASE &&
+            inside(pointer_x, pointer_y, content_rect(target))) {
             context_open = 1;
             context_x = pointer_x;
             context_y = pointer_y;
@@ -2692,13 +2328,7 @@ static void handle_mouse(void) {
                 }
             } else {
                 int slot = app_slot_for_win(focus);
-                if (focus == WIN_TERMINAL && inside(pointer_x, pointer_y, content_rect(focus))) {
-                    terminal_position_at(pointer_x, pointer_y,
-                                         &term_select_anchor_row, &term_select_anchor_pos);
-                    term_select_row = term_select_anchor_row;
-                    term_select_pos = term_select_anchor_pos;
-                    term_selecting = 1;
-                } else if (slot >= 0 && inside(pointer_x, pointer_y, content_rect(focus))) {
+                if (slot >= 0 && inside(pointer_x, pointer_y, content_rect(focus))) {
                     app_mouse_capture = focus;
                     send_mouse_to_app(focus, ms.buttons, 0);
                 }
@@ -2713,15 +2343,8 @@ static void handle_mouse(void) {
         drag_win = -1;
         scroll_drag_win = -1;
         resize_win = -1;
-        term_selecting = 0;
         if (finished_resize >= WIN_APP_BASE)
             (void)sync_app_size(finished_resize);
-    }
-    if (left && term_selecting) {
-        terminal_position_at(pointer_x, pointer_y, &term_select_row, &term_select_pos);
-        queue_damage(windows[WIN_TERMINAL].r);
-        prev_buttons = ms.buttons;
-        return;
     }
     if (left && resize_win >= 0) {
         struct rect old = windows[resize_win].r;
@@ -2797,15 +2420,9 @@ static void init_desktop(void) {
     gfx_set_origin(0, 0);
     pointer_x = sw / 2;
     pointer_y = sh / 2;
-    for (int i = 0; i < TERM_LINES; i++)
-        term_lines[i][0] = 0;
     scan_apps();
     keyevent_fd = open("/dev/keyevent", O_RDONLY);
     layout();
-    scroll_y[WIN_TERMINAL] = max_scroll_y(WIN_TERMINAL);
-    scroll_x[WIN_TERMINAL] = 0;
-    if (start_terminal_shell() < 0)
-        term_log("terminal: failed to start /bin/sh");
 }
 
 static void shutdown_desktop(void) {
@@ -2817,30 +2434,35 @@ static void shutdown_desktop(void) {
         if (app_sessions[slot].used)
             close_window(WIN_APP_BASE + slot);
     }
+}
 
-    if (term_in_fd >= 0) {
-        close(term_in_fd);
-        term_in_fd = -1;
-    }
-    if (term_pid > 0) {
-        int status;
-        (void)kill(term_pid);
-        (void)waitpid(term_pid, &status, 0);
-        term_pid = -1;
-    }
-    if (term_reader_tid > 0) {
-        (void)join(term_reader_tid);
-        term_reader_tid = -1;
-    }
-    if (term_out_fd >= 0) {
-        close(term_out_fd);
-        term_out_fd = -1;
-    }
+static void release_display(void) {
+    if (!display_acquired)
+        return;
+    display_acquired = 0;
+    (void)gfx_release_display();
+}
+
+static void redirect_logs_to_serial(void) {
+    int serial = open("/dev/serial", O_WRONLY);
+    if (serial < 0)
+        return;
+    (void)dup2(serial, 1);
+    (void)dup2(serial, 2);
+    if (serial > 2)
+        close(serial);
 }
 
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+    if (gfx_acquire_display() < 0) {
+        puts("gui: display is already in use");
+        return 1;
+    }
+    display_acquired = 1;
+    (void)atexit(release_display);
+    redirect_logs_to_serial();
     init_desktop();
     uint32_t frame_deadline = monotonic_ms();
     uint32_t frame_fraction = 0;
@@ -2898,5 +2520,6 @@ int main(int argc, char **argv) {
         }
     }
     shutdown_desktop();
+    release_display();
     return 0;
 }

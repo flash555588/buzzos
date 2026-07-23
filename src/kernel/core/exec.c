@@ -102,7 +102,8 @@ static int launch_prepared_space(uint32_t proc_cr3, uint32_t entry,
                                  uint32_t image_end, uint32_t stack,
                                  const char *name, int console_silent,
                                  int inherit_fd_owner,
-                                 int inherit_stdio_only) {
+                                 int inherit_stdio_only,
+                                 int serial_stdio) {
     uint32_t irq_flags = irq_save();
     int id = task_create_ex(user_process_trampoline,
                             name ? name : "user_proc", console_silent);
@@ -130,6 +131,8 @@ static int launch_prepared_space(uint32_t proc_cr3, uint32_t entry,
     } else {
         vfs_setup_stdio(id, console_silent);
     }
+    if (serial_stdio && vfs_setup_serial_stdio(id) < 0)
+        serial_puts("[exec] serial stdio setup failed\n");
     /* Arm only after entry/stack/CR3/fds are fully installed. */
     task_make_ready(id);
     irq_restore(irq_flags);
@@ -144,7 +147,8 @@ static int launch_prepared_space(uint32_t proc_cr3, uint32_t entry,
 
 int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const char *name,
                              int console_silent, int argc, const char *const argv[],
-                             int inherit_fd_owner, int inherit_stdio_only) {
+                             int inherit_fd_owner, int inherit_stdio_only,
+                             int serial_stdio) {
     uint32_t proc_cr3 = create_user_address_space();
     if (!proc_cr3) {
         serial_puts("[exec] out of user bootstrap pages\n");
@@ -163,13 +167,13 @@ int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const cha
 
     return launch_prepared_space(proc_cr3, entry, image_end, stack, name,
                                  console_silent, inherit_fd_owner,
-                                 inherit_stdio_only);
+                                 inherit_stdio_only, serial_stdio);
 }
 
 int exec_start_file_args_with_fds(int fd, size_t elf_size, const char *name,
                                   int console_silent, int argc,
                                   const char *const argv[], int inherit_fd_owner,
-                                  int inherit_stdio_only) {
+                                  int inherit_stdio_only, int serial_stdio) {
     uint32_t proc_cr3 = create_user_address_space();
     if (!proc_cr3) {
         vfs_close(fd);
@@ -188,13 +192,13 @@ int exec_start_file_args_with_fds(int fd, size_t elf_size, const char *name,
     }
     return launch_prepared_space(proc_cr3, entry, image_end, stack, name,
                                  console_silent, inherit_fd_owner,
-                                 inherit_stdio_only);
+                                 inherit_stdio_only, serial_stdio);
 }
 
 int exec_start_args(const uint8_t *elf_data, size_t elf_size, const char *name,
                     int console_silent, int argc, const char *const argv[]) {
     return exec_start_args_with_fds(elf_data, elf_size, name, console_silent,
-                                    argc, argv, -1, 0);
+                                    argc, argv, -1, 0, 0);
 }
 
 int exec_start(const uint8_t *elf_data, size_t elf_size, const char *name, int console_silent) {
