@@ -9,6 +9,7 @@ enum {
     DEFAULT_W = 720,
     DEFAULT_H = 410,
     AUDIO_BLOCK = 2048,
+    PLAYBACK_LATENCY_MS = 80,
     DEFAULT_RATE = 11025,
     WAVE_BARS = 96,
     FRAME_MS = 25,
@@ -279,14 +280,11 @@ static uint32_t display_playhead(void) {
     if (est > sample_count)
         est = sample_count;
 
-    /* Soft-correct if we drift more than ~0.5s ahead of a sane playhead. */
-    if (hw > 0 && est > hw + rate / 2u) {
-        uint32_t soft = hw + rate / 10u;
-        if (soft > written)
-            soft = written;
-        ui_resync(soft);
-        est = soft;
-    }
+    /*
+     * Never pull a running progress indicator backwards to chase a
+     * period-granular hardware estimate. Seeks and pause explicitly resync
+     * the anchor; normal playback may only hold or advance.
+     */
     return est;
 }
 
@@ -323,7 +321,7 @@ static void apply_flush(void) {
             q = position;
         position -= q;
     }
-    (void)audio_config(sample_rate);
+    (void)audio_flush();
     ui_resync(position);
     ui_hold_pos = position;
     ui_hold_pos_valid = 0;
@@ -1035,6 +1033,7 @@ static void render_frame(int *out_w, int *out_h) {
 
 int main(int argc, char **argv) {
     const char *path_arg = (argc > 4 && argv[4] && argv[4][0]) ? argv[4] : 0;
+    int exit_status = 0;
 
     if (guiapp_parse_args(argc, argv, &gui) < 0)
         return 1;
@@ -1042,7 +1041,7 @@ int main(int argc, char **argv) {
     if (choose_track(path_arg) < 0)
         playing = 0;
 
-    if (audio_config(sample_rate) < 0)
+    if (audio_config_latency(sample_rate, PLAYBACK_LATENCY_MS) < 0)
         return 1;
 
     ui_resync(0);
@@ -1053,8 +1052,10 @@ int main(int argc, char **argv) {
             playing = 0;
     }
 
-    if (spawn(gui_event_reader) < 0)
-        return 1;
+    if (spawn(gui_event_reader) < 0) {
+        closed = 1;
+        exit_status = 1;
+    }
 
     {
         int w = 0, h = 0;
@@ -1074,9 +1075,9 @@ int main(int argc, char **argv) {
     }
 
     closed = 1;
-    flush_audio = 1;
     if (playback_tid >= 0)
         (void)join(playback_tid);
+    (void)audio_flush();
     free(samples);
-    return 0;
+    return exit_status;
 }

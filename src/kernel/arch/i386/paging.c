@@ -7,10 +7,13 @@
 __attribute__((aligned(4096))) static uint32_t page_directory[1024];
 __attribute__((aligned(4096))) static uint32_t page_table_low[KERNEL_LOW_TABLES][1024];
 __attribute__((aligned(4096))) static uint32_t page_table_fb[KERNEL_FB_TABLES][1024];
+__attribute__((aligned(4096))) static uint32_t page_table_mmio[1024];
+__attribute__((aligned(4096))) static uint32_t page_table_apic[1024];
 
 static uintptr_t kernel_fb_phys = 0xE0000000u;
 static uint32_t kernel_fb_size = KERNEL_FB_SIZE;
 static volatile int paging_locked;
+static uint32_t mmio_next_page;
 
 static void paging_lock(void) {
     while (__sync_lock_test_and_set(&paging_locked, 1))
@@ -103,6 +106,10 @@ void paging_init(void) {
 
     for (int i = 0; i < 1024; i++) {
         page_directory[i] = 0;
+        page_table_apic[i] =
+            (KERNEL_APIC_MMIO_BASE + (uint32_t)i * PAGE_SIZE) |
+            PAGE_PRESENT | PAGE_RW | PAGE_WT | PAGE_CD;
+        page_table_mmio[i] = 0;
         for (uint32_t t = 0; t < KERNEL_LOW_TABLES; t++)
             page_table_low[t][i] = 0;
         for (uint32_t t = 0; t < KERNEL_FB_TABLES; t++)
@@ -131,6 +138,10 @@ void paging_init(void) {
     for (uint32_t t = 0; t < KERNEL_FB_TABLES; t++)
         page_directory[(KERNEL_FB_VIRT >> 22) + t] =
             ((uint32_t)(uintptr_t)page_table_fb[t]) | PAGE_PRESENT | PAGE_RW;
+    page_directory[KERNEL_MMIO_VIRT >> 22] =
+        ((uint32_t)(uintptr_t)page_table_mmio) | PAGE_PRESENT | PAGE_RW;
+    page_directory[KERNEL_APIC_MMIO_BASE >> 22] =
+        ((uint32_t)(uintptr_t)page_table_apic) | PAGE_PRESENT | PAGE_RW;
     for (uint32_t t = 0; t < KERNEL_LOW_TABLES; t++)
         page_directory[768 + t] = ((uint32_t)(uintptr_t)page_table_low[t]) |
                                   PAGE_PRESENT | PAGE_RW;
@@ -181,11 +192,44 @@ uint32_t paging_create_user_space(void) {
     for (uint32_t t = 0; t < KERNEL_FB_TABLES; t++)
         pd[(KERNEL_FB_VIRT >> 22) + t] =
             ((uint32_t)(uintptr_t)page_table_fb[t]) | PAGE_PRESENT | PAGE_RW;
+    pd[KERNEL_MMIO_VIRT >> 22] =
+        ((uint32_t)(uintptr_t)page_table_mmio) | PAGE_PRESENT | PAGE_RW;
+    pd[KERNEL_APIC_MMIO_BASE >> 22] =
+        ((uint32_t)(uintptr_t)page_table_apic) | PAGE_PRESENT | PAGE_RW;
     for (uint32_t t = 0; t < KERNEL_LOW_TABLES; t++)
         pd[768 + t] = ((uint32_t)(uintptr_t)page_table_low[t]) |
                       PAGE_PRESENT | PAGE_RW;
 
     return (uint32_t)(uintptr_t)pd;
+}
+
+void *paging_map_mmio(uintptr_t phys_addr, uint32_t size) {
+    if (!phys_addr || !size)
+        return 0;
+    uintptr_t physical_page = phys_addr & ~(uintptr_t)(PAGE_SIZE - 1u);
+    uint32_t offset = (uint32_t)(phys_addr - physical_page);
+    if (size > 0xFFFFFFFFu - offset)
+        return 0;
+    uint32_t pages = (size + offset + PAGE_SIZE - 1u) / PAGE_SIZE;
+    if (!pages || pages > 1024u)
+        return 0;
+
+    paging_lock();
+    if (mmio_next_page > 1024u - pages) {
+        paging_unlock();
+        return 0;
+    }
+    uint32_t first = mmio_next_page;
+    mmio_next_page += pages;
+    for (uint32_t i = 0; i < pages; i++) {
+        page_table_mmio[first + i] =
+            (uint32_t)(physical_page + (uintptr_t)i * PAGE_SIZE) |
+            PAGE_PRESENT | PAGE_RW | PAGE_WT | PAGE_CD;
+    }
+    flush_tlb();
+    paging_unlock();
+    return (void *)(uintptr_t)(KERNEL_MMIO_VIRT +
+                               first * PAGE_SIZE + offset);
 }
 
 int paging_map_user_range_in_space(uint32_t cr3, uint32_t va, uint32_t size) {

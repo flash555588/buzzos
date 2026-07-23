@@ -1,7 +1,7 @@
 #include "timer.h"
-#include "ac97.h"
 #include "io.h"
 #include "irq.h"
+#include "pci.h"
 #include "serial.h"
 #include "task.h"
 
@@ -14,8 +14,6 @@ enum {
     PIT_BASE_FREQ     = 1193182u,  /* input clock to the PIT */
 
     PIC1_DATA = 0x21,
-    PCI_ADDR = 0xCF8,
-    PCI_DATA = 0xCFC,
     ACPI_PM_FREQUENCY = 3579545u,
 };
 
@@ -23,25 +21,15 @@ static volatile uint32_t ticks;
 static uint16_t acpi_pm_port;
 static uint32_t acpi_pm_last, acpi_pm_remainder;
 
-static uint32_t pci_read(uint8_t dev, uint8_t fn, uint8_t reg) {
-    outl(PCI_ADDR, 0x80000000u | ((uint32_t)dev << 11) |
-         ((uint32_t)fn << 8) | (reg & 0xFCu));
-    return inl(PCI_DATA);
-}
-
 static void acpi_pm_init(void) {
     /* SeaBIOS exposes the PIIX4 power-management function used by QEMU's
      * pc machine.  Its 24-bit PM timer is free-running and, unlike IRQ0,
      * does not lose elapsed time while another interrupt is in service. */
-    for (uint8_t dev = 0; dev < 32 && !acpi_pm_port; dev++) {
-        for (uint8_t fn = 0; fn < 8; fn++) {
-            uint32_t id = pci_read(dev, fn, 0x00);
-            if (id == 0x71138086u) {
-                uint32_t base = pci_read(dev, fn, 0x40) & 0x0000FFC0u;
-                if (base) acpi_pm_port = (uint16_t)(base + 8u);
-                break;
-            }
-        }
+    const struct pci_device *pm = pci_find_device(0x8086, 0x7113);
+    if (pm) {
+        uint32_t base = pci_config_read32(pm, 0x40) & 0x0000FFC0u;
+        if (base)
+            acpi_pm_port = (uint16_t)(base + 8u);
     }
     if (acpi_pm_port) {
         acpi_pm_last = inl(acpi_pm_port) & 0x00FFFFFFu;
@@ -87,16 +75,10 @@ void timer_init(void) {
 }
 
 void timer_irq(void) {
-    static uint8_t audio_poll_divider;
     if (acpi_pm_port)
         update_elapsed_time();
     else
         ticks++;
-    /* Service the interrupt-free AC97 descriptor ring at 125 Hz.  This keeps
-     * audio moving even if a renderer uses an entire scheduling quantum,
-     * without restoring the unstable PCI IRQ11 path. */
-    if ((audio_poll_divider++ & 1u) == 0)
-        ac97_poll();
     /* Preempt: round-robin to the next ready task. schedule() handles the
      * cli/sti and the no-op case when nothing else is runnable. */
     sched_tick();

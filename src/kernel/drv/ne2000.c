@@ -83,8 +83,10 @@ static volatile int tx_locked;
 static volatile int tx_complete;
 static volatile int tx_waiter = -1;
 static uint8_t tx_staging[1516] __attribute__((aligned(2)));
+static int ready;
 
 static size_t ne2000_recv_hw(void *buf, size_t max);
+static int ne2000_interrupt(void *context);
 
 /* ── Page select ── */
 static void sel(int page) {
@@ -134,6 +136,7 @@ static int wait_tx_complete(void) {
 /* ── Init ── */
 static int ne2000_init(struct netdev *dev) {
     (void)dev;
+    ready = 0;
 
     /* Hardware reset */
     inb(IO + RSTPORT);
@@ -141,6 +144,8 @@ static int ne2000_init(struct netdev *dev) {
     /* Stop the chip, page 0 */
     outb(IO + CR, CR_PAGE0 | CR_NODMA | CR_STOP);
     io_wait();
+    if (inb(IO + CR) == 0xFF)
+        return -1;
 
     /* Byte-wide DMA, no loopback, auto-init remote */
     outb(IO + DCR, DCR_NOLPBK | DCR_ARM);
@@ -178,6 +183,11 @@ static int ne2000_init(struct netdev *dev) {
         inb(IO + RDMA);             /* skip doubled byte */
         dev->mac[i] = inb(IO + RDMA);
     }
+    int mac_valid = 0;
+    for (int i = 0; i < 6; i++)
+        mac_valid |= dev->mac[i] != 0 && dev->mac[i] != 0xFF;
+    if (!mac_valid)
+        return -1;
     outb(IO + CR, CR_PAGE0 | CR_START | CR_NODMA);
     /* PROM access above is byte-wide. Normal packet DMA uses the NE2000's
      * 16-bit datapath. */
@@ -194,11 +204,13 @@ static int ne2000_init(struct netdev *dev) {
     sel(0);
     outb(IO + CR, CR_NODMA | CR_START);
 
-    /* IRQ10 is slave-PIC line 2; also unmask the master's cascade line. */
-    outb(0x21, (uint8_t)(inb(0x21) & ~(1u << 2)));
-    outb(0xA1, (uint8_t)(inb(0xA1) & ~(1u << 2)));
+    if (irq_register_handler(10, ne2000_interrupt, 0, 1) < 0)
+        return -1;
+    irq_set_trigger(10, IRQ_TRIGGER_EDGE);
     outb(IO + ISR, 0xFF);
+    ready = 1;
     outb(IO + IMR, ISR_PRX | ISR_PTX | ISR_RXE | ISR_OVW);
+    irq_enable_line(10);
 
     serial_puts("[ne2000] MAC=");
     for (int i = 0; i < 6; i++) {
@@ -342,8 +354,13 @@ static size_t ne2000_recv(struct netdev *dev, void *buf, size_t max) {
     return result;
 }
 
-void ne2000_irq_handler(void) {
+static int ne2000_interrupt(void *context) {
+    (void)context;
+    if (!ready)
+        return 0;
     uint8_t status = inb(IO + ISR);
+    if (status == 0 || status == 0xFF)
+        return 0;
     if (status & ISR_PTX) {
         tx_complete = 1;
         if (tx_waiter > 0)
@@ -369,16 +386,20 @@ void ne2000_irq_handler(void) {
     outb(IO + ISR, status | ISR_PRX | ISR_RXE | ISR_OVW);
     if (queued || (status & (ISR_PRX | ISR_RXE | ISR_OVW)))
         net_rx_interrupt_notify();
+    return 1;
 }
 
 static struct netdev ne_dev = {
+    .name = "ne2000",
     .priv = 0,
     .init = ne2000_init,
     .send = ne2000_send,
     .recv = ne2000_recv,
 };
 
-void ne2000_init_device(void) {
+int ne2000_init_device(void) {
+    if (ne_dev.init(&ne_dev) < 0)
+        return -1;
     netdev_register(&ne_dev);
-    ne_dev.init(&ne_dev);
+    return 0;
 }

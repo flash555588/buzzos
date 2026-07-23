@@ -142,6 +142,7 @@ int  audio_config(unsigned int sample_rate);
 int  audio_config_latency(unsigned int sample_rate, unsigned int latency_ms);
 int  audio_write(const uint8_t *samples, size_t count);
 int  audio_queued(void);
+int  audio_flush(void);
 int  socket(int domain, int type, int protocol);
 int  bind(int sd, const struct sockaddr_in *addr, size_t addrlen);
 int  connect(int sd, const struct sockaddr_in *addr, size_t addrlen);

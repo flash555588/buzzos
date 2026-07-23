@@ -20,6 +20,14 @@ enum {
 
 static void *memset(void *d, int c, size_t n) { for (size_t i=0;i<n;i++) ((uint8_t*)d)[i]=(uint8_t)c; return d; }
 static void *memcpy(void *d, const void *s, size_t n) { for (size_t i=0;i<n;i++) ((uint8_t*)d)[i]=((const uint8_t*)s)[i]; return d; }
+static int memcmp(const void *a, const void *b, size_t n) {
+    const uint8_t *aa = (const uint8_t *)a;
+    const uint8_t *bb = (const uint8_t *)b;
+    for (size_t i = 0; i < n; i++)
+        if (aa[i] != bb[i])
+            return (int)aa[i] - (int)bb[i];
+    return 0;
+}
 
 uint8_t  net_mac[6];
 uint32_t net_ip   = 0x0202000A; /* 10.0.2.2 host → guest is 10.0.2.15 */
@@ -30,6 +38,7 @@ static uint32_t arp_cache_ip;
 static uint8_t arp_cache_mac[6];
 static uint32_t net_gateway_ip = 0x0202000A;
 static uint32_t net_dns_ip = 0x0302000A;
+static uint32_t net_subnet_mask = 0x00FFFFFF;
 static uint32_t net_last_dhcp_offer;
 static int net_dhcp_status;
 static uint32_t net_tx_frames;
@@ -79,6 +88,12 @@ static void net_poll_backoff(void) {
             task_block_current_prepared();
             net_rx_waiters &= ~bit;
             irq_restore(irq_flags);
+            return;
+        }
+        if (net_timer_ready()) {
+            /* The idle task cannot block through the scheduler. Wait for the
+             * next PIT tick, then poll the non-interrupt PCnet ring again. */
+            __asm__ volatile("hlt");
             return;
         }
         task_yield();
@@ -190,8 +205,12 @@ static size_t dev_recv(void *buf, size_t max) {
 }
 
 void net_init(void) {
-    ne2000_init_device();
+    (void)netdev_init();
     nd = netdev_get();
+    arp_cache_valid = 0;
+    net_gateway_ip = 0x0202000A;
+    net_dns_ip = 0x0302000A;
+    net_subnet_mask = 0x00FFFFFF;
     if (!nd || (uintptr_t)nd == (uintptr_t)~0u) {
         serial_puts("[net] no network device, using static IP\n");
         net_ip = 0x0F02000A; /* 10.0.2.15 */
@@ -283,10 +302,12 @@ static int ip_send(uint32_t dst_ip, uint8_t proto, const void *data, size_t len)
     if (dst_ip == 0xFFFFFFFFu) {
         memset(dst_mac, 0xFF, 6);
     } else {
-        /* Route through gateway (10.0.2.2) for non-local destinations */
+        /* Route non-local destinations through the gateway learned from
+         * DHCP. Keeping QEMU's 10.0.2.2 as a fallback preserves static
+         * user-mode networking without forcing that address on VMware NAT. */
         uint32_t arp_ip = dst_ip;
-        if ((dst_ip & 0x00FFFFFF) != (net_ip & 0x00FFFFFF))
-            arp_ip = 0x0202000A; /* QEMU user-mode gateway */
+        if ((dst_ip & net_subnet_mask) != (net_ip & net_subnet_mask))
+            arp_ip = net_gateway_ip ? net_gateway_ip : 0x0202000A;
         if (arp_resolve(arp_ip, dst_mac) < 0) return -1;
     }
 
@@ -1312,8 +1333,17 @@ struct dhcp_pkt {
 
 #define DHCP_MAGIC 0x63538263  /* 99.130.83.99 in LE */
 
+struct dhcp_reply {
+    uint32_t address;
+    uint32_t server;
+    uint32_t subnet_mask;
+    uint32_t gateway;
+    uint32_t dns;
+};
+
 /* Build and send a raw DHCP frame (broadcast, no IP stack needed). */
-static int dhcp_send(uint8_t msg_type, uint32_t xid, uint32_t req_ip) {
+static int dhcp_send(uint8_t msg_type, uint32_t xid, uint32_t req_ip,
+                     uint32_t server) {
     uint8_t frame[sizeof(struct eth_frame) + sizeof(struct ip_hdr)
                   + sizeof(struct udp_hdr) + sizeof(struct dhcp_pkt)];
     memset(frame, 0, sizeof(frame));
@@ -1359,16 +1389,26 @@ static int dhcp_send(uint8_t msg_type, uint32_t xid, uint32_t req_ip) {
     if (msg_type == DHCP_REQUEST && req_ip) {
         *opt++ = 50; *opt++ = 4;                  /* requested IP */
         memcpy(opt, &req_ip, 4); opt += 4;
+        if (server) {
+            *opt++ = 54; *opt++ = 4;              /* selected DHCP server */
+            memcpy(opt, &server, 4); opt += 4;
+        }
     }
-    *opt++ = 55; *opt++ = 3; *opt++ = 1; *opt++ = 3; *opt++ = 6; /* param req */
+    *opt++ = 55; *opt++ = 5;                      /* parameter request list */
+    *opt++ = 1; *opt++ = 3; *opt++ = 6; *opt++ = 51; *opt++ = 54;
     *opt++ = 255;                                 /* end */
 
     return dev_send(frame, sizeof(frame));
 }
 
-/* Wait for a DHCP reply of the given type. Returns the offered IP. */
-static uint32_t dhcp_recv(uint8_t expect_type, uint32_t xid) {
-    for (int tries = 0; tries < 300; tries++) {
+/* Wait for and decode a DHCP reply, including VMware NAT configuration. */
+static int dhcp_recv(uint8_t expect_type, uint32_t xid,
+                     struct dhcp_reply *reply) {
+    uint32_t deadline =
+        net_timer_ready() ? net_deadline_after_ms(2500u) : 0;
+    for (int tries = 0;
+         deadline ? !net_deadline_expired(deadline) : tries < 300;
+         tries++) {
         uint8_t rbuf[1514];
         size_t n = dev_recv(rbuf, sizeof(rbuf));
         if (n == 0) { net_poll_backoff(); continue; }
@@ -1379,64 +1419,107 @@ static uint32_t dhcp_recv(uint8_t expect_type, uint32_t xid) {
         if (bswap16(re->ethertype) != 0x0800) continue;
         struct ip_hdr *rip = (struct ip_hdr *)re->payload;
         if (rip->protocol != 17) continue;
-        struct udp_hdr *rudp = (struct udp_hdr *)(rip + 1);
+        uint8_t ip_hlen = (uint8_t)((rip->ver_ihl & 0x0Fu) * 4u);
+        if (ip_hlen < sizeof(*rip) ||
+            n < sizeof(*re) + ip_hlen + sizeof(struct udp_hdr))
+            continue;
+        struct udp_hdr *rudp =
+            (struct udp_hdr *)((uint8_t *)rip + ip_hlen);
         if (bswap16(rudp->src_port) != 67) continue;
         if (bswap16(rudp->dst_port) != 68) continue;
 
+        size_t udp_len = bswap16(rudp->length);
+        if (udp_len < sizeof(*rudp) + offsetof(struct dhcp_pkt, options) ||
+            udp_len > n - sizeof(*re) - ip_hlen)
+            continue;
         struct dhcp_pkt *dhcp = (struct dhcp_pkt *)(rudp + 1);
         if (dhcp->op != 2) continue;
         if (dhcp->xid != xid) continue;
         if (dhcp->cookie != DHCP_MAGIC) continue;
+        if (memcmp(dhcp->chaddr, net_mac, 6) != 0) continue;
 
-        /* Find message type in options */
+        struct dhcp_reply found;
+        memset(&found, 0, sizeof(found));
+        found.address = dhcp->yiaddr;
+        found.server = dhcp->siaddr;
+
+        /* Options extend to the UDP payload boundary, not just our compact
+         * outbound packet's 64-byte option storage. */
         uint8_t *opt = dhcp->options;
-        uint8_t *end = opt + sizeof(dhcp->options);
+        uint8_t *end = (uint8_t *)rudp + udp_len;
         uint8_t found_type = 0;
         while (opt < end && *opt != 255) {
             uint8_t code = *opt++;
             if (code == 0) continue;  /* padding */
+            if (opt >= end) break;
             uint8_t olen = *opt++;
-            if (code == 53 && olen >= 1) found_type = *opt;
+            if ((size_t)(end - opt) < olen) break;
+            if (code == 53 && olen >= 1)
+                found_type = opt[0];
+            else if (code == 54 && olen >= 4)
+                memcpy(&found.server, opt, 4);
+            else if (code == 1 && olen >= 4)
+                memcpy(&found.subnet_mask, opt, 4);
+            else if (code == 3 && olen >= 4)
+                memcpy(&found.gateway, opt, 4);
+            else if (code == 6 && olen >= 4)
+                memcpy(&found.dns, opt, 4);
             opt += olen;
         }
         if (found_type != expect_type) continue;
 
-        return dhcp->yiaddr;
+        *reply = found;
+        return 0;
     }
-    return 0;
+    return -1;
 }
 
 int net_dhcp(void) {
     uint32_t xid = 0xBEEF0001;
+    struct dhcp_reply offer;
+    struct dhcp_reply ack;
 
     net_dhcp_status = 0;
     net_last_dhcp_offer = 0;
     dbg("dhcp: DISCOVER\n");
-    if (dhcp_send(DHCP_DISCOVER, xid, 0) < 0) {
+    if (dhcp_send(DHCP_DISCOVER, xid, 0, 0) < 0) {
         net_dhcp_status = -1;
         dbg("dhcp: send failed\n"); return -1;
     }
 
-    uint32_t offered = dhcp_recv(DHCP_OFFER, xid);
-    if (!offered) { net_dhcp_status = -1; dbg("dhcp: no OFFER\n"); return -1; }
-    net_last_dhcp_offer = offered;
+    if (dhcp_recv(DHCP_OFFER, xid, &offer) < 0 || !offer.address) {
+        net_dhcp_status = -1; dbg("dhcp: no OFFER\n"); return -1;
+    }
+    net_last_dhcp_offer = offer.address;
     serial_puts("[dhcp] offered IP=");
-    serial_puthex(offered);
+    serial_puthex(offer.address);
     serial_puts("\n");
 
     dbg("dhcp: REQUEST\n");
-    if (dhcp_send(DHCP_REQUEST, xid, offered) < 0) {
+    if (dhcp_send(DHCP_REQUEST, xid, offer.address, offer.server) < 0) {
         net_dhcp_status = -1;
         dbg("dhcp: send failed\n"); return -1;
     }
 
-    uint32_t acked = dhcp_recv(DHCP_ACK, xid);
-    if (!acked) { net_dhcp_status = -1; dbg("dhcp: no ACK\n"); return -1; }
+    if (dhcp_recv(DHCP_ACK, xid, &ack) < 0 || !ack.address) {
+        net_dhcp_status = -1; dbg("dhcp: no ACK\n"); return -1;
+    }
 
-    net_ip = acked;
+    net_ip = ack.address;
+    net_subnet_mask =
+        ack.subnet_mask ? ack.subnet_mask :
+        (offer.subnet_mask ? offer.subnet_mask : 0x00FFFFFF);
+    net_gateway_ip = ack.gateway ? ack.gateway : offer.gateway;
+    net_dns_ip = ack.dns ? ack.dns : offer.dns;
+    if (!net_dns_ip)
+        net_dns_ip = net_gateway_ip;
     net_dhcp_status = 1;
     serial_puts("[dhcp] IP assigned: ");
     serial_puthex(net_ip);
+    serial_puts(" gateway=");
+    serial_puthex(net_gateway_ip);
+    serial_puts(" dns=");
+    serial_puthex(net_dns_ip);
     serial_puts("\n");
     return 0;
 }
@@ -1506,7 +1589,10 @@ int net_status_text(char *buf, int size) {
     if (!buf || size <= 0)
         return -1;
 
-    status_append_text(buf, &pos, size, "driver ne2000\n");
+    status_append_text(buf, &pos, size, "driver ");
+    status_append_text(buf, &pos, size,
+                       (nd && nd->name) ? nd->name : "none");
+    status_append_char(buf, &pos, size, '\n');
 
     status_append_text(buf, &pos, size, "mac ");
     status_append_mac(buf, &pos, size, net_mac);

@@ -10,6 +10,9 @@
  * After this call, virtual == physical for the managed low-memory window. */
 void paging_init(void);
 void paging_set_framebuffer(uintptr_t phys_addr, uint32_t size);
+/* Map a small device MMIO range into the kernel-only MMIO window.  The
+ * returned virtual address preserves the original byte offset. */
+void *paging_map_mmio(uintptr_t phys_addr, uint32_t size);
 uint32_t paging_current_cr3(void);
 uint32_t paging_kernel_cr3(void);
 void paging_switch(uint32_t cr3);
@@ -44,6 +47,11 @@ enum {
     KERNEL_FB_VIRT = 0x10000000u,
     KERNEL_FB_TABLES = 4u,
     KERNEL_FB_SIZE = KERNEL_FB_TABLES * 0x00400000u,
+    KERNEL_MMIO_VIRT = 0x11000000u,
+    KERNEL_MMIO_SIZE = 0x00400000u,
+    /* One 4 MiB uncached identity window covers the standard I/O APIC at
+     * 0xFEC00000 and Local APIC at 0xFEE00000. */
+    KERNEL_APIC_MMIO_BASE = 0xFEC00000u,
 };
 
 #endif /* BUZZOS_PAGING_H */

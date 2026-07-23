@@ -4,6 +4,7 @@ section .text
 
 extern exception_handler
 extern syscall_handler
+extern irq_dispatch
 
 ; Stack layout before common_exception:
 ;   no-error exceptions: [vector, error=0, cpu frame...]
@@ -63,19 +64,51 @@ EXC_NOERR 18
 EXC_NOERR 19
 EXC_NOERR 20
 EXC_ERR   21
+EXC_NOERR 22
+EXC_NOERR 23
+EXC_NOERR 24
+EXC_NOERR 25
+EXC_NOERR 26
+EXC_NOERR 27
+EXC_NOERR 28
+EXC_ERR   29
+EXC_ERR   30
+EXC_NOERR 31
+
+; Per-vector fallbacks for unused external vectors.  Each stub preserves the
+; actual vector number and never assumes that the CPU pushed an error code.
+; Named CPU exceptions and hardware IRQs replace these gates in idt.c.
+%assign default_vector 0
+%rep 256
+global default_stub_%+default_vector
+default_stub_%+default_vector:
+    push dword 0
+    push dword default_vector
+    jmp common_exception
+%assign default_vector default_vector+1
+%endrep
+
+section .rodata
+align 4
+global default_stub_table
+default_stub_table:
+%assign default_vector 0
+%rep 256
+    dd default_stub_%+default_vector
+%assign default_vector default_vector+1
+%endrep
+
+section .text
 
 %macro DUMMY_IRQ 1
 global irq_stub_%1
 irq_stub_%1:
-    push dword 0
-    push dword %1
     pusha
-    push esp
-    push dword 0
-    push dword %1
-    call exception_handler
-    add esp, 12
-    jmp common_iret
+    push dword (%1 - 32)
+    call irq_dispatch
+    add esp, 4
+    popa
+    iret
 %endmacro
 
 extern keyboard_handler
@@ -133,28 +166,24 @@ irq_stub_37:
   %assign i i+1
 %endrep
 
-; NE2000 IRQ10 (slave PIC IRQ2 -> INT 42). The driver drains the small NIC
-; ring into a software queue before acknowledging the PIC.
-extern ne2000_irq_handler
+; Shared PCI/legacy IRQ10 and PCI IRQ11. The C IRQ layer masks and
+; acknowledges the 8259, dispatches every registered shared handler, and
+; unmasks only after all device interrupt sources have been cleared.
 global irq_stub_42
 irq_stub_42:
     pusha
-    call ne2000_irq_handler
-    mov al, 0x20
-    out 0xA0, al
-    out 0x20, al
+    push dword 10
+    call irq_dispatch
+    add esp, 4
     popa
     iret
 
-; Intel ICH AC97 PCI IRQ11.
-extern ac97_irq_handler
 global irq_stub_43
 irq_stub_43:
     pusha
-    call ac97_irq_handler
-    mov al, 0x20
-    out 0xA0, al
-    out 0x20, al
+    push dword 11
+    call irq_dispatch
+    add esp, 4
     popa
     iret
 
@@ -178,6 +207,11 @@ irq_stub_44:
     out 0xA0, al
     out 0x20, al
     popa
+    iret
+
+; Local APIC spurious vector. No EOI is required for a spurious interrupt.
+global apic_spurious_stub
+apic_spurious_stub:
     iret
 
 %assign i 45

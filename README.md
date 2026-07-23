@@ -80,6 +80,12 @@ make
 make run
 ```
 
+使用 Intel HD Audio 控制器和 HDA duplex codec 启动：
+
+```sh
+make run-hda
+```
+
 在可见 QEMU 窗口运行，并把串口日志写入 `build/serial-live.log`：
 
 ```sh

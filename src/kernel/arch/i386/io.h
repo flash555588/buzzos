@@ -37,6 +37,15 @@ static inline uint32_t inl(uint16_t port) {
     return ret;
 }
 
+/*
+ * Publish normal memory stores before handing a buffer to a bus-mastering
+ * device.  x86 already orders the stores in hardware; the compiler barrier
+ * prevents C stores from moving past the register write that starts DMA.
+ */
+static inline void io_dma_wmb(void) {
+    __asm__ volatile("" ::: "memory");
+}
+
 static inline void io_insw(uint16_t port, void *buf, uint32_t words) {
     __asm__ volatile("cld; rep insw"
                      : "+D"(buf), "+c"(words)

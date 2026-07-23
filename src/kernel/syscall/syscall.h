@@ -41,7 +41,7 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_MONOTONIC_MS=55, SYS_REALTIME=56,
        SYS_SHM_CREATE=57, SYS_SHM_MAP=58, SYS_SHM_UNMAP=59,
        SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62,
-       SYS_AUDIO_QUEUED=63 };
+       SYS_AUDIO_QUEUED=63, SYS_AUDIO_FLUSH=64 };
 
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);

@@ -7,7 +7,6 @@
 #define MIX_CHANNELS 16
 #define MIX_RATE 11025
 #define MIX_CHUNK 96
-#define TARGET_QUEUED 480
 
 struct mix_channel {
     const byte *samples;
@@ -24,6 +23,7 @@ static boolean use_prefix;
 static snddevice_t devices[] = { SNDDEVICE_SB };
 static volatile int mixer_running;
 static volatile int mixer_lock;
+static int mixer_tid = -1;
 
 /* Configuration variables normally supplied by the SDL sound module. */
 int use_libsamplerate = 0;
@@ -69,6 +69,22 @@ static void mix_samples(int count) {
     }
 }
 
+static int write_mixed_samples(int count) {
+    int offset = 0;
+    while (offset < count && mixer_running) {
+        int written =
+            audio_write(mix_buffer + offset, (size_t)(count - offset));
+        if (written < 0)
+            return -1;
+        if (written == 0) {
+            sleep_ms(1);
+            continue;
+        }
+        offset += written;
+    }
+    return offset;
+}
+
 static void mixer_thread(void) {
     uint32_t last = monotonic_ms();
     uint32_t fraction = 0;
@@ -87,11 +103,15 @@ static void mixer_thread(void) {
             lock_mixer();
             mix_samples(count);
             unlock_mixer();
-            /* If rendering or scheduling fell behind, advance the mixer but
-             * do not extend an already-long hardware queue. */
-            int queued = audio_queued();
-            if (queued >= 0 && queued < TARGET_QUEUED)
-                (void)audio_write(mix_buffer, (size_t)count);
+            /*
+             * The device is the playback clock. Never advance channel state
+             * and then throw away the mixed block merely because the
+             * non-blocking kernel queue is temporarily full.
+             */
+            if (write_mixed_samples(count) < 0) {
+                mixer_running = 0;
+                break;
+            }
             due -= (uint32_t)count;
         }
         sleep_ms(1);
@@ -103,15 +123,21 @@ static boolean buzz_sound_init(boolean prefix) {
     memset(channels, 0, sizeof(channels));
     if (audio_config_latency(MIX_RATE, 40) < 0) return false;
     mixer_running = 1;
-    if (spawn(mixer_thread) < 0) { mixer_running = 0; return false; }
+    mixer_tid = spawn(mixer_thread);
+    if (mixer_tid < 0) { mixer_running = 0; return false; }
     return true;
 }
 
 static void buzz_sound_shutdown(void) {
     mixer_running = 0;
+    if (mixer_tid >= 0) {
+        (void)join(mixer_tid);
+        mixer_tid = -1;
+    }
     lock_mixer();
     memset(channels, 0, sizeof(channels));
     unlock_mixer();
+    (void)audio_flush();
 }
 
 /* Mixing runs from mixer_thread; this callback only preserves the upstream

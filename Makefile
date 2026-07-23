@@ -23,6 +23,8 @@ KERNEL_SRCS := \
 	src/kernel/core/exec.c \
 	src/kernel/arch/i386/gdt.c \
 	src/kernel/arch/i386/idt.c \
+	src/kernel/arch/i386/irq.c \
+	src/kernel/arch/i386/apic.c \
 	src/kernel/arch/i386/paging.c \
 	src/kernel/arch/i386/fpu.c \
 	src/kernel/arch/i386/user.c \
@@ -52,10 +54,14 @@ KERNEL_SRCS := \
 	src/kernel/drv/timer.c \
 	src/kernel/drv/rtc.c \
 	src/kernel/drv/serial.c \
+	src/kernel/drv/pci.c \
+	src/kernel/drv/audio.c \
+	src/kernel/drv/hda.c \
 	src/kernel/drv/ac97.c \
 	src/kernel/drv/font_unicode.c \
 	src/kernel/drv/fb.c \
 	src/kernel/drv/reboot.c \
+	src/kernel/drv/pcnet.c \
 	src/kernel/drv/ne2000.c
 
 KERNEL_ASMS := \
@@ -86,11 +92,17 @@ QEMU_ACCEL ?= whpx
 QEMU_CPU ?= qemu64
 # SDL+GL is much faster than default GTK under WHPX; clarity is acceptable.
 QEMU_DISPLAY ?= sdl,gl=on
-QEMU_COMMON := -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 256 \
+QEMU_BASE := -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 256 \
 	-drive format=raw,file=$(IMAGE) -no-reboot -vga std \
-	-display $(QEMU_DISPLAY) \
-	-audiodev dsound,id=audio0 -device AC97,audiodev=audio0 \
+	-display $(QEMU_DISPLAY)
+QEMU_AUDIO_AC97 := -audiodev dsound,id=audio0 \
+	-device AC97,audiodev=audio0
+QEMU_AUDIO_HDA := -audiodev dsound,id=audio0 \
+	-device intel-hda -device hda-duplex,audiodev=audio0
+QEMU_NET := \
 	-netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
+QEMU_COMMON := $(QEMU_BASE) $(QEMU_AUDIO_AC97) $(QEMU_NET)
+QEMU_HDA_COMMON := $(QEMU_BASE) $(QEMU_AUDIO_HDA) $(QEMU_NET)
 LIMINE_DIR ?= D:/limine-binary/limine-binary
 
 KERNEL_INCLUDES := \
@@ -175,7 +187,7 @@ FONT_H := src/kernel/drv/font_builtin.h
 UNICODE_FONT_H := src/kernel/drv/font_unicode_data.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
-.PHONY: all clean help doctor run run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify image-reset-fs new-app doom-install gameboy-install music-install
+.PHONY: all clean help doctor run run-hda run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify image-reset-fs new-app doom-install gameboy-install music-install
 
 # These objects are prerequisites of pattern-built user ELFs, not disposable
 # intermediates. Keeping them makes source timestamp changes rebuild reliably.
@@ -472,6 +484,9 @@ doctor:
 
 run: $(IMAGE)
 	$(QEMU) $(QEMU_COMMON) -serial stdio
+
+run-hda: $(IMAGE)
+	$(QEMU) $(QEMU_HDA_COMMON) -serial stdio
 
 run-current:
 	powershell -NoProfile -Command "if (!(Test-Path '$(IMAGE)')) { throw '$(IMAGE) does not exist. Run make first.' }"

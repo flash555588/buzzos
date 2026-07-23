@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 struct netdev {
+    const char *name;
     uint8_t  mac[6];
     void    *priv;
 
@@ -14,9 +15,10 @@ struct netdev {
 
 void netdev_register(struct netdev *dev);
 struct netdev *netdev_get(void);
+int netdev_init(void);
 
 /* Built-in drivers */
-void ne2000_init_device(void);
-void ne2000_irq_handler(void);
+int pcnet_init_device(void);
+int ne2000_init_device(void);
 
 #endif

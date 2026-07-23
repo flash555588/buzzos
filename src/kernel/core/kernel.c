@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "exec.h"
+#include "apic.h"
 #include "gdt.h"
 #include "idt.h"
 #include "keyboard.h"
@@ -8,9 +9,10 @@
 #include "net.h"
 #include "paging.h"
 #include "fpu.h"
+#include "pci.h"
 #include "pmm.h"
 #include "serial.h"
-#include "ac97.h"
+#include "audio.h"
 #include "syscall.h"
 #include "task.h"
 #include "timer.h"
@@ -209,6 +211,7 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     }
     copy_multiboot_mmap(mb_info_addr);
     copy_multiboot_framebuffer(mb_info_addr);
+    apic_discover(mb_info_addr);
     gdt_install();
     idt_install();
 
@@ -220,10 +223,13 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     }
     syscall_init();
     pmm_init();
-    (void)ac97_init();
+    pci_init();
     if (boot_fb.present)
         paging_set_framebuffer((uintptr_t)boot_fb.addr, boot_fb.pitch * boot_fb.height);
     paging_init();
+    if (apic_initialize() < 0)
+        serial_puts("[apic] unavailable; PCI INTx uses legacy PIC\n");
+    (void)audio_init();
     if (boot_fb.present)
         fb_set_framebuffer(boot_fb.addr, boot_fb.width, boot_fb.height,
                            boot_fb.pitch, boot_fb.bpp);
@@ -259,11 +265,18 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     serial_puts("[boot] initrd files registered\n");
     seed_user_apps();
     serial_puts("[boot] user apps seeded\n");
-    net_init();
-    serial_puts("[boot] net init ok\n");
 
     sched_init();
     timer_init();
+    (void)audio_start_worker();
+    /* VMware's hosted NAT backend can take tens of milliseconds to attach.
+     * Run DHCP only after the PIT and scheduler exist so receive waits use a
+     * real deadline instead of a CPU-speed-dependent early-boot spin. */
+    while (timer_ticks() == 0)
+        __asm__ volatile("hlt");
+    net_init();
+    serial_puts("[boot] net init ok\n");
+
     if (exec_start(initrd_bin_sh_data, INITRD_BIN_SH_SIZE, "sh", 0) < 0)
         serial_puts("[boot] failed to start user shell\n");
     else

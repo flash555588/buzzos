@@ -66,7 +66,7 @@ static void send_audio(void){
   * part of the kernel FIFO.  Dropping that unwritten tail produces audible
   * gaps whenever rendering briefly outruns AC97.  Treat the hardware stream
   * as the master clock and retain every emulated sample. */
- uint32_t started=monotonic_ms();u32 offset=0;while(offset<count&&!closed){int n=audio_write(mono_audio+offset,count-offset);if(n<0)break;if(n==0){yield();if(monotonic_ms()-started>=100u)break;continue;}offset+=(u32)n;}
+ u32 offset=0;while(offset<count&&!closed){int n=audio_write(mono_audio+offset,count-offset);if(n<0)break;if(n==0){sleep_ms(1);continue;}offset+=(u32)n;}
 }
 #ifndef BINJGB_BUZZOS_INDEXED_COLOR
 static void init_color_tables(void){for(unsigned i=0;i<256;i++){unsigned q=i*5u/255u;color_r[i]=(uint8_t)(40u+q*36u);color_g[i]=(uint8_t)(q*6u);color_b[i]=(uint8_t)q;}}
@@ -100,7 +100,7 @@ int main(int argc,char**argv){
  if(choose_rom(argc>4?argv[4]:0)<0)return message("Game Boy Color - ROM required","No .gb or .gbc ROM was found.","Put a legally obtained ROM in /fs/games/gameboy/ and reopen.");
  FileData rom={0};if(load_rom(&rom)<0)return message("Game Boy Color - ROM error","The selected ROM has an invalid size or could not be read.",rom_path);
  char game_name[17];memset(game_name,0,sizeof(game_name));for(int i=0;i<16&&rom.data[0x134+i];i++){uint8_t c=rom.data[0x134+i];game_name[i]=(c>=32&&c<127)?(char)c:' ';}
- if(audio_config(AUDIO_RATE)<0)return message("Game Boy Color - audio error","AC97 could not select 44100 Hz playback.",rom_path);
+ if(audio_config_latency(AUDIO_RATE,60)<0)return message("Game Boy Color - audio error","No audio device could select 44100 Hz playback.",rom_path);
  EmulatorInit init;memset(&init,0,sizeof(init));init.rom=rom;init.audio_frequency=AUDIO_RATE;init.audio_frames=AUDIO_FRAMES;init.builtin_palette=0;init.cgb_color_curve=CGB_COLOR_CURVE_SAMEBOY_EMULATE_HARDWARE;
  emulator=emulator_new(&init);if(!emulator)return message("Game Boy Color - unsupported ROM","binjgb could not initialize this cartridge.",rom_path);
  make_save_path();load_save();char title[GUIAPP_TITLE_MAX];snprintf(title,sizeof(title),"Game Boy Color - %s",game_name[0]?game_name:"Game");
@@ -119,5 +119,5 @@ int main(int argc,char**argv){
   render(title);if(emulator_was_ext_ram_updated(emulator))dirty=1;now=monotonic_ms();if(dirty&&now-last_save>=5000){save_game();dirty=0;last_save=now;}
   if((int32_t)(frame_due-now)>0)sleep_ms(frame_due-now);else if((int32_t)(now-frame_due)>100)frame_due=now;
  }
- if(dirty)save_game();emulator_delete(emulator);return invalid?3:0;
+ if(dirty)save_game();(void)audio_flush();emulator_delete(emulator);return invalid?3:0;
 }
