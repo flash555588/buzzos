@@ -937,18 +937,9 @@ static void draw_progress(int w, int h, uint32_t pos) {
 }
 
 static void draw_icon_button(int w, int h, struct appui_rect r, const char *label, int primary) {
-    int hover = appui_inside(mouse_x, mouse_y, r);
-    int edge = primary ? THEME_ACCENT : (hover ? appui_gray(7) : appui_gray(0));
-    int bg = primary ? (hover ? THEME_ACCENT : THEME_ACCENT_DIM)
-                     : (hover ? appui_gray(4) : THEME_WIN_CONTROL);
-    int tw = appui_text_width(label);
-    int tx = r.x + (r.w - tw) / 2;
-    int ty = r.y + (r.h - 16) / 2;
-    appui_fill_round(pixels, w, h, r, edge);
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, bg);
-    appui_text(pixels, w, h, tx, ty, label, THEME_TEXT, -1,
-               (struct appui_rect){r.x + 2, r.y + 2, r.w - 4, r.h - 4});
+    int state = appui_pointer_state(r, mouse_x, mouse_y, prev_mouse_buttons);
+    appui_button_ex(pixels, w, h, r, label,
+                    primary ? APPUI_BTN_PRIMARY : APPUI_BTN_DEFAULT, state);
 }
 
 static void render_frame(int *out_w, int *out_h) {
@@ -1018,13 +1009,16 @@ static void render_frame(int *out_w, int *out_h) {
         draw_icon_button(w, h, sb, "Stop", 0);
     }
 
-    if (w >= 560)
+    if (w >= 680)
         draw_label(w, h, m, layout_help_y(),
-                   "Space: play/pause   R: restart   S: stop   Click: seek",
-                   THEME_TEXT_FAINT, w - 2 * m);
+                    "Space: play/pause   R: restart   S: stop   Click: seek",
+                    THEME_TEXT_FAINT, w - 2 * m);
+    else if (w >= 420)
+        draw_label(w, h, m, layout_help_y(),
+                    "Space play/pause  R restart  S stop",
+                    THEME_TEXT_FAINT, w - 2 * m);
     else
-        draw_label(w, h, m, layout_help_y(),
-                   "Space play/pause  R restart  S stop",
+        draw_label(w, h, m, layout_help_y(), "Space play/pause",
                    THEME_TEXT_FAINT, w - 2 * m);
 
     if (out_w) *out_w = w;

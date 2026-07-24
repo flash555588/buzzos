@@ -2,7 +2,15 @@
 #include "guiapp.h"
 #include "libc.h"
 
-enum { MAX_W = GUIAPP_MAX_W, MAX_H = GUIAPP_MAX_H, TEXT_CAP = 4096 };
+enum {
+    MAX_W = GUIAPP_MAX_W,
+    MAX_H = GUIAPP_MAX_H,
+    TEXT_CAP = 4096,
+    TOOLBAR_H = 50,
+    TOOL_BUTTON_W = 92,
+    TOOL_BUTTON_H = 34,
+    TOOL_BUTTON_GAP = 8,
+};
 
 static uint8_t pixels[MAX_W * MAX_H];
 static char textbuf[TEXT_CAP];
@@ -11,6 +19,9 @@ static int cursor;
 static int selection_anchor;
 static int selecting;
 static int prev_buttons;
+static int pointer_x = -1;
+static int pointer_y = -1;
+static int pointer_buttons;
 static int w = 560;
 static int h = 360;
 static int scroll_x;
@@ -50,7 +61,13 @@ static void set_document_path(const char *path) {
 }
 
 static struct appui_rect editor_rect(void) {
-    return (struct appui_rect){4, 46, w - 8, h - 50};
+    return (struct appui_rect){4, TOOLBAR_H + 4, w - 8,
+                               h - TOOLBAR_H - 8};
+}
+
+static struct appui_rect toolbar_button_rect(int index) {
+    return (struct appui_rect){10 + index * (TOOL_BUTTON_W + TOOL_BUTTON_GAP),
+                               8, TOOL_BUTTON_W, TOOL_BUTTON_H};
 }
 
 static struct appui_rect text_clip_rect(void) {
@@ -371,26 +388,70 @@ static struct appui_rect hthumb(void) {
     return (struct appui_rect){t.x + scroll_x * (t.w - tw) / maxs, t.y, tw, t.h};
 }
 
+static void draw_status_tail(int x, int y, const char *text, int color,
+                             struct appui_rect clip) {
+    int available = clip.x + clip.w - x;
+    int width = appui_text_width(text);
+    if (available <= 0)
+        return;
+    if (width <= available) {
+        appui_text(pixels, w, h, x, y, text, color, -1, clip);
+        return;
+    }
+    const char *ellipsis = "...";
+    int ellipsis_width = appui_text_width(ellipsis);
+    const char *tail = text;
+    while (*tail && width + ellipsis_width > available) {
+        const char *next = tail;
+        uint32_t codepoint = appui_utf8_next(&next);
+        width -= appui_codepoint_width(codepoint);
+        tail = next;
+    }
+    if (ellipsis_width >= available) {
+        appui_text(pixels, w, h, x, y, ellipsis, color, -1, clip);
+        return;
+    }
+    appui_text(pixels, w, h, x, y, ellipsis, color, -1, clip);
+    appui_text(pixels, w, h, x + ellipsis_width, y, tail, color, -1, clip);
+}
+
 static void draw_scrollbars(void) {
-    appui_fill(pixels, w, h, vtrack(), 15);
-    appui_fill(pixels, w, h, htrack(), 15);
-    appui_fill(pixels, w, h, vthumb(), max_scroll_y() ? appui_gray(8) : appui_gray(11));
-    appui_fill(pixels, w, h, hthumb(), max_scroll_x() ? appui_gray(8) : appui_gray(11));
+    if (max_scroll_y() > 0) {
+        struct appui_rect thumb = vthumb();
+        thumb.x += 4;
+        thumb.w -= 8;
+        appui_fill_round(pixels, w, h, thumb, THEME_WIN_HOVER);
+    }
+    if (max_scroll_x() > 0) {
+        struct appui_rect thumb = hthumb();
+        thumb.y += 4;
+        thumb.h -= 8;
+        appui_fill_round(pixels, w, h, thumb, THEME_WIN_HOVER);
+    }
 }
 
 static void render(void) {
     clamp_scrolls();
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, appui_gray(3));
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, 42}, appui_gray(2));
-    appui_button(pixels, w, h, (struct appui_rect){10, 8, 70, 26}, "Open", 0);
-    appui_button(pixels, w, h, (struct appui_rect){88, 8, 70, 26}, "Save", 0);
-    appui_button(pixels, w, h, (struct appui_rect){166, 8, 70, 26}, "Clear", 0);
-    appui_text(pixels, w, h, 250, 13, status, appui_gray(12), -1,
-               (struct appui_rect){250, 8, w - 260, 28});
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H},
+               THEME_TOOLBAR_BG);
+    struct appui_rect open = toolbar_button_rect(0);
+    struct appui_rect save = toolbar_button_rect(1);
+    struct appui_rect clear = toolbar_button_rect(2);
+    appui_button_ex(pixels, w, h, open, "Open", APPUI_BTN_DEFAULT,
+                    appui_pointer_state(open, pointer_x, pointer_y, pointer_buttons));
+    appui_button_ex(pixels, w, h, save, "Save", APPUI_BTN_PRIMARY,
+                    appui_pointer_state(save, pointer_x, pointer_y, pointer_buttons));
+    appui_button_ex(pixels, w, h, clear, "Clear", APPUI_BTN_DANGER,
+                    appui_pointer_state(clear, pointer_x, pointer_y, pointer_buttons));
+    int status_x = 10 + 3 * (TOOL_BUTTON_W + TOOL_BUTTON_GAP) + 4;
+    draw_status_tail(status_x, 15, status, THEME_TEXT_DIM,
+                     (struct appui_rect){status_x, 8, w - status_x - 10,
+                                         TOOL_BUTTON_H});
 
     struct appui_rect editor = editor_rect();
-    appui_fill(pixels, w, h, editor, 15);
-    appui_border(pixels, w, h, editor, appui_gray(5), appui_gray(0));
+    appui_fill(pixels, w, h, editor, THEME_DOCUMENT_BG);
+    appui_border(pixels, w, h, editor, THEME_FIELD_BORDER, THEME_DIVIDER);
     struct appui_rect clip = text_clip_rect();
     int x = clip.x - scroll_x;
     int y = clip.y - scroll_y;
@@ -423,24 +484,27 @@ static void render(void) {
             int ey = appui_min(y - PLT_FONT_Y_SHIFT + KFONT_HEIGHT, clip.y + clip.h);
             if (ex > sx && ey > sy)
                 appui_fill(pixels, w, h, (struct appui_rect){sx, sy, ex - sx, ey - sy},
-                           appui_rgb6(2, 4, 5));
+                           THEME_SELECTION_BG);
         }
         if (y + KFONT_HEIGHT >= clip.y && y < clip.y + clip.h &&
             x + glyph_w >= clip.x && x < clip.x + clip.w)
-            appui_draw_codepoint(pixels, w, h, x, y, cp, 0, -1, clip);
+            appui_draw_codepoint(pixels, w, h, x, y, cp,
+                                 THEME_DOCUMENT_TEXT, -1, clip);
         x += glyph_w;
     }
-    appui_fill(pixels, w, h, (struct appui_rect){cur_x, cur_y - PLT_FONT_Y_SHIFT, 2, KFONT_HEIGHT + 2},
-               appui_rgb6(0, 2, 5));
+    appui_fill(pixels, w, h,
+               (struct appui_rect){cur_x, cur_y - PLT_FONT_Y_SHIFT,
+                                   2, KFONT_HEIGHT + 2},
+               THEME_FOCUS);
     draw_scrollbars();
 }
 
 static void click(int x, int y) {
-    if (appui_inside(x, y, (struct appui_rect){10, 8, 70, 26}))
+    if (appui_inside(x, y, toolbar_button_rect(0)))
         load_file();
-    else if (appui_inside(x, y, (struct appui_rect){88, 8, 70, 26}))
+    else if (appui_inside(x, y, toolbar_button_rect(1)))
         save_file();
-    else if (appui_inside(x, y, (struct appui_rect){166, 8, 70, 26})) {
+    else if (appui_inside(x, y, toolbar_button_rect(2))) {
         text_len = 0;
         cursor = 0;
         selection_anchor = 0;
@@ -450,6 +514,9 @@ static void click(int x, int y) {
 }
 
 static void mouse(int x, int y, int buttons, int wheel) {
+    pointer_x = x;
+    pointer_y = y;
+    pointer_buttons = buttons;
     int pressed = (buttons & 1) && !(prev_buttons & 1);
     if (wheel)
         scroll_y -= wheel * 40;

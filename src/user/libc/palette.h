@@ -128,25 +128,62 @@ static int plt_blend(int fg, int bg, int alpha) {
     return plt_rgb_to_index((r << 16) | (g << 8) | bl);
 }
 
-/* Modern dark theme palette (VS Code / macOS dark inspired). */
-#define THEME_ACCENT          plt_cube(0, 3, 5)   /* (0,153,255)   */
-#define THEME_ACCENT_DIM      plt_cube(0, 2, 4)   /* (0,102,204)   */
-#define THEME_ACCENT_SOFT     plt_cube(0, 1, 2)   /* (0,51,102)    */
-#define THEME_WIN_BODY        plt_gray(1)         /* 46,46,46      */
-#define THEME_WIN_PANEL       plt_gray(2)         /* 60,60,60      */
-#define THEME_WIN_CONTROL     plt_gray(3)         /* 74,74,74      */
-#define THEME_WIN_BORDER_ACT  THEME_ACCENT_DIM
-#define THEME_WIN_BORDER_INACT plt_gray(0)
-#define THEME_TITLE_ACT       plt_gray(2)
-#define THEME_TITLE_INACT     plt_gray(1)
-#define THEME_TEXT            15                  /* white         */
-#define THEME_TEXT_DIM        plt_gray(9)         /* 158,158,158   */
-#define THEME_TEXT_FAINT      plt_gray(7)         /* 130,130,130   */
-#define THEME_CLOSE_RED       plt_cube(5, 2, 2)   /* (255,102,102) */
-#define THEME_MIN_YELLOW      plt_cube(5, 4, 1)   /* (255,204,51)  */
-#define THEME_MAX_GREEN       plt_cube(2, 4, 2)   /* (102,204,102) */
+/* Cohesive dark theme.  The custom palette entries at 16..24 give the UI a
+ * calmer slate/blue identity than the fully saturated RGB cube while keeping
+ * every color deterministic on the 8-bit framebuffer. */
+#define THEME_DESKTOP_BASE     16                 /* #182848       */
+#define THEME_DESKTOP_DEEP     plt_gray(0)        /* #202020       */
+#define THEME_TOPBAR           plt_gray(0)
+#define THEME_TOPBAR_BORDER    17                 /* #285080       */
 
-/* The built-in 12x22 font carries ~6px of empty space above cap height,
+#define THEME_ACCENT           20                 /* #70B0F8       */
+#define THEME_ACCENT_DIM       19                 /* #5088D8       */
+#define THEME_ACCENT_SOFT      17                 /* #285080       */
+#define THEME_FOCUS            THEME_ACCENT
+
+#define THEME_WIN_BODY         plt_gray(1)        /* 46,46,46      */
+#define THEME_WIN_PANEL        plt_gray(2)        /* 60,60,60      */
+#define THEME_WIN_CONTROL      plt_gray(3)        /* 74,74,74      */
+#define THEME_WIN_HOVER        plt_gray(4)        /* 88,88,88      */
+#define THEME_WIN_PRESSED      plt_gray(2)
+#define THEME_WIN_BORDER_ACT   18                 /* #3868B0       */
+#define THEME_WIN_BORDER_INACT plt_gray(3)
+#define THEME_TITLE_ACT        plt_gray(2)
+#define THEME_TITLE_INACT      plt_gray(1)
+
+#define THEME_TEXT             15                 /* white         */
+#define THEME_TEXT_DIM         plt_gray(10)       /* 172,172,172   */
+#define THEME_TEXT_FAINT       plt_gray(7)        /* 130,130,130   */
+#define THEME_TEXT_ON_LIGHT    0
+
+#define THEME_CLOSE_RED        plt_cube(5, 2, 2)  /* (255,102,102) */
+#define THEME_DANGER           THEME_CLOSE_RED
+#define THEME_DANGER_DIM       24                 /* #6C2C28       */
+#define THEME_MIN_YELLOW       plt_cube(5, 4, 1)  /* (255,204,51)  */
+#define THEME_MAX_GREEN        22                 /* #48B870       */
+
+/* Semantic application surfaces.  Apps should prefer these names over raw
+ * palette indices so light document canvases and dark controls remain an
+ * intentional, shared visual system. */
+#define THEME_APP_BG           THEME_WIN_BODY
+#define THEME_TOOLBAR_BG       THEME_WIN_PANEL
+#define THEME_PANEL_BG         THEME_WIN_BODY
+#define THEME_PANEL_RAISED     THEME_WIN_PANEL
+#define THEME_DIVIDER          THEME_WIN_CONTROL
+#define THEME_FIELD_BG         THEME_DESKTOP_DEEP
+#define THEME_FIELD_BORDER     THEME_WIN_HOVER
+#define THEME_FIELD_TEXT       THEME_TEXT
+#define THEME_DOCUMENT_BG      plt_gray(14)
+#define THEME_DOCUMENT_TEXT    THEME_TEXT_ON_LIGHT
+#define THEME_LIST_BG          THEME_WIN_BODY
+#define THEME_LIST_ALT         THEME_PANEL_RAISED
+#define THEME_LIST_HEADER      THEME_WIN_CONTROL
+#define THEME_LIST_TEXT        THEME_TEXT
+#define THEME_SELECTION_BG     THEME_ACCENT_DIM
+#define THEME_SELECTION_SOFT   THEME_ACCENT_SOFT
+#define THEME_SELECTION_TEXT   THEME_TEXT
+
+/* The built-in 15x28 font carries a small amount of space above cap height,
  * so glyphs visually sit low in their line box and descenders (y/g/p)
  * get clipped by tight clip rects.  User-space renderers draw glyphs
  * this many pixels higher to compensate (the vacated rows were empty). */

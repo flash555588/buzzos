@@ -1,14 +1,14 @@
 param(
     [string]$Out = "src/kernel/drv/font_builtin.h",
     [string]$FontFile = "",
-    [int]$CellWidth = 12,
-    [int]$CellHeight = 22,
-    [int]$FontSize = 19,
+    [int]$CellWidth = 15,
+    [int]$CellHeight = 28,
+    [int]$FontSize = 24,
     [int]$OffsetX = -1,
-    [int]$OffsetY = 1,
+    [int]$OffsetY = 0,
     [int]$Threshold = 24,
     [double]$Embolden = 0.45,
-    [bool]$Monochrome = $true
+    [bool]$Monochrome = $false
 )
 
 Set-StrictMode -Version Latest

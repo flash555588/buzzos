@@ -1,10 +1,10 @@
 param(
     [string]$Out = "src/kernel/drv/font_unicode_data.h",
     [string]$FontFile = "",
-    [int]$CellHeight = 22,
-    [int]$NarrowWidth = 12,
-    [int]$WideWidth = 24,
-    [int]$FontSize = 18,
+    [int]$CellHeight = 28,
+    [int]$NarrowWidth = 15,
+    [int]$WideWidth = 30,
+    [int]$FontSize = 24,
     [int]$OffsetX = 0,
     [int]$OffsetY = -2
 )

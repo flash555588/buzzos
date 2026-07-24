@@ -475,27 +475,25 @@ static void draw_line_locked(int logical_line, int x, int y,
 }
 
 static void draw_scrollbars_locked(void) {
-    struct appui_rect viewport = viewport_locked();
-    struct appui_rect vertical = scrollbar_track_locked(1);
-    struct appui_rect horizontal = scrollbar_track_locked(2);
-    struct appui_rect vertical_thumb = scrollbar_thumb_locked(1);
-    struct appui_rect horizontal_thumb = scrollbar_thumb_locked(2);
-    int track_color = plt_rgb(27, 32, 42);
-    int thumb_color = plt_rgb(91, 104, 121);
-    int active_color = plt_rgb(128, 147, 171);
+    int vertical_max = max_scroll_y_locked();
+    int horizontal_max = max_scroll_x_locked();
+    int thumb_color = THEME_WIN_HOVER;
+    int active_color = THEME_ACCENT_DIM;
 
-    appui_fill(pixels, view_width, view_height, vertical, track_color);
-    appui_fill(pixels, view_width, view_height, horizontal, track_color);
-    appui_fill(pixels, view_width, view_height,
-               (struct appui_rect){
-                   viewport.w, viewport.h,
-                   TERM_SCROLLBAR_SIZE, TERM_SCROLLBAR_SIZE
-               },
-               track_color);
-    appui_fill_round(pixels, view_width, view_height, vertical_thumb,
-                     scrollbar_drag_axis == 1 ? active_color : thumb_color);
-    appui_fill_round(pixels, view_width, view_height, horizontal_thumb,
-                     scrollbar_drag_axis == 2 ? active_color : thumb_color);
+    if (vertical_max > 0) {
+        struct appui_rect thumb = scrollbar_thumb_locked(1);
+        thumb.x += 4;
+        thumb.w -= 8;
+        appui_fill_round(pixels, view_width, view_height, thumb,
+                         scrollbar_drag_axis == 1 ? active_color : thumb_color);
+    }
+    if (horizontal_max > 0) {
+        struct appui_rect thumb = scrollbar_thumb_locked(2);
+        thumb.y += 4;
+        thumb.h -= 8;
+        appui_fill_round(pixels, view_width, view_height, thumb,
+                         scrollbar_drag_axis == 2 ? active_color : thumb_color);
+    }
 }
 
 static void render_locked(void) {

@@ -83,5 +83,7 @@ int sys_font_glyph(uint32_t codepoint, uint32_t out_arg, uint32_t cap,
                    uint32_t d, uint32_t e);
 int sys_gfx_acquire(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_gfx_release(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
+int sys_gfx_set_mode(uint32_t width, uint32_t height, uint32_t c,
+                     uint32_t d, uint32_t e);
 
 #endif

@@ -179,7 +179,7 @@ DEMO_MP3_SRC := assets/buzzos-demo.mp3
 USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(NETSTRESS_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(GUI_APP_ELFS)
 USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/netstress.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
 USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c
-USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/appui.h src/kernel/drv/font_builtin.h
+USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/palette.h src/user/libc/appui.h src/kernel/drv/font_builtin.h
 INITRD_H := $(GENERATED_DIR)/initrd.h
 APP_REGISTRY_H := $(GENERATED_DIR)/app_registry.h
 BASM_EXAMPLE := examples/basm-full.asm
@@ -427,6 +427,7 @@ $(NETSURF_ELF): $(NSHTMLTEST_ELF) $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		third_party/netsurf-reference/resources/quirks.css \
 		src/user/ports/netsurf/buzzos_build_config.h \
 		src/user/ports/netsurf/buzzos_gui.c \
+		src/user/libc/appui.h src/user/libc/palette.h \
 		src/user/ports/netsurf/buzzos_http_fetch.c \
 		src/user/ports/netsurf/buzzos_http_fetch.h \
 		src/user/ports/netsurf/buzzos_tls.c \

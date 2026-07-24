@@ -31,6 +31,9 @@ static int scroll_y;
 static int w = 640;
 static int h = 420;
 static int prev_buttons;
+static int pointer_x = -1;
+static int pointer_y = -1;
+static int pointer_buttons;
 static int history_pos = -1;
 static int enter_armed = 1;
 
@@ -636,7 +639,7 @@ static void clamp_scroll(void) {
 static void draw_page(void) {
     struct appui_rect page = page_rect();
     struct appui_rect clip = {page.x + 8, page.y + 8, page.w - 16, page.h - 16};
-    appui_fill(pixels, w, h, page, 15);
+    appui_fill(pixels, w, h, page, THEME_DOCUMENT_BG);
     appui_border(pixels, w, h, page, appui_gray(8), appui_gray(1));
     int x = clip.x;
     int y = clip.y - scroll_y;
@@ -683,7 +686,8 @@ static void draw_page(void) {
             y += KFONT_HEIGHT + 4;
         }
         if (y + KFONT_HEIGHT >= clip.y && y < clip.y + clip.h) {
-            appui_draw_codepoint(pixels, w, h, x, y, cp, 0, -1, clip);
+            appui_draw_codepoint(pixels, w, h, x, y, cp,
+                                 THEME_DOCUMENT_TEXT, -1, clip);
         }
         x += glyph_w;
         if (y >= clip.y + clip.h && scroll_y + clip.h < max_scroll())
@@ -695,30 +699,41 @@ static void draw_page(void) {
                                 appui_max(page.h, content_height()));
         int thumb_y = page.y + 2 + scroll_y * (track_h - thumb_h) / max_scroll();
         appui_fill(pixels, w, h, (struct appui_rect){page.x + page.w - 7, page.y + 2, 5, track_h},
-                   appui_gray(3));
+                   THEME_PANEL_RAISED);
         appui_fill(pixels, w, h, (struct appui_rect){page.x + page.w - 7, thumb_y, 5, thumb_h},
-                   appui_gray(9));
+                   THEME_WIN_HOVER);
     }
 }
 
 static void render(void) {
     clamp_scroll();
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, appui_gray(3));
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, 50}, appui_gray(2));
-    appui_button(pixels, w, h, (struct appui_rect){8, 10, 58, 28}, "Back", history_pos > 0);
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, 50}, THEME_TOOLBAR_BG);
+    struct appui_rect back = {8, 10, 58, 28};
+    int back_state = appui_pointer_state(back, pointer_x, pointer_y,
+                                         pointer_buttons);
+    if (history_pos <= 0)
+        back_state |= APPUI_STATE_DISABLED;
+    appui_button_ex(pixels, w, h, back, "Back", APPUI_BTN_DEFAULT,
+                    back_state);
     struct appui_rect address = {74, 10, w - 150, 28};
-    appui_fill(pixels, w, h, address, 15);
-    appui_border(pixels, w, h, address, appui_gray(8), appui_gray(1));
-    appui_text(pixels, w, h, address.x + 6, address.y + 7, url, 0, -1,
+    appui_field_frame(pixels, w, h, address, 1);
+    int max_chars = appui_max(1, (address.w - 14) / KFONT_WIDTH);
+    const char *shown_url = url_len > max_chars ? url + url_len - max_chars : url;
+    appui_text(pixels, w, h, address.x + 6, address.y + 7,
+               shown_url, THEME_FIELD_TEXT, -1,
                (struct appui_rect){address.x + 5, address.y + 3, address.w - 10, address.h - 6});
-    int cursor_x = address.x + 6 + appui_text_width(url);
+    int cursor_x = address.x + 6 + appui_text_width(shown_url);
     if (cursor_x < address.x + address.w - 5)
         appui_fill(pixels, w, h, (struct appui_rect){cursor_x, address.y + 5, 1, 17},
-                   appui_rgb6(0, 2, 5));
-    appui_button(pixels, w, h, (struct appui_rect){w - 68, 10, 58, 28}, "Go", 1);
+                   THEME_FOCUS);
+    struct appui_rect go = {w - 68, 10, 58, 28};
+    appui_button_ex(pixels, w, h, go, "Go", APPUI_BTN_PRIMARY,
+                    appui_pointer_state(go, pointer_x, pointer_y,
+                                        pointer_buttons));
     draw_page();
-    appui_fill(pixels, w, h, (struct appui_rect){0, h - 22, w, 22}, appui_gray(2));
-    appui_text(pixels, w, h, 10, h - 18, status, appui_gray(12), -1,
+    appui_fill(pixels, w, h, (struct appui_rect){0, h - 22, w, 22}, THEME_TOOLBAR_BG);
+    appui_text(pixels, w, h, 10, h - 18, status, THEME_TEXT_DIM, -1,
                (struct appui_rect){8, h - 21, w - 16, 20});
 }
 
@@ -826,6 +841,9 @@ static void command(struct guiapp_ctx *ctx, int value) {
 }
 
 static void mouse(int x, int y, int buttons, int wheel) {
+    pointer_x = x;
+    pointer_y = y;
+    pointer_buttons = buttons;
     int pressed = (buttons & 1) && !(prev_buttons & 1);
     if (wheel)
         scroll_y -= wheel * 44;

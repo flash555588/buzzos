@@ -17,8 +17,8 @@ mb2_header_start:
     dw 5
     dw 0
     dd 20
-    dd 1280
-    dd 800
+    dd 1600
+    dd 900
     dd 32
 
 align 8

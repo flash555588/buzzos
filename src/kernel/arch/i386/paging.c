@@ -28,9 +28,10 @@ void paging_set_framebuffer(uintptr_t phys_addr, uint32_t size) {
     if (!phys_addr || !size)
         return;
     kernel_fb_phys = phys_addr & ~(uintptr_t)(PAGE_SIZE - 1u);
-    kernel_fb_size = size + (uint32_t)(phys_addr - kernel_fb_phys);
-    if (kernel_fb_size > KERNEL_FB_SIZE)
-        kernel_fb_size = KERNEL_FB_SIZE;
+    /* Map the complete 16 MiB VGA aperture.  The boot mode may use only a
+     * fraction of it, but Bochs VBE runtime mode switches can grow the
+     * scanout without changing the linear-framebuffer base address. */
+    kernel_fb_size = KERNEL_FB_SIZE;
 }
 
 static void zero_page(uint32_t *page) {

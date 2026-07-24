@@ -98,9 +98,9 @@ struct shm_mapping {
     uint32_t size;
 };
 
-#define FONT_GLYPH_HEIGHT 22
-#define FONT_GLYPH_MAX_WIDTH 24
-#define FONT_GLYPH_STRIDE 3
+#define FONT_GLYPH_HEIGHT 28
+#define FONT_GLYPH_MAX_WIDTH 30
+#define FONT_GLYPH_STRIDE 4
 #define FONT_GLYPH_BYTES (FONT_GLYPH_HEIGHT * FONT_GLYPH_STRIDE)
 
 /* --- Syscalls --- */
@@ -170,6 +170,7 @@ int  mouse_get(struct mouse_state *out);
 int  gfx_info(struct gfx_info *out);
 int  gfx_acquire_display(void);
 int  gfx_release_display(void);
+int  gfx_set_mode(int width, int height);
 int  font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap);
 void gfx_set_origin(int x, int y);
 void gfx_get_origin(int *x_out, int *y_out);

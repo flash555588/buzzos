@@ -300,3 +300,16 @@ void mouse_get_state(struct mouse_state *out) {
     out->wheel = mouse_wheel_total;
     out->wheel_seq = mouse_wheel_seq;
 }
+
+void mouse_clamp_to_screen(void) {
+    uint32_t flags = irq_save();
+    int screen_w = 1;
+    int screen_h = 1;
+    mouse_screen_bounds(&screen_w, &screen_h);
+    if (mouse_x >= screen_w) mouse_x = screen_w - 1;
+    if (mouse_y >= screen_h) mouse_y = screen_h - 1;
+    if (mouse_x < 0) mouse_x = 0;
+    if (mouse_y < 0) mouse_y = 0;
+    mouse_seq++;
+    irq_restore(flags);
+}

@@ -66,7 +66,7 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_SHM_CREATE=57, SYS_SHM_MAP=58, SYS_SHM_UNMAP=59,
        SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62,
        SYS_AUDIO_QUEUED=63, SYS_AUDIO_FLUSH=64,
-       SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66 };
+       SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66, SYS_GFX_SET_MODE=67 };
 
 static void (*exit_handlers[16])(void);
 static int exit_handler_count;
@@ -303,6 +303,10 @@ int gfx_acquire_display(void) {
 
 int gfx_release_display(void) {
     return syscall0(SYS_GFX_RELEASE);
+}
+
+int gfx_set_mode(int width, int height) {
+    return syscall2(SYS_GFX_SET_MODE, width, height);
 }
 
 int font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap) {
