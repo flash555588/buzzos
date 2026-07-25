@@ -25,7 +25,15 @@ enum {
     APP_SURFACE_MAX_H = GUIAPP_MAX_H,
     MAX_SW = GUIAPP_MAX_W,
     MAX_SH = GUIAPP_MAX_H,
-    DISPLAY_MODE_COUNT = 3,
+    DISPLAY_MODE_COUNT = 11,
+    DISPLAY_MODE_COLS = 2,
+    DISPLAY_BTN_H = 34,
+    DISPLAY_BTN_GAP = 6,
+    DISPLAY_GROUP_LABEL_H = 22,
+    DISPLAY_GROUP_GAP = 14,
+    /* Content Y of the "Resolution" heading inside the System window. */
+    STATUS_RES_HEAD_Y = 236,
+    STATUS_RES_BODY_Y = 264,
     TOPBAR_H = 36,
     WINDOW_TITLE_H = 34,
     DOCK_RESERVED_H = 82,
@@ -56,13 +64,24 @@ struct rect {
 struct display_mode {
     int width;
     int height;
-    const char *label;
+    const char *label;  /* short button text, e.g. "1280x720" */
+    const char *ratio;  /* aspect-ratio group, e.g. "16:9" */
 };
 
+/* Grouped by aspect ratio so the System panel can offer more than a single
+ * 16:9 "xxxp" ladder.  All modes fit GUIAPP_MAX (1920x1200) and the FB cap. */
 static const struct display_mode display_modes[DISPLAY_MODE_COUNT] = {
-    {1280, 720, "720p"},
-    {1600, 900, "900p"},
-    {1920, 1080, "1080p"},
+    {1280, 720, "1280x720", "16:9"},
+    {1600, 900, "1600x900", "16:9"},
+    {1920, 1080, "1920x1080", "16:9"},
+    {1280, 800, "1280x800", "16:10"},
+    {1440, 900, "1440x900", "16:10"},
+    {1680, 1050, "1680x1050", "16:10"},
+    {1920, 1200, "1920x1200", "16:10"},
+    {1024, 768, "1024x768", "4:3"},
+    {1280, 960, "1280x960", "4:3"},
+    {1600, 1200, "1600x1200", "4:3"},
+    {1280, 1024, "1280x1024", "5:4"},
 };
 
 struct window {
@@ -148,6 +167,13 @@ static int scroll_y[WIN_COUNT];
 static int focus = WIN_LAUNCHER;
 static int app_mouse_capture = -1;
 static int hover_app = -1;
+/* Pointer-dependent chrome: paint uses live pointer_*, so damage must cover
+ * the whole widget on enter/leave.  Cursor-sized damage alone leaves a
+ * trail of 18x18 tiles that look like the highlight "paints in" slowly. */
+static int hover_status_mode = -1;
+static int hover_chrome_win = -1;
+static int hover_chrome_ctl = -1;
+static int hover_launcher_row = -1;
 static int keyevent_fd = -1;
 static unsigned int tick;
 static unsigned int last_render_tick;
@@ -201,6 +227,19 @@ static struct rect intersect_rect(struct rect a, struct rect b) {
     if (x2 <= x1 || y2 <= y1)
         return (struct rect){0, 0, 0, 0};
     return (struct rect){x1, y1, x2 - x1, y2 - y1};
+}
+
+/* All fill/pixel paths honor compose_clip.  Window body drawing must push the
+ * content rect so widgets that ignore an explicit text clip (buttons, rounded
+ * fills) cannot paint into the title bar, chrome, or neighboring desktop. */
+static struct rect compose_clip_push(struct rect limit) {
+    struct rect previous = compose_clip;
+    compose_clip = intersect_rect(compose_clip, limit);
+    return previous;
+}
+
+static void compose_clip_pop(struct rect previous) {
+    compose_clip = previous;
 }
 
 static struct rect union_rect(struct rect a, struct rect b) {
@@ -693,6 +732,7 @@ static int read_key_poll(void) {
 
 static int max_scroll_y(int id);
 static struct rect content_rect(int id);
+static int status_resolution_bottom(void);
 static void close_window(int id);
 static void clamp_scroll(int id);
 static void activate(int id);
@@ -1108,7 +1148,7 @@ static void layout(void) {
         sw - right_w - margin,
         top + margin,
         right_w,
-        min_i(content_h, max_i(390, (content_h * 2) / 3))
+        min_i(content_h, max_i(460, (content_h * 2) / 3))
     };
     windows[WIN_STATUS].restore = windows[WIN_STATUS].r;
     windows[WIN_STATUS].visible = 1;
@@ -1305,7 +1345,7 @@ static int content_height(int id) {
         return LAUNCHER_HEADER_H +
                max_i(app_count, 1) * LAUNCHER_ROW_STEP + 12;
     if (id == WIN_STATUS)
-        return 310;
+        return status_resolution_bottom();
     return 250;
 }
 
@@ -1324,6 +1364,24 @@ static void clamp_scroll(int id) {
     scroll_y[id] = clamp_i(scroll_y[id], 0, max_scroll_y(id));
 }
 
+static int gcd_i(int a, int b) {
+    if (a < 0) a = -a;
+    if (b < 0) b = -b;
+    while (b) {
+        int t = a % b;
+        a = b;
+        b = t;
+    }
+    return a > 0 ? a : 1;
+}
+
+static void append_aspect(char *out, int cap, int width, int height) {
+    int g = gcd_i(width, height);
+    append_uint(out, (unsigned int)(width / g), cap);
+    append_text(out, ":", cap);
+    append_uint(out, (unsigned int)(height / g), cap);
+}
+
 static int current_display_mode(void) {
     for (int i = 0; i < DISPLAY_MODE_COUNT; i++)
         if (display_modes[i].width == sw && display_modes[i].height == sh)
@@ -1331,14 +1389,96 @@ static int current_display_mode(void) {
     return -1;
 }
 
+/* Walk the aspect-ratio groups used to lay out resolution buttons. */
+static int display_group_at(int group_index, int *start_out, int *count_out) {
+    int group = 0;
+    int i = 0;
+    while (i < DISPLAY_MODE_COUNT) {
+        int start = i;
+        const char *ratio = display_modes[i].ratio;
+        while (i < DISPLAY_MODE_COUNT &&
+               strcmp(display_modes[i].ratio, ratio) == 0)
+            i++;
+        if (group == group_index) {
+            if (start_out) *start_out = start;
+            if (count_out) *count_out = i - start;
+            return 1;
+        }
+        group++;
+    }
+    return 0;
+}
+
+/* Content-local layout of mode button `index` inside a panel of width `inner_w`. */
+static void display_mode_cell(int index, int inner_w,
+                              int *x_out, int *y_out, int *w_out, int *h_out) {
+    int y = STATUS_RES_BODY_Y;
+    int group = 0;
+    int start = 0;
+    int count = 0;
+    while (display_group_at(group, &start, &count)) {
+        y += DISPLAY_GROUP_LABEL_H;
+        if (index >= start && index < start + count) {
+            int local = index - start;
+            int row = local / DISPLAY_MODE_COLS;
+            int col = local % DISPLAY_MODE_COLS;
+            int cols = count - row * DISPLAY_MODE_COLS;
+            if (cols > DISPLAY_MODE_COLS)
+                cols = DISPLAY_MODE_COLS;
+            int gap = DISPLAY_BTN_GAP;
+            int btn_w = (inner_w - gap * (cols - 1)) / cols;
+            if (btn_w < 1) btn_w = 1;
+            *x_out = col * (btn_w + gap);
+            *y_out = y + row * (DISPLAY_BTN_H + gap);
+            *w_out = col + 1 == cols ? inner_w - *x_out : btn_w;
+            *h_out = DISPLAY_BTN_H;
+            return;
+        }
+        int rows = (count + DISPLAY_MODE_COLS - 1) / DISPLAY_MODE_COLS;
+        y += rows * DISPLAY_BTN_H + (rows - 1) * DISPLAY_BTN_GAP +
+             DISPLAY_GROUP_GAP;
+        group++;
+    }
+    *x_out = 0;
+    *y_out = STATUS_RES_BODY_Y;
+    *w_out = inner_w;
+    *h_out = DISPLAY_BTN_H;
+}
+
+static int status_resolution_bottom(void) {
+    int x = 0, y = 0, w = 0, h = 0;
+    /* Width only affects column sizing; bottom Y is independent of it. */
+    display_mode_cell(DISPLAY_MODE_COUNT - 1, 400, &x, &y, &w, &h);
+    return y + h + 12;
+}
+
 static struct rect status_mode_rect(int index) {
     struct rect c = content_rect(WIN_STATUS);
-    int gap = 6;
-    int button_w = (c.w - gap * (DISPLAY_MODE_COUNT - 1)) /
-                   DISPLAY_MODE_COUNT;
-    int x = c.x + index * (button_w + gap);
-    int right = index + 1 == DISPLAY_MODE_COUNT ? c.x + c.w : x + button_w;
-    return (struct rect){x, c.y + 264, right - x, 40};
+    int ox = c.x - scroll_x[WIN_STATUS];
+    int oy = c.y - scroll_y[WIN_STATUS];
+    int x = 0, y = 0, w = 0, h = 0;
+    display_mode_cell(index, max_i(1, c.w), &x, &y, &w, &h);
+    return (struct rect){ox + x, oy + y, w, h};
+}
+
+static struct rect status_group_label_rect(int group_index) {
+    struct rect c = content_rect(WIN_STATUS);
+    int ox = c.x - scroll_x[WIN_STATUS];
+    int oy = c.y - scroll_y[WIN_STATUS];
+    int y = STATUS_RES_BODY_Y;
+    int group = 0;
+    int start = 0;
+    int count = 0;
+    while (display_group_at(group, &start, &count)) {
+        if (group == group_index)
+            return (struct rect){ox, oy + y, c.w, DISPLAY_GROUP_LABEL_H};
+        y += DISPLAY_GROUP_LABEL_H;
+        int rows = (count + DISPLAY_MODE_COLS - 1) / DISPLAY_MODE_COLS;
+        y += rows * DISPLAY_BTN_H + (rows - 1) * DISPLAY_BTN_GAP +
+             DISPLAY_GROUP_GAP;
+        group++;
+    }
+    return (struct rect){ox, oy + STATUS_RES_BODY_Y, c.w, DISPLAY_GROUP_LABEL_H};
 }
 
 static struct rect fit_window_rect(struct rect r, int old_sw, int old_sh,
@@ -1372,7 +1512,7 @@ static void relayout_after_mode_change(int old_sw, int old_sh) {
     struct rect launcher = {margin, TOPBAR_H + margin, left_w, launcher_h};
     struct rect status = {
         sw - right_w - margin, TOPBAR_H + margin, right_w,
-        min_i(content_h, max_i(390, (content_h * 2) / 3))
+        min_i(content_h, max_i(460, (content_h * 2) / 3))
     };
     int dock_x, dock_y, dock_w, task_cap;
     dock_geometry(&dock_x, &dock_y, &dock_w, &task_cap);
@@ -1406,6 +1546,10 @@ static void relayout_after_mode_change(int old_sw, int old_sh) {
     resize_win = -1;
     scroll_drag_win = -1;
     app_mouse_capture = -1;
+    hover_status_mode = -1;
+    hover_chrome_win = -1;
+    hover_chrome_ctl = -1;
+    hover_launcher_row = -1;
     pending_damage_valid = 0;
     desktop_dirty = 1;
 }
@@ -1565,6 +1709,11 @@ static void draw_status(void) {
     draw_window_frame(WIN_STATUS);
     struct rect c = content_rect(WIN_STATUS);
     fill(c, THEME_WIN_BODY);
+    /* Restrict paint to the scrollable body.  button()/fill_round only honor
+     * compose_clip (not the text clip rect), so without this push the
+     * resolution grid paints through the frame onto the desktop whenever
+     * content_height exceeds the window. */
+    struct rect saved_clip = compose_clip_push(c);
     struct rect clip = c;
     int ox = c.x - scroll_x[WIN_STATUS];
     int oy = c.y - scroll_y[WIN_STATUS];
@@ -1574,6 +1723,9 @@ static void draw_status(void) {
     append_uint(line, (unsigned int)sw, sizeof(line));
     append_text(line, " x ", sizeof(line));
     append_uint(line, (unsigned int)sh, sizeof(line));
+    append_text(line, "  (", sizeof(line));
+    append_aspect(line, sizeof(line), sw, sh);
+    append_text(line, ")", sizeof(line));
     text_clip(ox, oy + 32, line, THEME_TEXT_DIM, -1, clip);
     text_clip(ox, oy + 60, "Bochs VBE / 32bpp", THEME_TEXT_FAINT, -1, clip);
     copy_text(line, "apps ", sizeof(line));
@@ -1581,15 +1733,31 @@ static void draw_status(void) {
     text_clip(ox, oy + 88, line, THEME_TEXT_DIM, -1, clip);
     text_clip(ox, oy + 120, "Controls", THEME_ACCENT, -1, clip);
     text_clip(ox, oy + 150, "Enter launches app", THEME_TEXT_DIM, -1, clip);
-    text_clip(ox, oy + 178, "Tab switches windows", THEME_TEXT_DIM, -1, clip);
+    text_clip(ox, oy + 178, "[ ] cycle resolution", THEME_TEXT_DIM, -1, clip);
     text_clip(ox, oy + 206, "Esc returns to shell", THEME_TEXT_DIM, -1, clip);
     int mode_error = mode_error_until && tick < mode_error_until;
-    text_clip(ox, oy + 236,
-              mode_error ? "Resolution unavailable" : "Resolution (live)",
+    text_clip(ox, oy + STATUS_RES_HEAD_Y,
+              mode_error ? "Resolution unavailable" : "Resolution by aspect",
               mode_error ? THEME_DANGER : THEME_ACCENT, -1, clip);
     int active_mode = current_display_mode();
-    for (int i = 0; i < DISPLAY_MODE_COUNT; i++)
-        button(status_mode_rect(i), display_modes[i].label, i == active_mode);
+    int group = 0;
+    int start = 0;
+    int count = 0;
+    while (display_group_at(group, &start, &count)) {
+        struct rect label_r = status_group_label_rect(group);
+        text_clip(label_r.x, label_r.y + 2, display_modes[start].ratio,
+                  THEME_TEXT_FAINT, -1, clip);
+        for (int i = 0; i < count; i++) {
+            int mode = start + i;
+            struct rect btn = status_mode_rect(mode);
+            if (intersect_rect(btn, c).w <= 0)
+                continue;
+            button(btn, display_modes[mode].label, mode == active_mode);
+        }
+        group++;
+    }
+    compose_clip_pop(saved_clip);
+    /* Scrollbars sit just outside the content rect; draw after pop. */
     draw_scrollbars(WIN_STATUS);
 }
 
@@ -2494,9 +2662,25 @@ static void handle_key(int k) {
         desktop_dirty = 1;
         return;
     }
-    if (focus == WIN_STATUS && k >= '1' && k <= '3') {
-        (void)switch_display_mode(k - '1');
-        return;
+    if (focus == WIN_STATUS) {
+        /* Digits pick the first nine listed modes; [ ] cycle all ratios. */
+        if (k >= '1' && k <= '9' && (k - '1') < DISPLAY_MODE_COUNT) {
+            (void)switch_display_mode(k - '1');
+            return;
+        }
+        if (k == '[' || k == KEY_LEFT) {
+            int cur = current_display_mode();
+            int next = cur < 0 ? 0 : (cur + DISPLAY_MODE_COUNT - 1) %
+                                     DISPLAY_MODE_COUNT;
+            (void)switch_display_mode(next);
+            return;
+        }
+        if (k == ']' || k == KEY_RIGHT) {
+            int cur = current_display_mode();
+            int next = cur < 0 ? 0 : (cur + 1) % DISPLAY_MODE_COUNT;
+            (void)switch_display_mode(next);
+            return;
+        }
     }
     if (focus == WIN_LAUNCHER) {
         int old_selected = app_selected;
@@ -2538,6 +2722,90 @@ static void forward_key_releases(void) {
     }
 }
 
+static void damage_widget(struct rect r) {
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    /* 1px pad covers rounded-corner AA that extends past the hit rect. */
+    queue_damage((struct rect){r.x - 1, r.y - 1, r.w + 2, r.h + 2});
+}
+
+static int hit_status_mode_at(int x, int y) {
+    if (!windows[WIN_STATUS].visible || windows[WIN_STATUS].minimized)
+        return -1;
+    if (top_window_at(x, y) != WIN_STATUS)
+        return -1;
+    struct rect body = content_rect(WIN_STATUS);
+    if (!inside(x, y, body))
+        return -1;
+    for (int mode = 0; mode < DISPLAY_MODE_COUNT; mode++) {
+        if (inside(x, y, status_mode_rect(mode)))
+            return mode;
+    }
+    return -1;
+}
+
+static struct rect launcher_row_screen_rect(int index) {
+    struct rect c = content_rect(WIN_LAUNCHER);
+    int ox = c.x - scroll_x[WIN_LAUNCHER];
+    int oy = c.y - scroll_y[WIN_LAUNCHER];
+    struct rect row = {
+        ox,
+        oy + LAUNCHER_HEADER_H + index * LAUNCHER_ROW_STEP,
+        max_i(1, content_width(WIN_LAUNCHER) - 20),
+        LAUNCHER_ROW_H
+    };
+    return intersect_rect(row, c);
+}
+
+static int hit_launcher_row_at(int x, int y) {
+    if (!windows[WIN_LAUNCHER].visible || windows[WIN_LAUNCHER].minimized)
+        return -1;
+    if (top_window_at(x, y) != WIN_LAUNCHER)
+        return -1;
+    struct rect c = content_rect(WIN_LAUNCHER);
+    if (!inside(x, y, c))
+        return -1;
+    int rel = y - (c.y + LAUNCHER_HEADER_H) + scroll_y[WIN_LAUNCHER];
+    if (rel < 0)
+        return -1;
+    int idx = rel / LAUNCHER_ROW_STEP;
+    if (idx < 0 || idx >= app_count)
+        return -1;
+    return idx;
+}
+
+/* Recompute pointer-driven hover and damage full widget bounds on change. */
+static void refresh_pointer_hover_damage(void) {
+    int mode = hit_status_mode_at(pointer_x, pointer_y);
+    if (mode != hover_status_mode) {
+        if (hover_status_mode >= 0)
+            damage_widget(status_mode_rect(hover_status_mode));
+        if (mode >= 0)
+            damage_widget(status_mode_rect(mode));
+        hover_status_mode = mode;
+    }
+
+    int chrome_ctl = -1;
+    int chrome_win = hit_control(pointer_x, pointer_y, &chrome_ctl);
+    if (chrome_win != hover_chrome_win || chrome_ctl != hover_chrome_ctl) {
+        if (hover_chrome_win >= 0 && hover_chrome_ctl >= 0)
+            damage_widget(control_hit_rect(hover_chrome_win, hover_chrome_ctl));
+        if (chrome_win >= 0 && chrome_ctl >= 0)
+            damage_widget(control_hit_rect(chrome_win, chrome_ctl));
+        hover_chrome_win = chrome_win;
+        hover_chrome_ctl = chrome_ctl;
+    }
+
+    int row = hit_launcher_row_at(pointer_x, pointer_y);
+    if (row != hover_launcher_row) {
+        if (hover_launcher_row >= 0)
+            damage_widget(launcher_row_screen_rect(hover_launcher_row));
+        if (row >= 0)
+            damage_widget(launcher_row_screen_rect(row));
+        hover_launcher_row = row;
+    }
+}
+
 static void handle_mouse(void) {
     struct mouse_state ms;
     if (mouse_get(&ms) < 0)
@@ -2553,8 +2821,7 @@ static void handle_mouse(void) {
     if (pointer_moved) {
         queue_damage((struct rect){old_pointer_x - 1, old_pointer_y - 1, 18, 18});
         queue_damage((struct rect){pointer_x - 1, pointer_y - 1, 18, 18});
-        if (focus == WIN_LAUNCHER)
-            win_damage(WIN_LAUNCHER);
+        refresh_pointer_hover_damage();
         if (context_open)
             queue_damage((struct rect){context_x, context_y,
                                        CONTEXT_MENU_W, CONTEXT_MENU_H});
@@ -2608,6 +2875,10 @@ static void handle_mouse(void) {
             else {
                 scroll_y[h] -= wheel_delta * 44;
                 clamp_scroll(h);
+                /* Scroll changes widget geometry under a stationary pointer. */
+                hover_status_mode = -1;
+                hover_launcher_row = -1;
+                refresh_pointer_hover_damage();
             }
             win_damage(h);
         }
@@ -2685,12 +2956,18 @@ static void handle_mouse(void) {
             if (h >= 0)
                 activate(h);
             if (h == WIN_STATUS) {
-                for (int mode = 0; mode < DISPLAY_MODE_COUNT; mode++) {
-                    if (inside(pointer_x, pointer_y,
-                               status_mode_rect(mode))) {
-                        (void)switch_display_mode(mode);
-                        prev_buttons = ms.buttons;
-                        return;
+                /* Same boundary as paint: only the visible content body is
+                 * interactive.  Scrolled-away cells stay addressable only
+                 * after the user scrolls them back into content_rect. */
+                struct rect body = content_rect(WIN_STATUS);
+                if (inside(pointer_x, pointer_y, body)) {
+                    for (int mode = 0; mode < DISPLAY_MODE_COUNT; mode++) {
+                        if (inside(pointer_x, pointer_y,
+                                   status_mode_rect(mode))) {
+                            (void)switch_display_mode(mode);
+                            prev_buttons = ms.buttons;
+                            return;
+                        }
                     }
                 }
             }

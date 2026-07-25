@@ -266,8 +266,11 @@ void fb_get_info(struct gfx_info *out) {
 }
 
 int fb_set_mode(uint32_t width, uint32_t height) {
+    /* Keep modes within the composed desktop surface (GUIAPP_MAX_*) and the
+     * 16 MiB VGA aperture.  Aspect-ratio families (16:9 / 16:10 / 4:3 / 5:4)
+     * all stay under these ceilings. */
     if (!fb_ready || width < 640u || height < 480u ||
-        width > 1920u || height > 1080u)
+        width > 1920u || height > 1200u)
         return -1;
     uint64_t bytes = (uint64_t)width * height * 4u;
     if (bytes + fb_page_offset > KERNEL_FB_SIZE || !bochs_vbe_available())
