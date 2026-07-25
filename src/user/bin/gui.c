@@ -52,6 +52,11 @@ enum {
     WIN_MIN_W = 260,
     WIN_MIN_H = 170,
     RESIZE_PAD = 6,
+    /* Software cursor sprite bounds (see draw_pointer).  Damage must cover
+     * the full sprite or partial redraws leave trails. */
+    POINTER_W = 16,
+    POINTER_H = 16,
+    POINTER_DAMAGE_PAD = 1,
 };
 
 struct rect {
@@ -174,6 +179,13 @@ static int hover_status_mode = -1;
 static int hover_chrome_win = -1;
 static int hover_chrome_ctl = -1;
 static int hover_launcher_row = -1;
+/* Last position actually composed into the backbuffer / scanned out.  Any
+ * dirty-rect render must re-erase this spot; otherwise a later partial
+ * update (common when skimming the app list's per-row hover damage) leaves
+ * a ghost cursor. */
+static int pointer_drawn_x;
+static int pointer_drawn_y;
+static int pointer_drawn_valid;
 static int keyevent_fd = -1;
 static unsigned int tick;
 static unsigned int last_render_tick;
@@ -733,6 +745,9 @@ static int read_key_poll(void) {
 static int max_scroll_y(int id);
 static struct rect content_rect(int id);
 static int status_resolution_bottom(void);
+static struct rect launcher_row_paint_rect(int index);
+static int hit_launcher_row_at(int x, int y);
+static int top_window_at(int x, int y);
 static void close_window(int id);
 static void clamp_scroll(int id);
 static void activate(int id);
@@ -1657,6 +1672,8 @@ static void draw_launcher(void) {
     draw_window_frame(WIN_LAUNCHER);
     struct rect c = content_rect(WIN_LAUNCHER);
     fill(c, THEME_WIN_BODY);
+    /* Same content clip as System: row fills must not paint past the body. */
+    struct rect saved_clip = compose_clip_push(c);
     struct rect clip = c;
     int ox = c.x - scroll_x[WIN_LAUNCHER];
     int oy = c.y - scroll_y[WIN_LAUNCHER];
@@ -1664,18 +1681,18 @@ static void draw_launcher(void) {
     int y = oy + LAUNCHER_HEADER_H;
     if (app_count == 0) {
         text_clip(ox, y, "No apps in /fs/apps", THEME_TEXT_DIM, -1, clip);
+        compose_clip_pop(saved_clip);
         draw_scrollbars(WIN_LAUNCHER);
         return;
     }
+    int hover_row = hit_launcher_row_at(pointer_x, pointer_y);
     for (int i = 0; i < app_count; i++) {
-        struct rect row = {ox, y + i * LAUNCHER_ROW_STEP,
-                           content_width(WIN_LAUNCHER) - 20,
-                           LAUNCHER_ROW_H};
+        struct rect row = launcher_row_paint_rect(i);
         struct rect visible = intersect_rect(row, clip);
         if (visible.w <= 0 || visible.h <= 0)
             continue;
         int selected = i == app_selected;
-        int hovered = focus == WIN_LAUNCHER && inside(pointer_x, pointer_y, row);
+        int hovered = i == hover_row;
         if (selected) {
             struct rect sel = intersect_rect(
                 (struct rect){row.x, row.y, row.w - 6, row.h}, clip);
@@ -1700,6 +1717,7 @@ static void draw_launcher(void) {
         text_clip(row.x + 40, text_y, apps[i].name,
                   selected || hovered ? THEME_TEXT : THEME_TEXT_DIM, -1, clip);
     }
+    compose_clip_pop(saved_clip);
     draw_scrollbars(WIN_LAUNCHER);
 }
 
@@ -2729,6 +2747,31 @@ static void damage_widget(struct rect r) {
     queue_damage((struct rect){r.x - 1, r.y - 1, r.w + 2, r.h + 2});
 }
 
+static struct rect pointer_damage_rect(int x, int y) {
+    return (struct rect){
+        x - POINTER_DAMAGE_PAD,
+        y - POINTER_DAMAGE_PAD,
+        POINTER_W + 2 * POINTER_DAMAGE_PAD,
+        POINTER_H + 2 * POINTER_DAMAGE_PAD
+    };
+}
+
+/* Expand a dirty region so a partial compose both erases the last scanned-out
+ * cursor and redraws it at the live position. */
+static struct rect damage_with_pointer(struct rect damage) {
+    if (pointer_drawn_valid)
+        damage = union_rect(damage, pointer_damage_rect(pointer_drawn_x,
+                                                        pointer_drawn_y));
+    damage = union_rect(damage, pointer_damage_rect(pointer_x, pointer_y));
+    return damage;
+}
+
+static void note_pointer_drawn(void) {
+    pointer_drawn_x = pointer_x;
+    pointer_drawn_y = pointer_y;
+    pointer_drawn_valid = 1;
+}
+
 static int hit_status_mode_at(int x, int y) {
     if (!windows[WIN_STATUS].visible || windows[WIN_STATUS].minimized)
         return -1;
@@ -2744,17 +2787,29 @@ static int hit_status_mode_at(int x, int y) {
     return -1;
 }
 
-static struct rect launcher_row_screen_rect(int index) {
+/* Geometry shared by paint, hit-test, and damage.  Width is capped to the
+ * visible content so dirty rects match what fill_round actually painted. */
+static struct rect launcher_row_paint_rect(int index) {
     struct rect c = content_rect(WIN_LAUNCHER);
     int ox = c.x - scroll_x[WIN_LAUNCHER];
     int oy = c.y - scroll_y[WIN_LAUNCHER];
+    int row_w = content_width(WIN_LAUNCHER) - 20;
+    if (row_w > c.w)
+        row_w = c.w;
+    if (row_w < 1)
+        row_w = 1;
     struct rect row = {
         ox,
         oy + LAUNCHER_HEADER_H + index * LAUNCHER_ROW_STEP,
-        max_i(1, content_width(WIN_LAUNCHER) - 20),
+        row_w,
         LAUNCHER_ROW_H
     };
-    return intersect_rect(row, c);
+    return row;
+}
+
+static struct rect launcher_row_screen_rect(int index) {
+    return intersect_rect(launcher_row_paint_rect(index),
+                          content_rect(WIN_LAUNCHER));
 }
 
 static int hit_launcher_row_at(int x, int y) {
@@ -2770,6 +2825,10 @@ static int hit_launcher_row_at(int x, int y) {
         return -1;
     int idx = rel / LAUNCHER_ROW_STEP;
     if (idx < 0 || idx >= app_count)
+        return -1;
+    /* Ignore the inter-row gap (STEP - ROW_H); it is not painted as hover. */
+    int row_top = idx * LAUNCHER_ROW_STEP;
+    if (rel < row_top || rel >= row_top + LAUNCHER_ROW_H)
         return -1;
     return idx;
 }
@@ -2819,8 +2878,8 @@ static void handle_mouse(void) {
     pointer_x = ms.x;
     pointer_y = ms.y;
     if (pointer_moved) {
-        queue_damage((struct rect){old_pointer_x - 1, old_pointer_y - 1, 18, 18});
-        queue_damage((struct rect){pointer_x - 1, pointer_y - 1, 18, 18});
+        queue_damage(pointer_damage_rect(old_pointer_x, old_pointer_y));
+        queue_damage(pointer_damage_rect(pointer_x, pointer_y));
         refresh_pointer_hover_damage();
         if (context_open)
             queue_damage((struct rect){context_x, context_y,
@@ -3165,8 +3224,14 @@ int main(int argc, char **argv) {
         if (full_dirty || tick - last_render_tick >= 60u) {
             render();
             last_render_tick = tick;
+            note_pointer_drawn();
         } else if (have_damage) {
+            /* App-list hover dirties whole rows frequently.  Those rects can
+             * omit the previous cursor splat if it sat just outside a row
+             * gap; always re-erase the last composed pointer. */
+            damage = damage_with_pointer(damage);
             (void)render_region(damage);
+            note_pointer_drawn();
         }
         tick++;
         if (app_mouse_capture >= 0) {
