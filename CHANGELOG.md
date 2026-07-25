@@ -36,6 +36,9 @@ short log for reviewers and contributors; deeper design notes live under
 
 ### User Experience
 
+- Refined the desktop visual system with quieter window chrome, clearer
+  launcher metadata, grouped system information, consistent control spacing,
+  and semantic primary and destructive actions across GUI apps.
 - Added `/bin/echo` and `/bin/cat`, multi-stage shell pipelines, basic
   redirection, and stdio inheritance for spawned user programs.
 - Added a user-space GUI app center backed by `/fs/apps`.

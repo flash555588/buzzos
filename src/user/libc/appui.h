@@ -25,6 +25,21 @@ enum appui_button_state {
     APPUI_STATE_PRESSED = 1 << 1,
     APPUI_STATE_SELECTED = 1 << 2,
     APPUI_STATE_DISABLED = 1 << 3,
+    APPUI_STATE_FOCUSED = 1 << 4,
+};
+
+/* Shared visual rhythm.  Existing apps can migrate incrementally without
+ * changing the GUI protocol or any public structure sizes. */
+enum appui_metric {
+    APPUI_SPACE_XS = 4,
+    APPUI_SPACE_SM = 8,
+    APPUI_SPACE_MD = 12,
+    APPUI_SPACE_LG = 16,
+    APPUI_SPACE_XL = 24,
+    APPUI_CONTROL_H = 34,
+    APPUI_TOOLBAR_H = 50,
+    APPUI_ROW_H = 34,
+    APPUI_STATUS_H = 28,
 };
 
 static int appui_rgb6(int r, int g, int b) {
@@ -93,6 +108,14 @@ static const uint8_t appui_corner[4] = {3, 2, 1, 1};
 
 static void appui_fill_round(uint8_t *fb, int w, int h, struct appui_rect r,
                              int color) {
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    /* Thin scrollbars/progress fills cannot carry a four-pixel radius.
+     * Falling back to a clean rectangle avoids negative inner dimensions. */
+    if (r.w < 8 || r.h < 8) {
+        appui_fill(fb, w, h, r, color);
+        return;
+    }
     appui_fill(fb, w, h, (struct appui_rect){r.x + 3, r.y, r.w - 6, r.h},
                color);
     for (int i = 0; i < 4; i++) {
@@ -301,20 +324,27 @@ static void appui_button_ex(uint8_t *fb, int w, int h, struct appui_rect r,
     int disabled = (state & APPUI_STATE_DISABLED) != 0;
     int hovered = (state & APPUI_STATE_HOVERED) != 0 && !disabled;
     int pressed = (state & APPUI_STATE_PRESSED) != 0 && !disabled;
+    int focused = (state & APPUI_STATE_FOCUSED) != 0 && !disabled;
+    int paint_surface = 1;
 
     if (variant == APPUI_BTN_PRIMARY) {
         bg = THEME_ACCENT_DIM;
         edge = THEME_ACCENT;
+        fg = THEME_TEXT_ON_LIGHT;
     } else if (variant == APPUI_BTN_DANGER) {
         bg = THEME_DANGER_DIM;
         edge = THEME_DANGER;
     } else if (variant == APPUI_BTN_GHOST) {
         bg = THEME_PANEL_BG;
         edge = THEME_PANEL_BG;
+        if (!(state & APPUI_STATE_SELECTED) && !hovered && !pressed &&
+            !focused)
+            paint_surface = 0;
     }
     if (state & APPUI_STATE_SELECTED) {
         bg = pressed ? THEME_SELECTION_BG : THEME_SELECTION_SOFT;
         edge = THEME_ACCENT_DIM;
+        fg = THEME_SELECTION_TEXT;
     } else if (hovered) {
         if (variant == APPUI_BTN_PRIMARY) {
             bg = THEME_ACCENT;
@@ -328,28 +358,33 @@ static void appui_button_ex(uint8_t *fb, int w, int h, struct appui_rect r,
     }
     if (pressed && !(state & APPUI_STATE_SELECTED)) {
         if (variant == APPUI_BTN_PRIMARY)
-            bg = THEME_ACCENT_SOFT;
+            bg = THEME_ACCENT_DIM;
         else if (variant == APPUI_BTN_DANGER)
             bg = THEME_DANGER_DIM;
         else
             bg = THEME_WIN_PRESSED;
     }
-    if (hovered && !pressed &&
-        (variant == APPUI_BTN_PRIMARY || variant == APPUI_BTN_DANGER))
-        fg = THEME_TEXT_ON_LIGHT;
+    if (focused)
+        edge = THEME_FOCUS;
     if (disabled) {
         bg = THEME_PANEL_RAISED;
         edge = THEME_DIVIDER;
         fg = THEME_TEXT_FAINT;
+        if (variant == APPUI_BTN_GHOST)
+            paint_surface = 0;
     }
 
-    appui_fill_round(fb, w, h, r, edge);
-    appui_fill_round(fb, w, h,
-                     (struct appui_rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
-                     bg);
-    if (!(state & APPUI_STATE_DISABLED) && r.w > 8)
+    if (paint_surface) {
+        appui_fill_round(fb, w, h, r, edge);
+        appui_fill_round(fb, w, h,
+                         (struct appui_rect){r.x + 1, r.y + 1,
+                                             r.w - 2, r.h - 2},
+                         bg);
+    }
+    if (paint_surface && variant != APPUI_BTN_GHOST && !disabled &&
+        !pressed && r.w > 8)
         appui_fill(fb, w, h, (struct appui_rect){r.x + 4, r.y + 2, r.w - 8, 1},
-                   plt_blend(THEME_TEXT, bg, 28));
+                   plt_blend(THEME_TEXT, bg, 18));
 
     int label_w = appui_text_width(label);
     int tx = r.x + appui_max(6, (r.w - label_w) / 2);

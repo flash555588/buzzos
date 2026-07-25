@@ -7,7 +7,7 @@ enum {
     MAX_H = GUIAPP_MAX_H,
     MAX_PROCESSES = 32,
     HISTORY_SAMPLES = 60,
-    TOOLBAR_H = 58,
+    TOOLBAR_H = APPUI_TOOLBAR_H,
     TABS_H = 40,
     SUMMARY_H = 82,
     TABLE_HEADER_H = 34,
@@ -332,11 +332,11 @@ static struct appui_rect tab_rect(int tab) {
 }
 
 static struct appui_rect refresh_button_rect(void) {
-    return (struct appui_rect){appui_max(12, w - 232), 12, 112, 34};
+    return (struct appui_rect){appui_max(12, w - 232), 8, 112, 34};
 }
 
 static struct appui_rect pause_button_rect(void) {
-    return (struct appui_rect){appui_max(112, w - 112), 12, 100, 34};
+    return (struct appui_rect){appui_max(112, w - 112), 8, 100, 34};
 }
 
 static int table_y(void) {
@@ -655,8 +655,6 @@ static void render(void) {
                THEME_APP_BG);
     appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H},
                THEME_TOOLBAR_BG);
-    draw_label(16, 18, "System Monitor", THEME_TEXT,
-               (struct appui_rect){12, 8, appui_max(100, w - 240), 40});
     appui_button_ex(pixels, w, h, refresh_button_rect(), "Refresh",
                     APPUI_BTN_DEFAULT,
                     appui_pointer_state(refresh_button_rect(), pointer_x,

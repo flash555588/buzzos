@@ -245,8 +245,6 @@ static void render(void) {
         int variant = APPUI_BTN_DEFAULT;
         if (strcmp(labels[i], "=") == 0)
             variant = APPUI_BTN_PRIMARY;
-        else if (strcmp(labels[i], "C") == 0)
-            variant = APPUI_BTN_DANGER;
         appui_button_ex(pixels, W, H, r, labels[i], variant,
                         appui_pointer_state(r, pointer_x, pointer_y,
                                             pointer_buttons));
