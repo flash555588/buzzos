@@ -359,9 +359,11 @@ void task_yield(void) {
     schedule();
 }
 
-void sched_tick(void) {
+void sched_tick(uint32_t jiffies) {
+    if (jiffies == 0)
+        jiffies = 1;
     if (current_task && current_task->state == TASK_RUNNING)
-        current_task->cpu_ticks++;
+        current_task->cpu_ticks += jiffies;
     if (preempt_depth)
         return;
     /* Keep a 4 ms CPU quantum independent of the PIT frequency.  Newly
@@ -371,7 +373,8 @@ void sched_tick(void) {
         schedule();
         return;
     }
-    if (++sched_slice_ticks < SCHED_SLICE_TICKS)
+    sched_slice_ticks += jiffies;
+    if (sched_slice_ticks < SCHED_SLICE_TICKS)
         return;
     sched_slice_ticks = 0;
     schedule();

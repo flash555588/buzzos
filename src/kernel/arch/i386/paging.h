@@ -29,6 +29,12 @@ int paging_copy_to_user_space(uint32_t cr3, uint32_t va,
 int paging_zero_user_space(uint32_t cr3, uint32_t va, uint32_t size);
 int paging_map_shared_pages(uint32_t va, const uintptr_t *pages, uint32_t count);
 int paging_unmap_shared_pages(uint32_t cr3, uint32_t va, uint32_t count);
+/* Map a contiguous physical range into a user address space (no ownership). */
+int paging_map_user_phys(uint32_t cr3, uint32_t va, uintptr_t phys, uint32_t size,
+                         uint32_t pte_flags);
+/* Clear PTEs without freeing physical pages. */
+int paging_unmap_user_range(uint32_t cr3, uint32_t va, uint32_t size);
+uintptr_t paging_framebuffer_phys(void);
 /* Count resident user mappings in a process address space. */
 uint32_t paging_count_user_pages(uint32_t cr3);
 

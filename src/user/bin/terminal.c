@@ -22,7 +22,7 @@ static int scroll_x;
 static int scroll_y;
 static int view_width = 640;
 static int view_height = 400;
-static uint8_t *pixels;
+static uint32_t *pixels;
 static size_t pixel_capacity;
 static volatile int terminal_lock;
 static volatile int stopping;
@@ -394,10 +394,10 @@ static void put_byte_locked(unsigned char character) {
 }
 
 static int ensure_pixels_locked(void) {
-    size_t needed = (size_t)view_width * (size_t)view_height;
+    size_t needed = (size_t)view_width * (size_t)view_height * sizeof(uint32_t);
     if (needed <= pixel_capacity)
         return 0;
-    uint8_t *replacement = realloc(pixels, needed);
+    uint32_t *replacement = realloc(pixels, needed);
     if (!replacement)
         return -1;
     pixels = replacement;
@@ -530,7 +530,7 @@ static void render_locked(void) {
         cursor_y < clip.y + clip.h && cursor_y + 16 > clip.y) {
         fill_clipped_locked(
             (struct appui_rect){cursor_x, cursor_y, 8, 16},
-            clip, 15);
+            clip, THEME_TEXT);
     }
     draw_scrollbars_locked();
     (void)guiapp_send_frame(&gui, "Terminal", view_width, view_height, pixels);

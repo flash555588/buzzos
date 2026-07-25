@@ -95,10 +95,10 @@ QEMU_ACCEL ?= whpx
 QEMU_CPU ?= qemu64
 # SDL+GL is much faster than default GTK under WHPX; clarity is acceptable.
 QEMU_DISPLAY ?= sdl,gl=on
-# Use the virtio-vga compatibility device for GPU experiments.  It exposes a
-# modern virtio-gpu PCI function while retaining a boot-time VBE framebuffer,
-# so older guests can still fall back to the framebuffer backend.  Override
-# with `QEMU_VIDEO="-vga std"` to force the legacy path.
+# Display backend: virtio-vga enables the guest VirtIO-GPU 2D path with a
+# boot-time VBE framebuffer fallback.  Force the legacy path with
+#   make run QEMU_VIDEO="-vga std"
+# Smoke scripts that need deterministic VGA should set QEMU_VIDEO explicitly.
 QEMU_VIDEO ?= -vga none -device virtio-vga,xres=1600,yres=900
 QEMU_BASE := -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 256 \
 	-drive format=raw,file=$(IMAGE) -no-reboot $(QEMU_VIDEO) \
@@ -178,7 +178,7 @@ DOOM_DIR := src/user/third_party/doomgeneric/doomgeneric
 DOOM_SRCS := $(wildcard $(DOOM_DIR)/*.c $(DOOM_DIR)/*.h) src/user/bin/doom.c src/user/bin/doom_audio.c tools/build-doom.ps1
 BINJGB_DIR := src/user/third_party/binjgb/src
 BINJGB_FLAGS := -I$(BINJGB_DIR) -include stdbool.h -DNDEBUG \
-	-DBINJGB_BUZZOS_INDEXED_COLOR -O3 \
+	-O3 \
 	-fomit-frame-pointer -flto \
 	-Wno-unused-function -Wno-unused-variable -Wno-unused-parameter
 BINJGB_OBJS := $(BUILD)/user/binjgb_common.o $(BUILD)/user/binjgb_emulator.o
@@ -265,6 +265,7 @@ $(OBJDIR)/syscall/syscall.o: src/kernel/syscall/syscall_internal.h src/kernel/ar
 $(OBJDIR)/syscall/sys_net.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/net/net.h
 $(OBJDIR)/syscall/sys_file.o: src/kernel/fs/minifs/minifs.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h
 $(OBJDIR)/syscall/sys_gfx.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/drv/font_unicode.h src/kernel/drv/console.h src/kernel/drv/fb.h src/kernel/sched/task.h
+$(OBJDIR)/syscall/sys_shm.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/arch/i386/paging.h src/kernel/mm/pmm.h src/kernel/sched/task.h
 $(OBJDIR)/sched/task.o: src/kernel/syscall/sys_ipc.h src/kernel/syscall/syscall.h src/kernel/sched/task.h
 $(OBJDIR)/syscall/sys_ipc.o: src/kernel/syscall/sys_ipc.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/sched/task.h src/kernel/drv/timer.h
 $(OBJDIR)/fs/minifs/minifs.o: src/kernel/fs/minifs/minifs.h src/kernel/sched/task.h
@@ -418,14 +419,21 @@ $(BUILD)/user/doom.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/
 		$(DOOM_SRCS) $(BUILD)/user/user.ld | $(BUILD)/user
 	powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-doom.ps1 -Output $@
 
-$(BUILD)/user/binjgb_common.o: $(BINJGB_DIR)/common.c $(BINJGB_DIR)/common.h $(BINJGB_DIR)/memory.h | $(BUILD)/user
+# Flag changes (e.g. dropping INDEXED_COLOR) must rebuild these objects.
+$(BUILD)/user/binjgb.flags: Makefile | $(BUILD)/user
+	@echo $(BINJGB_FLAGS) > $@
+
+$(BUILD)/user/binjgb_common.o: $(BINJGB_DIR)/common.c $(BINJGB_DIR)/common.h $(BINJGB_DIR)/memory.h \
+		$(BUILD)/user/binjgb.flags | $(BUILD)/user
 	$(CC) $(UCFLAGS) $(BINJGB_FLAGS) -c $< -o $@
 
 $(BUILD)/user/binjgb_emulator.o: $(BINJGB_DIR)/emulator.c $(BINJGB_DIR)/emulator.h \
-		$(BINJGB_DIR)/common.h $(BINJGB_DIR)/builtin-palettes.def | $(BUILD)/user
+		$(BINJGB_DIR)/common.h $(BINJGB_DIR)/builtin-palettes.def \
+		$(BUILD)/user/binjgb.flags | $(BUILD)/user
 	$(CC) $(UCFLAGS) $(BINJGB_FLAGS) -c $< -o $@
 
-$(BUILD)/user/gameboy.o: src/user/bin/gameboy.c $(USER_HEADERS) $(BINJGB_DIR)/emulator.h | $(BUILD)/user
+$(BUILD)/user/gameboy.o: src/user/bin/gameboy.c $(USER_HEADERS) $(BINJGB_DIR)/emulator.h \
+		$(BUILD)/user/binjgb.flags | $(BUILD)/user
 	$(CC) $(UCFLAGS) $(BINJGB_FLAGS) -c $< -o $@
 
 $(BUILD)/user/gameboy.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \

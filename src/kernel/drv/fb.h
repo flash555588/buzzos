@@ -23,17 +23,32 @@ void fb_init(void);
 void fb_get_info(struct gfx_info *out);
 int  fb_set_mode(uint32_t width, uint32_t height);
 int  fb_restore_boot_mode(void);
-uint32_t fb_palette_rgb(uint8_t index);
-
-int  fb_clear(uint8_t color);
-int  fb_putpixel(int x, int y, uint8_t color);
-int  fb_fill_rect(int x, int y, int w, int h, uint8_t color);
-int  fb_blit8(int x, int y, int w, int h, const uint8_t *pixels);
-int  fb_blit8_stride(int x, int y, int w, int h,
-                     const uint8_t *pixels, int stride);
-int  fb_text(int x, int y, const char *s, uint8_t fg, int bg);
+/* Color arguments are 0x00RRGGBB.  Scanout is truecolor (32 bpp preferred;
+ * 16/24 bpp linear FB write paths remain for odd boot frames only). */
+int  fb_clear(uint32_t rgb);
+int  fb_putpixel(int x, int y, uint32_t rgb);
+int  fb_fill_rect(int x, int y, int w, int h, uint32_t rgb);
+int  fb_blit32(int x, int y, int w, int h, const uint32_t *pixels);
+int  fb_blit32_stride(int x, int y, int w, int h,
+                      const uint32_t *pixels, int stride);
+int  fb_text(int x, int y, const char *s, uint32_t fg_rgb, int bg_rgb);
 int  fb_present_rgb32(int x, int y, int width, int height,
                       const uint32_t *pixels, int stride);
+
+/* Zero-copy scanout: map guest RGB surface into the display owner's VA and
+ * present dirty rectangles (GPU: TRANSFER+FLUSH; linear FB: direct write). */
+struct fb_scanout_map {
+    uint32_t user_va;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride_pixels; /* pixels per row */
+    uint32_t bytes;
+    uint32_t backend;
+};
+
+int fb_map_scanout_user(int pid, struct fb_scanout_map *out);
+int fb_unmap_scanout_user(int pid);
+int fb_present_rect(int pid, int x, int y, int w, int h);
 
 /* Exactly one user process may own the scanout. PID 0 denotes the console. */
 int fb_display_acquire(int pid);

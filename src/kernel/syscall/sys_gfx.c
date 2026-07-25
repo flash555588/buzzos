@@ -36,27 +36,28 @@ int sys_gfx_clear(uint32_t color, uint32_t b, uint32_t c, uint32_t d, uint32_t e
     (void)b; (void)c; (void)d; (void)e;
     if (!user_owns_display())
         return -1;
-    return fb_clear((uint8_t)color);
+    return fb_clear(color);
 }
 
 int sys_gfx_putpixel(uint32_t x, uint32_t y, uint32_t color, uint32_t d, uint32_t e) {
     (void)d; (void)e;
     if (!user_owns_display())
         return -1;
-    return fb_putpixel((int)x, (int)y, (uint8_t)color);
+    return fb_putpixel((int)x, (int)y, color);
 }
 
 int sys_gfx_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
     if (!user_owns_display())
         return -1;
-    return fb_fill_rect((int)x, (int)y, (int)w, (int)h, (uint8_t)color);
+    return fb_fill_rect((int)x, (int)y, (int)w, (int)h, color);
 }
 
 int sys_gfx_text(uint32_t x, uint32_t y, uint32_t s_arg, uint32_t fg, uint32_t bg) {
     const char *s = (const char *)(uintptr_t)s_arg;
     if (!user_owns_display() || !user_string_ok(s))
         return -1;
-    return fb_text((int)x, (int)y, s, (uint8_t)fg, (int)bg);
+    /* bg is 0xFFFFFFFF (-1 as uint32) for transparent background. */
+    return fb_text((int)x, (int)y, s, fg, (int)bg);
 }
 
 int sys_fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t pixels_arg) {
@@ -72,10 +73,11 @@ int sys_fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t pixels_
         return -1;
     if (x + w > info.width || y + h > info.height)
         return -1;
-    if (!user_range_ok(pixels_arg, w * h))
+    uint64_t bytes = (uint64_t)w * (uint64_t)h * 4u;
+    if (bytes > 0xFFFFFFFFu || !user_range_ok(pixels_arg, (uint32_t)bytes))
         return -1;
-    const uint8_t *pixels = (const uint8_t *)(uintptr_t)pixels_arg;
-    return fb_blit8((int)x, (int)y, (int)w, (int)h, pixels);
+    const uint32_t *pixels = (const uint32_t *)(uintptr_t)pixels_arg;
+    return fb_blit32((int)x, (int)y, (int)w, (int)h, pixels);
 }
 
 int sys_fb_blit_stride(uint32_t x, uint32_t y, uint32_t packed_wh,
@@ -90,11 +92,13 @@ int sys_fb_blit_stride(uint32_t x, uint32_t y, uint32_t packed_wh,
         w > info.width || h > info.height ||
         x + w > info.width || y + h > info.height)
         return -1;
-    uint32_t bytes = (h - 1u) * stride + w;
-    if (bytes < w || !user_range_ok(pixels_arg, bytes)) return -1;
-    const uint8_t *pixels = (const uint8_t *)(uintptr_t)pixels_arg;
-    return fb_blit8_stride((int)x, (int)y, (int)w, (int)h,
-                           pixels, (int)stride);
+    /* stride is in pixels; buffer is 32bpp. */
+    uint64_t bytes = ((uint64_t)(h - 1u) * (uint64_t)stride + (uint64_t)w) * 4u;
+    if (bytes > 0xFFFFFFFFu || !user_range_ok(pixels_arg, (uint32_t)bytes))
+        return -1;
+    const uint32_t *pixels = (const uint32_t *)(uintptr_t)pixels_arg;
+    return fb_blit32_stride((int)x, (int)y, (int)w, (int)h,
+                            pixels, (int)stride);
 }
 
 int sys_mouse_get(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
@@ -133,4 +137,32 @@ int sys_gfx_set_mode(uint32_t width, uint32_t height, uint32_t c,
         return -1;
     mouse_clamp_to_screen();
     return 0;
+}
+
+int sys_gfx_map_surface(uint32_t out_arg, uint32_t b, uint32_t c,
+                        uint32_t d, uint32_t e) {
+    (void)b; (void)c; (void)d; (void)e;
+    if (!user_owns_display() ||
+        !user_range_writable(out_arg, sizeof(struct syscall_gfx_surface)))
+        return -1;
+    struct fb_scanout_map map;
+    if (fb_map_scanout_user(task_get_pid(), &map) < 0)
+        return -1;
+    struct syscall_gfx_surface *out =
+        (struct syscall_gfx_surface *)(uintptr_t)out_arg;
+    out->address = map.user_va;
+    out->width = map.width;
+    out->height = map.height;
+    out->stride_pixels = map.stride_pixels;
+    out->bytes = map.bytes;
+    out->backend = map.backend;
+    return 0;
+}
+
+int sys_gfx_present(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                    uint32_t e) {
+    (void)e;
+    if (!user_owns_display())
+        return -1;
+    return fb_present_rect(task_get_pid(), (int)x, (int)y, (int)w, (int)h);
 }

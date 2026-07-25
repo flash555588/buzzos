@@ -31,7 +31,8 @@ struct file_entry {
     uint32_t size;
 };
 
-static uint8_t pixels[MAX_W * MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
 static struct file_entry entries[MAX_ENTRIES];
 static int entry_count;
 static int selected = -1;
@@ -446,7 +447,7 @@ static void draw_icon(int x, int y, int type, int selected_row) {
         appui_border(pixels, w, h, (struct appui_rect){x, y + 6, 18, 13},
                      edge, appui_gray(2));
     } else {
-        appui_fill(pixels, w, h, (struct appui_rect){x + 2, y + 1, 14, 18}, 15);
+        appui_fill(pixels, w, h, (struct appui_rect){x + 2, y + 1, 14, 18}, THEME_TEXT);
         appui_border(pixels, w, h, (struct appui_rect){x + 2, y + 1, 14, 18},
                      edge, appui_gray(3));
         appui_fill(pixels, w, h, (struct appui_rect){x + 5, y + 6, 8, 1},
@@ -1017,6 +1018,8 @@ int main(int argc, char **argv) {
         if (event.type == GUIAPP_EVT_INIT || event.type == GUIAPP_EVT_RESIZE) {
             w = clamp_int(event.width, 220, MAX_W);
             h = clamp_int(event.height, 160, MAX_H);
+            if (appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+                break;
             clamp_selection();
         } else if (event.type == GUIAPP_EVT_KEY && event.buttons) {
             handle_key(&ctx, event.key);
@@ -1027,9 +1030,13 @@ int main(int argc, char **argv) {
         } else if (event.type == GUIAPP_EVT_MOUSE) {
             handle_mouse(&ctx, event.x, event.y, event.buttons, event.wheel);
         }
+        if (!pixels ||
+            appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+            break;
         render();
         if (guiapp_send_frame(&ctx, window_title, w, h, pixels) < 0)
             break;
     }
+    free(pixels);
     return 0;
 }

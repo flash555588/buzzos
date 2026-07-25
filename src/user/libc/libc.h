@@ -169,14 +169,25 @@ int  gfx_clear(int color);
 int  gfx_putpixel(int x, int y, int color);
 int  gfx_fill_rect(int x, int y, int w, int h, int color);
 int  gfx_text(int x, int y, const char *s, int fg, int bg);
-int  fb_blit(int x, int y, int w, int h, const uint8_t *pixels);
-int  fb_blit_stride(int x, int y, int w, int h, const uint8_t *pixels,
+int  fb_blit(int x, int y, int w, int h, const uint32_t *pixels);
+int  fb_blit_stride(int x, int y, int w, int h, const uint32_t *pixels,
                     int stride);
 int  mouse_get(struct mouse_state *out);
 int  gfx_info(struct gfx_info *out);
 int  gfx_acquire_display(void);
 int  gfx_release_display(void);
 int  gfx_set_mode(int width, int height);
+/* Zero-copy scanout: map RGB surface, compose in-place, present dirty rects. */
+struct gfx_surface_map {
+    uint32_t *pixels;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride_pixels;
+    uint32_t bytes;
+    uint32_t backend;
+};
+int  gfx_map_surface(struct gfx_surface_map *out);
+int  gfx_present(int x, int y, int w, int h);
 int  font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap);
 void gfx_set_origin(int x, int y);
 void gfx_get_origin(int *x_out, int *y_out);

@@ -31,7 +31,8 @@
 #define STATUS_HEIGHT 22
 #define URL_CAPACITY 512
 
-static uint8_t pixels[GUIAPP_MAX_W * GUIAPP_MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
 static char address_text[URL_CAPACITY] = "http://example.com/";
 static char window_title[GUIAPP_TITLE_MAX] = "NetSurf";
 static char status_text[128] = "NetSurf engine ready";
@@ -180,8 +181,10 @@ static void draw_browser_page(void) {
     if (content_height < 1) return;
     window->width = frame_width;
     window->height = content_height;
+    /* Document canvas: light paper so NetSurf black text stays readable. */
     appui_fill(pixels, frame_width, frame_height,
-               (struct appui_rect){0, TOOLBAR_HEIGHT, frame_width, content_height}, 15);
+               (struct appui_rect){0, TOOLBAR_HEIGHT, frame_width, content_height},
+               THEME_DOCUMENT_BG);
     struct buzzos_plot_target target;
     buzzos_plot_target_init(&target, pixels, frame_width, frame_height, TOOLBAR_HEIGHT);
     struct rect clip = {0, 0, frame_width, content_height};
@@ -195,33 +198,42 @@ static void draw_browser_page(void) {
                           window->scrolly, &clip, &context);
 }
 
+static int ensure_browser_pixels(void) {
+    return appui_pixels_ensure(&pixels, &pixels_cap, frame_width, frame_height,
+                               GUIAPP_MAX_W, GUIAPP_MAX_H);
+}
+
 static void render_frame(struct guiapp_ctx *application) {
+    if (ensure_browser_pixels() < 0 || !pixels)
+        return;
     appui_fill(pixels, frame_width, frame_height,
-               (struct appui_rect){0, 0, frame_width, frame_height}, appui_gray(3));
+               (struct appui_rect){0, 0, frame_width, frame_height}, THEME_APP_BG);
     appui_fill(pixels, frame_width, frame_height,
-               (struct appui_rect){0, 0, frame_width, TOOLBAR_HEIGHT}, appui_gray(2));
+               (struct appui_rect){0, 0, frame_width, TOOLBAR_HEIGHT}, THEME_TOOLBAR_BG);
     appui_button(pixels, frame_width, frame_height,
                  (struct appui_rect){7, 11, 52, 30}, "Back", 1);
     appui_button(pixels, frame_width, frame_height,
                  (struct appui_rect){63, 11, 48, 30}, "Reload", 1);
+    /* Light address field + dark text (old palette 15/0 broke after RGB32). */
     struct appui_rect address = {117, 11, frame_width - 185, 30};
-    appui_fill(pixels, frame_width, frame_height, address, 15);
-    appui_border(pixels, frame_width, frame_height, address, appui_gray(9), appui_gray(1));
+    appui_fill(pixels, frame_width, frame_height, address, THEME_DOCUMENT_BG);
+    appui_border(pixels, frame_width, frame_height, address,
+                 THEME_FIELD_BORDER, THEME_DIVIDER);
     appui_text(pixels, frame_width, frame_height, address.x + 6, address.y + 7,
-               address_text, 0, -1,
+               address_text, THEME_DOCUMENT_TEXT, -1,
                (struct appui_rect){address.x + 4, address.y + 2, address.w - 8, address.h - 4});
     int cursor = address.x + 6 + appui_text_width(address_text);
     if (cursor < address.x + address.w - 4)
         appui_fill(pixels, frame_width, frame_height,
-                   (struct appui_rect){cursor, address.y + 5, 1, 19}, appui_rgb6(0, 2, 5));
+                   (struct appui_rect){cursor, address.y + 5, 1, 19}, THEME_ACCENT);
     appui_button(pixels, frame_width, frame_height,
                  (struct appui_rect){frame_width - 62, 11, 54, 30}, "Go", 1);
     draw_browser_page();
     appui_fill(pixels, frame_width, frame_height,
                (struct appui_rect){0, frame_height - STATUS_HEIGHT,
-                                   frame_width, STATUS_HEIGHT}, appui_gray(2));
+                                   frame_width, STATUS_HEIGHT}, THEME_TOOLBAR_BG);
     appui_text(pixels, frame_width, frame_height, 8, frame_height - 17,
-               status_text, appui_gray(12), -1,
+               status_text, THEME_TEXT_DIM, -1,
                (struct appui_rect){5, frame_height - STATUS_HEIGHT,
                                    frame_width - 10, STATUS_HEIGHT});
     guiapp_send_frame(application, window_title, frame_width, frame_height, pixels);
@@ -441,6 +453,7 @@ int main(int argc, char **argv) {
             if (event.type == GUIAPP_EVT_INIT || event.type == GUIAPP_EVT_RESIZE) {
                 frame_width = appui_max(320, appui_min(GUIAPP_MAX_W, event.width));
                 frame_height = appui_max(220, appui_min(GUIAPP_MAX_H, event.height));
+                (void)ensure_browser_pixels();
             } else if (event.type == GUIAPP_EVT_KEY && event.buttons)
                 handle_key(event.key);
             else if (event.type == GUIAPP_EVT_TEXT) handle_text(event.text);
@@ -462,5 +475,6 @@ int main(int argc, char **argv) {
     netsurf_exit();
     nsoption_finalise(nsoptions, nsoptions_default);
     nslog_finalise();
+    free(pixels);
     return 0;
 }

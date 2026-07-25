@@ -42,6 +42,17 @@ static int ansi_seen_digit;
 static int console_ready;
 static struct dirty_rect dirty;
 
+/* VGA-style 16-color RGB for text attributes (not an 8 bpp framebuffer). */
+static uint32_t console_color_rgb(uint8_t index) {
+    static const uint32_t vga16[16] = {
+        0x000000u, 0x0000AAu, 0x00AA00u, 0x00AAAAu,
+        0xAA0000u, 0xAA00AAu, 0xAA5500u, 0xAAAAAAu,
+        0x555555u, 0x5555FFu, 0x55FF55u, 0x55FFFFu,
+        0xFF5555u, 0xFF55FFu, 0xFFFF55u, 0xFFFFFFu,
+    };
+    return vga16[index & 15u];
+}
+
 static uint32_t blend_rgb(uint32_t foreground, uint32_t background,
                           uint32_t alpha) {
     uint32_t inverse = 255u - alpha;
@@ -120,8 +131,8 @@ static const uint8_t *font_alpha_for(char character) {
 static void draw_glyph(int x, int y, char character,
                        uint8_t foreground, uint8_t background) {
     const uint8_t *alpha = font_alpha_for(character);
-    uint32_t fg_rgb = fb_palette_rgb(foreground);
-    uint32_t bg_rgb = fb_palette_rgb(background);
+    uint32_t fg_rgb = console_color_rgb(foreground);
+    uint32_t bg_rgb = console_color_rgb(background);
     for (int py = 0; py < CONSOLE_FONT_H; py++) {
         for (int px = 0; px < CONSOLE_FONT_W; px++) {
             uint8_t a = alpha[py * CONSOLE_FONT_W + px];
@@ -141,7 +152,7 @@ static void draw_cell(uint16_t row, uint16_t col) {
     uint8_t foreground = cell->color & 0x0Fu;
     uint8_t background = cell->color >> 4;
     surface_fill_rect(&surface, x, y, CONSOLE_FONT_W, CONSOLE_FONT_H,
-                      fb_palette_rgb(background));
+                      console_color_rgb(background));
     draw_glyph(x, y, cell->character, foreground, background);
     mark_dirty(x, y, CONSOLE_FONT_W, CONSOLE_FONT_H);
 }
@@ -177,7 +188,7 @@ static void clear_internal(void) {
     }
     cursor_row = 0;
     cursor_col = 0;
-    surface_clear(&surface, fb_palette_rgb(console_color >> 4));
+    surface_clear(&surface, console_color_rgb(console_color >> 4));
     mark_full_dirty();
 }
 
@@ -278,7 +289,7 @@ static void newline(void) {
         cell->color = console_color;
     }
     surface_scroll_up(&surface, CONSOLE_FONT_H,
-                      fb_palette_rgb(console_color >> 4));
+                      console_color_rgb(console_color >> 4));
     mark_full_dirty();
 }
 

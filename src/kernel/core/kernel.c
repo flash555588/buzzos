@@ -114,7 +114,7 @@ static void copy_multiboot_framebuffer(uint32_t info_addr) {
             struct multiboot2_tag_framebuffer *fb =
                 (struct multiboot2_tag_framebuffer *)tag;
             if (fb->addr && fb->width && fb->height && fb->pitch &&
-                (fb->bpp == 8 || fb->bpp == 16 || fb->bpp == 24 || fb->bpp == 32)) {
+                (fb->bpp == 16 || fb->bpp == 24 || fb->bpp == 32)) {
                 boot_fb.addr = fb->addr;
                 boot_fb.pitch = fb->pitch;
                 boot_fb.width = fb->width;

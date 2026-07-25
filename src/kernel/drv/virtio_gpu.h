@@ -16,6 +16,8 @@ int virtio_gpu_ready(void);
 int virtio_gpu_set_mode(uint32_t width, uint32_t height);
 uint32_t *virtio_gpu_pixels(void);
 uint32_t virtio_gpu_stride(void);
+uintptr_t virtio_gpu_backing_phys(void);
+uint32_t virtio_gpu_backing_bytes(void);
 int virtio_gpu_flush(int x, int y, int width, int height);
 
 #endif /* BUZZOS_VIRTIO_GPU_H */

@@ -52,7 +52,8 @@ void task_preempt_disable(void);
 void task_preempt_enable(void);
 
 /* Called from timer IRQ to preempt the current task. */
-void sched_tick(void);
+/* Charge `jiffies` of CPU time to the current task, then maybe preempt. */
+void sched_tick(uint32_t jiffies);
 
 /* The currently running task. */
 extern struct task *current_task;

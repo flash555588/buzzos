@@ -130,6 +130,9 @@ struct app_session {
     int reader_tid;
     volatile int reader_dead;
     volatile int closing;
+    /* Opt-in desktop heartbeat (System Monitor). Broadcasting TICK to every
+     * app forced full redraws every 500 ms even when idle. */
+    int wants_tick;
     uint32_t shm_token;
     struct guiapp_shared_surface *shared;
     volatile int dirty_lock;
@@ -148,7 +151,12 @@ struct app_session {
 static int sw;
 static int sh;
 static uint32_t display_backend;
-static uint8_t fb[MAX_SW * MAX_SH];
+/* Local fallback when scanout cannot be mapped into user space. */
+static uint32_t fb_local[MAX_SW * MAX_SH];
+/* Compose target: GPU/LFB scanout (zero-copy) or fb_local. */
+static uint32_t *fb = fb_local;
+static int fb_stride = MAX_SW; /* pixels per row in fb */
+static int scanout_direct;     /* 1 = writing guest scanout memory */
 static int running = 1;
 static int display_acquired;
 static struct window windows[WIN_COUNT];
@@ -205,8 +213,9 @@ static volatile uint32_t app_frame_dirty_mask;
 static int find_caret_window(void);
 static struct rect get_caret_area(void);
 static void draw_ime(void);
+static int bind_scanout(void);
 
-static uint8_t scaled_scanline[APP_SURFACE_MAX_W];
+static uint32_t scaled_scanline[APP_SURFACE_MAX_W];
 static struct rect compose_clip = {0, 0, MAX_SW, MAX_SH};
 static struct rect pending_damage;
 static int pending_damage_valid;
@@ -514,6 +523,7 @@ static int write_full(int fd, const void *buf, int size) {
 }
 
 static void fill(struct rect r, int color) {
+    uint32_t c = (uint32_t)color & 0x00FFFFFFu;
     if (r.x < 0) { r.w += r.x; r.x = 0; }
     if (r.y < 0) { r.h += r.y; r.y = 0; }
     if (r.x + r.w > sw) r.w = sw - r.x;
@@ -522,15 +532,16 @@ static void fill(struct rect r, int color) {
     if (r.w <= 0 || r.h <= 0)
         return;
     for (int yy = 0; yy < r.h; yy++) {
-        uint8_t *row = fb + (r.y + yy) * sw + r.x;
-        memset(row, color, (size_t)r.w);
+        uint32_t *row = fb + (r.y + yy) * fb_stride + r.x;
+        for (int xx = 0; xx < r.w; xx++)
+            row[xx] = c;
     }
 }
 
 static void pixel(int x, int y, int color) {
     if (x >= 0 && y >= 0 && x < sw && y < sh &&
         inside(x, y, compose_clip))
-        fb[y * sw + x] = (uint8_t)color;
+        fb[y * fb_stride + x] = (uint32_t)color & 0x00FFFFFFu;
 }
 
 static void pixel_clip(int x, int y, int color, struct rect clip) {
@@ -659,7 +670,7 @@ static void text_clip(int x, int y, const char *s, int fg, int bg, struct rect c
                 } else if (inside(tx, ty, clip) && tx >= 0 && ty >= 0 &&
                            tx < sw && ty < sh &&
                            inside(tx, ty, compose_clip)) {
-                    int under = bg >= 0 ? bg : fb[ty * sw + tx];
+                    int under = bg >= 0 ? bg : (int)fb[ty * fb_stride + tx];
                     pixel(tx, ty, plt_blend(fg, under, coverage));
                 }
             }
@@ -709,7 +720,7 @@ static void fill_round_top(struct rect r, const uint8_t *insets, int color) {
              color);
 }
 
-/* Blend palette color fg over the current backbuffer contents. */
+/* Blend RGB fg over the current backbuffer contents. */
 static void fill_blend(struct rect r, int fg, int alpha) {
     if (r.x < 0) { r.w += r.x; r.x = 0; }
     if (r.y < 0) { r.h += r.y; r.y = 0; }
@@ -719,9 +730,9 @@ static void fill_blend(struct rect r, int fg, int alpha) {
     if (r.w <= 0 || r.h <= 0)
         return;
     for (int yy = 0; yy < r.h; yy++) {
-        uint8_t *row = fb + (r.y + yy) * sw + r.x;
+        uint32_t *row = fb + (r.y + yy) * fb_stride + r.x;
         for (int xx = 0; xx < r.w; xx++)
-            row[xx] = (uint8_t)plt_blend(fg, row[xx], alpha);
+            row[xx] = plt_blend((uint32_t)fg, row[xx], alpha);
     }
 }
 
@@ -1206,6 +1217,7 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].resize_inflight = 0;
     app_sessions[slot].reader_dead = 0;
     app_sessions[slot].closing = 0;
+    app_sessions[slot].wants_tick = path && strstr(path, "taskmanager") != 0;
     app_sessions[slot].shm_token = mapping.token;
     app_sessions[slot].shared = shared;
     app_sessions[slot].dirty_lock = 0;
@@ -1444,7 +1456,7 @@ static struct rect scaled_view_rect(int id, int slot) {
 /* Nearest-neighbor scale into dst.  Source size is taken from the shared
  * header inside the seqlock so a concurrent resize cannot pair a new
  * buffer layout with a stale stride (that reads as diagonal striping). */
-static int blit_shared_scaled(int slot, const uint8_t *pixels, struct rect dst) {
+static int blit_shared_scaled(int slot, const uint32_t *pixels, struct rect dst) {
     if (dst.w <= 0 || dst.h <= 0)
         return 1;
     struct rect visible = intersect_rect(dst, compose_clip);
@@ -1495,10 +1507,10 @@ static int blit_shared_scaled(int slot, const uint8_t *pixels, struct rect dst) 
             int first_x = visible.x - dx;
             int cached_sy = -1;
             for (int y = 0; y < visible.h; y++) {
-                uint8_t *row = fb + (visible.y + y) * sw + visible.x;
+                uint32_t *row = fb + (visible.y + y) * fb_stride + visible.x;
                 int sy = (visible.y + y - dy) / yscale;
                 if (sy != cached_sy) {
-                    const uint8_t *src = pixels + sy * aw;
+                    const uint32_t *src = pixels + sy * aw;
                     int out = 0;
                     int pos = first_x;
                     while (out < visible.w) {
@@ -1506,34 +1518,35 @@ static int blit_shared_scaled(int slot, const uint8_t *pixels, struct rect dst) 
                         int run = xscale - pos % xscale;
                         if (run > visible.w - out)
                             run = visible.w - out;
-                        memset(scaled_scanline + out, src[sx], (size_t)run);
+                        for (int k = 0; k < run; k++)
+                            scaled_scanline[out + k] = src[sx];
                         out += run;
                         pos += run;
                     }
                     cached_sy = sy;
                 }
-                memcpy(row, scaled_scanline, (size_t)visible.w);
+                memcpy(row, scaled_scanline, (size_t)visible.w * sizeof(uint32_t));
             }
         } else if (use_map) {
             int cached_sy = -1;
             for (int y = 0; y < visible.h; y++) {
-                uint8_t *row = fb + (visible.y + y) * sw + visible.x;
+                uint32_t *row = fb + (visible.y + y) * fb_stride + visible.x;
                 int sy = app_sessions[slot].ymap[visible.y + y - dy];
                 if (sy != cached_sy) {
-                    const uint8_t *src = pixels + sy * aw;
+                    const uint32_t *src = pixels + sy * aw;
                     int sx0 = visible.x - dx;
                     for (int x = 0; x < visible.w; x++)
                         scaled_scanline[x] =
                             src[app_sessions[slot].xmap[sx0 + x]];
                     cached_sy = sy;
                 }
-                memcpy(row, scaled_scanline, (size_t)visible.w);
+                memcpy(row, scaled_scanline, (size_t)visible.w * sizeof(uint32_t));
             }
         } else {
             for (int y = 0; y < visible.h; y++) {
-                uint8_t *row = fb + (visible.y + y) * sw + visible.x;
+                uint32_t *row = fb + (visible.y + y) * fb_stride + visible.x;
                 int sy = (visible.y + y - dy) * ah / vh;
-                const uint8_t *src = pixels + sy * aw;
+                const uint32_t *src = pixels + sy * aw;
                 for (int xx = 0; xx < visible.w; xx++)
                     row[xx] = src[(visible.x - dx + xx) * aw / vw];
             }
@@ -1551,7 +1564,7 @@ static int blit_shared_scaled(int slot, const uint8_t *pixels, struct rect dst) 
 /* 1:1 blit of the live shared buffer into content (top-left).  Stride always
  * comes from shared->width inside the seqlock — never from a stale
  * session surface_w (FileManager-sized frames made this look like 花纹). */
-static int blit_shared_1to1(int slot, const uint8_t *pixels, struct rect content) {
+static int blit_shared_1to1(int slot, const uint32_t *pixels, struct rect content) {
     struct guiapp_shared_surface *shared = app_sessions[slot].shared;
     if (!shared || !pixels || content.w <= 0 || content.h <= 0)
         return 0;
@@ -1577,8 +1590,9 @@ static int blit_shared_1to1(int slot, const uint8_t *pixels, struct rect content
             int sx = visible.x - content.x;
             int sy = visible.y - content.y;
             for (int y = 0; y < visible.h; y++)
-                memcpy(fb + (visible.y + y) * sw + visible.x,
-                       pixels + (sy + y) * aw + sx, (size_t)visible.w);
+                memcpy(fb + (visible.y + y) * fb_stride + visible.x,
+                       pixels + (sy + y) * aw + sx,
+                       (size_t)visible.w * sizeof(uint32_t));
         }
         __sync_synchronize();
         copied = shared->sequence == sequence &&
@@ -1878,6 +1892,7 @@ static int switch_display_mode(int index) {
     sh = (int)info.height;
     display_backend = info.backend;
     mode_error_until = 0;
+    (void)bind_scanout();
     relayout_after_mode_change(old_sw, old_sh);
     return 0;
 }
@@ -2090,8 +2105,8 @@ static void draw_app_window(int id) {
             fill(c, THEME_WIN_BODY);
         return;
     }
-    const uint8_t *pixels = (const uint8_t *)shared +
-        GUIAPP_SHARED_HEADER_SIZE;
+    const uint32_t *pixels = (const uint32_t *)((const uint8_t *)shared +
+        GUIAPP_SHARED_HEADER_SIZE);
     if (app_sessions[slot].scaled_surface && source_w > 0 && source_h > 0) {
         struct rect view = scaled_view_rect(id, slot);
         int vw = view.w;
@@ -2551,7 +2566,7 @@ static void draw_pointer(void) {
             int edge = x == 0 || y == 0 ||
                        !(arrow[y] & (0x8000u >> (x + 1))) ||
                        (y + 1 < 16 && !(arrow[y + 1] & (0x8000u >> x)));
-            pixel(pointer_x + x, pointer_y + y, edge ? 0 : 15);
+            pixel(pointer_x + x, pointer_y + y, edge ? 0x000000u : 0xFFFFFFu);
         }
     }
 }
@@ -2574,6 +2589,23 @@ static void compose_scene(void) {
     draw_pointer();
 }
 
+static int bind_scanout(void) {
+    struct gfx_surface_map map;
+    if (gfx_map_surface(&map) == 0 && map.pixels &&
+        map.width >= (uint32_t)sw && map.height >= (uint32_t)sh &&
+        map.stride_pixels >= (uint32_t)sw) {
+        fb = map.pixels;
+        fb_stride = (int)map.stride_pixels;
+        scanout_direct = 1;
+        display_backend = map.backend;
+        return 0;
+    }
+    fb = fb_local;
+    fb_stride = MAX_SW;
+    scanout_direct = 0;
+    return -1;
+}
+
 static int render_region(struct rect area) {
     area = intersect_rect(area, (struct rect){0, 0, sw, sh});
     if (area.w <= 0 || area.h <= 0)
@@ -2581,8 +2613,11 @@ static int render_region(struct rect area) {
     compose_clip = area;
     compose_scene();
     compose_clip = (struct rect){0, 0, sw, sh};
+    if (scanout_direct)
+        return gfx_present(area.x, area.y, area.w, area.h);
+    /* Fallback: software backbuffer → kernel scanout copy. */
     return fb_blit_stride(area.x, area.y, area.w, area.h,
-                          fb + area.y * sw + area.x, sw);
+                          fb + area.y * fb_stride + area.x, fb_stride);
 }
 
 static void render(void) {
@@ -2818,6 +2853,7 @@ static void close_window(int id) {
         app_sessions[slot].reader_tid = -1;
         app_sessions[slot].reader_dead = 0;
         app_sessions[slot].closing = 0;
+        app_sessions[slot].wants_tick = 0;
         app_sessions[slot].shm_token = 0;
         app_sessions[slot].shared = 0;
     }
@@ -2977,8 +3013,9 @@ static void send_app_ticks(void) {
         return;
     last_app_tick_ms = now;
     for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
-        if (app_sessions[slot].used &&
-            app_send_event(slot, GUIAPP_EVT_TICK, 0, 0, 0, 0, 0) < 0)
+        if (!app_sessions[slot].used || !app_sessions[slot].wants_tick)
+            continue;
+        if (app_send_event(slot, GUIAPP_EVT_TICK, 0, 0, 0, 0, 0) < 0)
             app_sessions[slot].reader_dead = 1;
     }
 }
@@ -3640,6 +3677,12 @@ static void init_desktop(void) {
     if (sh > MAX_SH)
         sh = MAX_SH;
     compose_clip = (struct rect){0, 0, sw, sh};
+    if (bind_scanout() == 0)
+        gui_log(display_backend == GFX_BACKEND_VIRTIO_GPU_2D
+                    ? "[gui] zero-copy virtio-gpu scanout"
+                    : "[gui] zero-copy linear framebuffer");
+    else
+        gui_log("[gui] software backbuffer (scanout map failed)");
     gfx_set_origin(0, 0);
     pointer_x = sw / 2;
     pointer_y = sh / 2;

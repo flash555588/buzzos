@@ -12,12 +12,15 @@ enum {
     FILL_QUEUE = 65536,
 };
 
-static uint8_t pixels[MAX_W * MAX_H];
-static uint8_t canvas[CANVAS_MAX_W * CANVAS_MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
+static uint32_t *canvas;
+static int canvas_stride; /* allocated row width */
+static int canvas_rows;   /* allocated height */
 static uint16_t fill_qx[FILL_QUEUE];
 static uint16_t fill_qy[FILL_QUEUE];
 static int tool;
-static int color = 0;
+static uint32_t color = 0;
 static int drawing;
 static int sx;
 static int sy;
@@ -29,9 +32,9 @@ static int pointer_x = -1;
 static int pointer_y = -1;
 static int pointer_buttons;
 
-static const int palette[] = {
-    0, 15, 196, 46, 21, 226, 201, 208,
-    51, 93, 160, 34,
+static const uint32_t palette[] = {
+    0x000000u, 0xFFFFFFu, 0xCC6600u, 0x003300u, 0x207850u, 0xFF3300u,
+    0xCC66FFu, 0xCCCC00u, 0x0033FFu, 0x3366FFu, 0x996600u, 0x9E9E9Eu,
 };
 
 static int palette_count(void) {
@@ -82,9 +85,52 @@ static int canvas_view_h(void) {
     return view_h > CANVAS_MAX_H ? CANVAS_MAX_H : view_h;
 }
 
+static void clear_canvas(void) {
+    if (!canvas || canvas_stride <= 0 || canvas_rows <= 0)
+        return;
+    for (int y = 0; y < canvas_rows; y++)
+        for (int x = 0; x < canvas_stride; x++)
+            canvas[y * canvas_stride + x] = 0xFFFFFFu;
+}
+
+static int ensure_paint_buffers(void) {
+    int vw = canvas_view_w();
+    int vh = canvas_view_h();
+    if (appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+        return -1;
+    if (canvas && vw <= canvas_stride && vh <= canvas_rows)
+        return 0;
+    int nw = vw + vw / 4;
+    int nh = vh + vh / 4;
+    if (nw < vw) nw = vw;
+    if (nh < vh) nh = vh;
+    if (nw > CANVAS_MAX_W) nw = CANVAS_MAX_W;
+    if (nh > CANVAS_MAX_H) nh = CANVAS_MAX_H;
+    if (nw < 1) nw = 1;
+    if (nh < 1) nh = 1;
+    uint32_t *nbuf = (uint32_t *)malloc((size_t)nw * (size_t)nh * sizeof(uint32_t));
+    if (!nbuf)
+        return -1;
+    for (int i = 0; i < nw * nh; i++)
+        nbuf[i] = 0xFFFFFFu;
+    if (canvas) {
+        int copy_w = canvas_stride < nw ? canvas_stride : nw;
+        int copy_h = canvas_rows < nh ? canvas_rows : nh;
+        for (int y = 0; y < copy_h; y++)
+            for (int x = 0; x < copy_w; x++)
+                nbuf[y * nw + x] = canvas[y * canvas_stride + x];
+        free(canvas);
+    }
+    canvas = nbuf;
+    canvas_stride = nw;
+    canvas_rows = nh;
+    return 0;
+}
+
 static void canvas_pixel(int x, int y, int c) {
-    if (x >= 0 && y >= 0 && x < CANVAS_MAX_W && y < CANVAS_MAX_H)
-        canvas[y * CANVAS_MAX_W + x] = (uint8_t)c;
+    if (!canvas || x < 0 || y < 0 || x >= canvas_stride || y >= canvas_rows)
+        return;
+    canvas[y * canvas_stride + x] = c & 0x00FFFFFFu;
 }
 
 static void draw_line_canvas(int x0, int y0, int x1, int y1, int c) {
@@ -144,10 +190,11 @@ static void rect_canvas(int x0, int y0, int x1, int y1, int c) {
 static void fill_canvas(int x, int y, int c) {
     int fill_w = canvas_view_w();
     int fill_h = canvas_view_h();
-    if (x < 0 || y < 0 || x >= fill_w || y >= fill_h)
+    if (!canvas || x < 0 || y < 0 || x >= fill_w || y >= fill_h ||
+        x >= canvas_stride || y >= canvas_rows)
         return;
-    int target = canvas[y * CANVAS_MAX_W + x];
-    if (target == c)
+    uint32_t target = canvas[y * canvas_stride + x];
+    if (target == (uint32_t)c)
         return;
     int head = 0;
     int tail = 0;
@@ -156,7 +203,7 @@ static void fill_canvas(int x, int y, int c) {
     fill_qy[tail] = (uint16_t)y;
     tail = (tail + 1) % FILL_QUEUE;
     count++;
-    canvas[y * CANVAS_MAX_W + x] = (uint8_t)c;
+    canvas[y * canvas_stride + x] = c & 0x00FFFFFFu;
     while (count > 0) {
         int px = fill_qx[head];
         int py = fill_qy[head];
@@ -169,9 +216,9 @@ static void fill_canvas(int x, int y, int c) {
             int yy = ny[i];
             if (xx < 0 || yy < 0 || xx >= fill_w || yy >= fill_h)
                 continue;
-            if (canvas[yy * CANVAS_MAX_W + xx] != target)
+            if (canvas[yy * canvas_stride + xx] != target)
                 continue;
-            canvas[yy * CANVAS_MAX_W + xx] = (uint8_t)c;
+            canvas[yy * canvas_stride + xx] = c & 0x00FFFFFFu;
             if (count < FILL_QUEUE) {
                 fill_qx[tail] = (uint16_t)xx;
                 fill_qy[tail] = (uint16_t)yy;
@@ -204,7 +251,7 @@ static void render(void) {
                                         pointer_buttons));
     for (int i = 0; i < palette_count(); i++) {
         struct appui_rect r = color_rect(i);
-        int edge = i == color ? THEME_FOCUS : THEME_FIELD_BORDER;
+        int edge = palette[i] == color ? THEME_FOCUS : THEME_FIELD_BORDER;
         appui_fill(pixels, w, h, r, edge);
         appui_fill(pixels, w, h,
                    (struct appui_rect){r.x + 2, r.y + 2, r.w - 4, r.h - 4},
@@ -224,7 +271,7 @@ static void render(void) {
                THEME_FIELD_BORDER);
     for (int y = 0; y < view_h; y++)
         for (int x = 0; x < view_w; x++)
-            pixels[(CY + y) * w + CX + x] = canvas[y * CANVAS_MAX_W + x];
+            pixels[(CY + y) * w + CX + x] = canvas[y * canvas_stride + x];
 
     if (drawing && (tool == 2 || tool == 3)) {
         int ex = lx;
@@ -262,7 +309,7 @@ static void render_canvas_view(void) {
                THEME_FIELD_BORDER);
     for (int y = 0; y < view_h; y++)
         for (int x = 0; x < view_w; x++)
-            pixels[(CY + y) * w + CX + x] = canvas[y * CANVAS_MAX_W + x];
+            pixels[(CY + y) * w + CX + x] = canvas[y * canvas_stride + x];
 
     if (drawing && (tool == 2 || tool == 3)) {
         int ex = lx;
@@ -305,8 +352,7 @@ static int mouse(int x, int y, int buttons) {
             return 0;
         }
     if ((buttons & 1) && appui_inside(x, y, clear_rect())) {
-        for (int i = 0; i < CANVAS_MAX_W * CANVAS_MAX_H; i++)
-            canvas[i] = 15;
+        clear_canvas();
         return 1;
     }
     for (int i = 0; i < palette_count(); i++)
@@ -325,7 +371,7 @@ static int mouse(int x, int y, int buttons) {
         sx = lx = cx;
         sy = ly = cy;
         if (tool == 0) brush(cx, cy, palette[color]);
-        else if (tool == 1) brush(cx, cy, 15);
+        else if (tool == 1) brush(cx, cy, 0xFFFFFFu);
         else if (tool == 4) fill_canvas(cx, cy, palette[color]);
         canvas_dirty = 1;
     } else if ((buttons & 1) && on_canvas && drawing) {
@@ -333,7 +379,7 @@ static int mouse(int x, int y, int buttons) {
             brush_line(lx, ly, cx, cy, palette[color]);
             canvas_dirty = 1;
         } else if (tool == 1) {
-            brush_line(lx, ly, cx, cy, 15);
+            brush_line(lx, ly, cx, cy, 0xFFFFFFu);
             canvas_dirty = 1;
         } else if (tool == 2 || tool == 3) {
             canvas_dirty = 1;
@@ -356,8 +402,8 @@ int main(int argc, char **argv) {
     struct guiapp_event ev;
     if (guiapp_parse_args(argc, argv, &ctx) < 0)
         return 1;
-    for (int i = 0; i < CANVAS_MAX_W * CANVAS_MAX_H; i++)
-        canvas[i] = 15;
+    if (ensure_paint_buffers() < 0) return 1;
+    clear_canvas();
     for (;;) {
         if (guiapp_read_event(&ctx, &ev) < 0 || ev.type == GUIAPP_EVT_CLOSE)
             break;
@@ -371,7 +417,11 @@ int main(int argc, char **argv) {
             if (h < 160) h = 160;
             if (w > MAX_W) w = MAX_W;
             if (h > MAX_H) h = MAX_H;
+            if (ensure_paint_buffers() < 0)
+                break;
         }
+        if (ensure_paint_buffers() < 0)
+            break;
         if (dirty_canvas) {
             render_canvas_view();
             if (guiapp_send_dirty(&ctx, "Paint", w, h, CX - 1, CY - 1,
@@ -384,5 +434,7 @@ int main(int argc, char **argv) {
                 break;
         }
     }
+    free(pixels);
+    free(canvas);
     return 0;
 }

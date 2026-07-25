@@ -31,7 +31,8 @@ struct process_row {
     int cpu_tenths;
 };
 
-static uint8_t pixels[MAX_W * MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
 static struct process_row processes[MAX_PROCESSES];
 static struct process_row fresh[MAX_PROCESSES];
 static int process_count;
@@ -120,10 +121,15 @@ static uint32_t parse_u32(const char *text) {
     return value;
 }
 
-static uint32_t previous_ticks(int pid) {
-    for (int i = 0; i < process_count; i++)
-        if (processes[i].pid == pid)
-            return processes[i].ticks;
+/* Returns 1 if this pid was present in the previous sample. */
+static int previous_ticks(int pid, uint32_t *out) {
+    for (int i = 0; i < process_count; i++) {
+        if (processes[i].pid == pid) {
+            if (out)
+                *out = processes[i].ticks;
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -168,7 +174,9 @@ static int process_index_for_pid(int pid) {
 }
 
 static int parse_processes(uint32_t now) {
-    char buffer[4096];
+    /* Keep in sync with kernel TIMER_HZ (src/kernel/drv/timer.h). */
+    enum { SAMPLE_TIMER_HZ = 250 };
+    char buffer[12288];
     const char *cursor;
     int count = 0;
     if (read_text_file("/proc/tasks", buffer, sizeof(buffer)) < 0)
@@ -203,20 +211,91 @@ static int parse_processes(uint32_t now) {
         count++;
     }
 
-    uint32_t elapsed = last_sample_ms ? now - last_sample_ms : 0;
-    int total_non_idle = 0;
+    /*
+     * Single-core CPU% for the sample window:
+     *   expected jiffies ≈ elapsed_ms * TIMER_HZ / 1000
+     *   denom = max(expected, ΣΔticks)
+     *   row%  = Δticks / denom
+     *   header total%  ≡ sum of non-idle row%  (same numbers, no second formula)
+     * Unaccounted wall time is folded into idle so rows (incl. idle) ≈ 100%.
+     */
+    uint32_t deltas[MAX_PROCESSES];
+    uint32_t total_delta = 0;
+    uint32_t idle_delta = 0;
+    int idle_index = -1;
     for (int i = 0; i < count; i++) {
-        uint32_t old_ticks = previous_ticks(fresh[i].pid);
-        uint32_t delta = old_ticks ? fresh[i].ticks - old_ticks : 0;
-        if (elapsed) {
-            uint32_t scaled = delta * 4000u / elapsed;
-            fresh[i].cpu_tenths = (int)(scaled > 1000u ? 1000u : scaled);
+        uint32_t old = 0;
+        uint32_t delta = 0;
+        if (last_sample_ms && previous_ticks(fresh[i].pid, &old))
+            delta = fresh[i].ticks - old;
+        deltas[i] = delta;
+        total_delta += delta;
+        if (fresh[i].pid == 0) {
+            idle_delta = delta;
+            idle_index = i;
         }
-        if (fresh[i].pid != 0)
-            total_non_idle += fresh[i].cpu_tenths;
     }
-    system_cpu_tenths = clamp_int(total_non_idle, 0, 1000);
-    last_sample_ms = now;
+
+    uint32_t elapsed_ms = last_sample_ms ? (now - last_sample_ms) : 0;
+    if (!last_sample_ms || elapsed_ms < 50u) {
+        for (int i = 0; i < count; i++) {
+            int prev = process_index_for_pid(fresh[i].pid);
+            fresh[i].cpu_tenths = prev >= 0 ? processes[prev].cpu_tenths : 0;
+        }
+        if (!last_sample_ms)
+            system_cpu_tenths = 0;
+        else {
+            int busy = 0;
+            for (int i = 0; i < count; i++)
+                if (fresh[i].pid != 0)
+                    busy += fresh[i].cpu_tenths;
+            system_cpu_tenths = clamp_int(busy, 0, 1000);
+        }
+    } else {
+        uint32_t elapsed_ticks =
+            (elapsed_ms * (uint32_t)SAMPLE_TIMER_HZ + 500u) / 1000u;
+        if (elapsed_ticks == 0)
+            elapsed_ticks = 1;
+        uint32_t denom = total_delta > elapsed_ticks ? total_delta
+                                                     : elapsed_ticks;
+        if (denom == 0)
+            denom = 1;
+
+        int busy_sum = 0;
+        for (int i = 0; i < count; i++) {
+            if (fresh[i].pid == 0)
+                continue; /* idle filled in after busy sum */
+            int sample = (int)((deltas[i] * 1000u) / denom);
+            if (sample > 1000)
+                sample = 1000;
+            fresh[i].cpu_tenths = sample;
+            busy_sum += sample;
+        }
+        if (busy_sum > 1000) {
+            /* Clock skew: scale busy rows so they fit in 100%. */
+            for (int i = 0; i < count; i++) {
+                if (fresh[i].pid == 0)
+                    continue;
+                fresh[i].cpu_tenths =
+                    (int)((uint32_t)fresh[i].cpu_tenths * 1000u /
+                          (uint32_t)busy_sum);
+            }
+            busy_sum = 0;
+            for (int i = 0; i < count; i++)
+                if (fresh[i].pid != 0)
+                    busy_sum += fresh[i].cpu_tenths;
+        }
+        /* Header total is exactly the sum of non-idle rows. */
+        system_cpu_tenths = clamp_int(busy_sum, 0, 1000);
+
+        if (idle_index >= 0) {
+            /* Idle + unaccounted wall time so listed rows sum to ~100%. */
+            fresh[idle_index].cpu_tenths = 1000 - system_cpu_tenths;
+            (void)idle_delta;
+        }
+    }
+
+    last_sample_ms = now ? now : 1;
     process_count = count;
     for (int i = 0; i < count; i++)
         processes[i] = fresh[i];
@@ -848,6 +927,8 @@ int main(int argc, char **argv) {
             event.type == GUIAPP_EVT_RESIZE) {
             w = clamp_int(event.width, 420, MAX_W);
             h = clamp_int(event.height, 300, MAX_H);
+            if (appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+                break;
             clamp_scroll();
         } else if (event.type == GUIAPP_EVT_MOUSE) {
             handle_mouse(event.x, event.y, event.buttons, event.wheel);
@@ -858,9 +939,13 @@ int main(int argc, char **argv) {
             refresh_data();
             clamp_scroll();
         }
+        if (!pixels ||
+            appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+            break;
         render();
         if (guiapp_send_frame(&ctx, "System Monitor", w, h, pixels) < 0)
             break;
     }
+    free(pixels);
     return 0;
 }

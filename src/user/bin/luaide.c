@@ -36,7 +36,8 @@ static const char *const TB_LABELS[TB_COUNT] = {
     "Open", "New", "Save", "Run", "REPL", "Clear"
 };
 
-static uint8_t pixels[MAX_W * MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
 static char textbuf[TEXT_CAP];
 static uint8_t tok_color[TEXT_CAP];
 static int text_len;
@@ -1314,6 +1315,8 @@ int main(int argc, char **argv) {
         if (ev.type == GUIAPP_EVT_INIT || ev.type == GUIAPP_EVT_RESIZE) {
             w = clamp_int(ev.width, 480, MAX_W);
             h = clamp_int(ev.height, 320, MAX_H);
+            if (appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+                break;
             ensure_cursor_visible();
         } else if (ev.type == GUIAPP_EVT_KEY && ev.buttons) {
             key(ev.key);
@@ -1332,6 +1335,9 @@ int main(int argc, char **argv) {
         } else if (ev.type == GUIAPP_EVT_MOUSE) {
             mouse(&ctx, ev.x, ev.y, ev.buttons, ev.wheel);
         }
+        if (!pixels ||
+            appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+            break;
         render();
         if (guiapp_send_frame(&ctx, window_title, w, h, pixels) < 0)
             break;
@@ -1342,5 +1348,6 @@ int main(int argc, char **argv) {
         lua_close(L);
         L = 0;
     }
+    free(pixels);
     return 0;
 }
