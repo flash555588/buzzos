@@ -122,5 +122,7 @@ void syscall_init(void) {
     syscall_table[SYS_GFX_ACQUIRE] = sys_gfx_acquire;
     syscall_table[SYS_GFX_RELEASE] = sys_gfx_release;
     syscall_table[SYS_GFX_SET_MODE] = sys_gfx_set_mode;
+    syscall_table[SYS_GFX_MAP_SURFACE] = sys_gfx_map_surface;
+    syscall_table[SYS_GFX_PRESENT] = sys_gfx_present;
     serial_puts("[syscall] VFS-backed syscalls ready\n");
 }

@@ -12,13 +12,8 @@ static Emulator *emulator;
 static volatile int ready, closed, want_w=640, want_h=576;
 static volatile uint8_t held_buttons;
 static JoypadButtons buttons;
-#ifndef BINJGB_BUZZOS_INDEXED_COLOR
-static uint8_t native_frame[SCREEN_WIDTH*SCREEN_HEIGHT];
-#endif
+static uint32_t native_frame[SCREEN_WIDTH*SCREEN_HEIGHT];
 static uint8_t mono_audio[AUDIO_FRAMES];
-#ifndef BINJGB_BUZZOS_INDEXED_COLOR
-static uint8_t color_r[256],color_g[256],color_b[256];
-#endif
 static char rom_path[GUIAPP_PATH_MAX], save_path[GUIAPP_PATH_MAX];
 
 enum { BTN_RIGHT=1, BTN_LEFT=2, BTN_UP=4, BTN_DOWN=8,
@@ -68,35 +63,65 @@ static void send_audio(void){
   * as the master clock and retain every emulated sample. */
  u32 offset=0;while(offset<count&&!closed){int n=audio_write(mono_audio+offset,count-offset);if(n<0)break;if(n==0){sleep_ms(1);continue;}offset+=(u32)n;}
 }
-#ifndef BINJGB_BUZZOS_INDEXED_COLOR
-static void init_color_tables(void){for(unsigned i=0;i<256;i++){unsigned q=i*5u/255u;color_r[i]=(uint8_t)(40u+q*36u);color_g[i]=(uint8_t)(q*6u);color_b[i]=(uint8_t)q;}}
-static uint8_t rgba_index(RGBA p){return(uint8_t)(color_r[p&255u]+color_g[(p>>8)&255u]+color_b[(p>>16)&255u]);}
-#endif
-static void render(const char*title){
- int w=want_w,h=want_h;if(w<320)w=320;if(w>GUIAPP_MAX_W)w=GUIAPP_MAX_W;if(h<288)h=288;if(h>GUIAPP_MAX_H)h=GUIAPP_MAX_H;int need=w*h;
- (void)need;
-#ifdef BINJGB_BUZZOS_INDEXED_COLOR
- const uint8_t*native_frame=*emulator_get_frame_buffer(emulator);
-#else
- RGBA*fb=*emulator_get_frame_buffer(emulator);
- for(int i=0;i<SCREEN_WIDTH*SCREEN_HEIGHT;i++)native_frame[i]=rgba_index(fb[i]);
-#endif
- if(guiapp_send_scaled_frame(&gui,title,w,h,native_frame,SCREEN_WIDTH,SCREEN_HEIGHT)<0)closed=1;
+static void render(const char *title) {
+    int w = want_w, h = want_h;
+    if (w < 320) w = 320;
+    if (w > GUIAPP_MAX_W) w = GUIAPP_MAX_W;
+    if (h < 288) h = 288;
+    if (h > GUIAPP_MAX_H) h = GUIAPP_MAX_H;
+    /* FrameBuffer is FramePixel[160*144]; must be full RGBA32 (never 8-bit
+     * indexed).  MAKE_RGBA packs R in the low byte. */
+    FrameBuffer *fb = emulator_get_frame_buffer(emulator);
+    if (!fb)
+        return;
+    const FramePixel *src = (const FramePixel *)fb;
+    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
+        RGBA p = src[i];
+        native_frame[i] = ((p & 0xFFu) << 16) | (p & 0xFF00u) |
+                          ((p >> 16) & 0xFFu);
+    }
+    if (guiapp_send_scaled_frame(&gui, title, w, h, native_frame,
+                                 SCREEN_WIDTH, SCREEN_HEIGHT) < 0)
+        closed = 1;
 }
 
-static int message(const char*title,const char*a,const char*b){
- struct guiapp_event e;uint8_t*p=malloc((size_t)GUIAPP_MAX_W*GUIAPP_MAX_H);if(!p)return 1;int w=640,h=400;
- for(;;){if(guiapp_read_event(&gui,&e)<0||e.type==GUIAPP_EVT_CLOSE)break;if(e.type==GUIAPP_EVT_INIT||e.type==GUIAPP_EVT_RESIZE){w=e.width;h=e.height;if(w<400)w=400;if(w>GUIAPP_MAX_W)w=GUIAPP_MAX_W;if(h<260)h=260;if(h>GUIAPP_MAX_H)h=GUIAPP_MAX_H;}
-  appui_fill(p,w,h,(struct appui_rect){0,0,w,h},appui_gray(2));appui_text(p,w,h,28,30,title,15,-1,(struct appui_rect){20,20,w-40,32});
-  appui_text(p,w,h,28,84,a,appui_rgb6(1,4,2),-1,(struct appui_rect){20,76,w-40,30});appui_text(p,w,h,28,126,b,15,-1,(struct appui_rect){20,118,w-40,60});
-  appui_text(p,w,h,28,200,"Controls: arrows, Z=B, X=A, Enter=Start, Backspace=Select",appui_gray(5),-1,(struct appui_rect){20,192,w-40,34});if(guiapp_send_frame(&gui,title,w,h,p)<0)break;
- }free(p);return 0;
+static int message(const char *title, const char *a, const char *b) {
+    struct guiapp_event e;
+    uint32_t *p = 0;
+    size_t pcap = 0;
+    int w = 640, h = 400;
+    for (;;) {
+        if (guiapp_read_event(&gui, &e) < 0 || e.type == GUIAPP_EVT_CLOSE)
+            break;
+        if (e.type == GUIAPP_EVT_INIT || e.type == GUIAPP_EVT_RESIZE) {
+            w = e.width;
+            h = e.height;
+            if (w < 400) w = 400;
+            if (w > GUIAPP_MAX_W) w = GUIAPP_MAX_W;
+            if (h < 260) h = 260;
+            if (h > GUIAPP_MAX_H) h = GUIAPP_MAX_H;
+        }
+        if (appui_pixels_ensure(&p, &pcap, w, h, GUIAPP_MAX_W, GUIAPP_MAX_H) < 0)
+            break;
+        appui_fill(p, w, h, (struct appui_rect){0, 0, w, h}, appui_gray(2));
+        appui_text(p, w, h, 28, 30, title, THEME_TEXT, -1,
+                   (struct appui_rect){20, 20, w - 40, 32});
+        appui_text(p, w, h, 28, 84, a, appui_rgb6(1, 4, 2), -1,
+                   (struct appui_rect){20, 76, w - 40, 30});
+        appui_text(p, w, h, 28, 126, b, THEME_TEXT, -1,
+                   (struct appui_rect){20, 118, w - 40, 60});
+        appui_text(p, w, h, 28, 200,
+                   "Controls: arrows, Z=B, X=A, Enter=Start, Backspace=Select",
+                   appui_gray(5), -1,
+                   (struct appui_rect){20, 192, w - 40, 34});
+        if (guiapp_send_frame(&gui, title, w, h, p) < 0)
+            break;
+    }
+    free(p);
+    return 0;
 }
 int main(int argc,char**argv){
  if(guiapp_parse_args(argc,argv,&gui)<0)return 1;mkdir("/fs/games");mkdir("/fs/games/gameboy");
-#ifndef BINJGB_BUZZOS_INDEXED_COLOR
- init_color_tables();
-#endif
  if(choose_rom(argc>4?argv[4]:0)<0)return message("Game Boy Color - ROM required","No .gb or .gbc ROM was found.","Put a legally obtained ROM in /fs/games/gameboy/ and reopen.");
  FileData rom={0};if(load_rom(&rom)<0)return message("Game Boy Color - ROM error","The selected ROM has an invalid size or could not be read.",rom_path);
  char game_name[17];memset(game_name,0,sizeof(game_name));for(int i=0;i<16&&rom.data[0x134+i];i++){uint8_t c=rom.data[0x134+i];game_name[i]=(c>=32&&c<127)?(char)c:' ';}

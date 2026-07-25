@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 struct buzzos_plot_target {
-    uint8_t *pixels;
+    uint32_t *pixels;
     int width;
     int height;
     int offset_y;
@@ -19,7 +19,7 @@ struct gui_layout_table;
 extern const struct plotter_table buzzos_plotters;
 extern struct gui_layout_table *buzzos_layout_table;
 void buzzos_plot_target_init(struct buzzos_plot_target *target,
-                             uint8_t *pixels, int width, int height,
+                             uint32_t *pixels, int width, int height,
                              int offset_y);
 
 #endif

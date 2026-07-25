@@ -1,6 +1,7 @@
 #ifndef BUZZOS_APPUI_H
 #define BUZZOS_APPUI_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "libc.h"
 #include "palette.h"
@@ -12,6 +13,34 @@ struct appui_rect {
     int w;
     int h;
 };
+
+/* Growable RGB32 pixel buffer sized to the *current* window (modern-style),
+ * not a static GUIAPP_MAX_W×MAX_H reservation.  Grows with ~25% slack so live
+ * resize does not realloc every mouse sample; never exceeds max_w×max_h. */
+static __attribute__((unused)) int appui_pixels_ensure(
+    uint32_t **pixels, size_t *capacity_px,
+    int want_w, int want_h, int max_w, int max_h) {
+    if (!pixels || !capacity_px || want_w <= 0 || want_h <= 0 ||
+        max_w <= 0 || max_h <= 0)
+        return -1;
+    if (want_w > max_w) want_w = max_w;
+    if (want_h > max_h) want_h = max_h;
+    size_t need = (size_t)want_w * (size_t)want_h;
+    if (*pixels && need <= *capacity_px)
+        return 0;
+    size_t hard = (size_t)max_w * (size_t)max_h;
+    size_t cap = need + need / 4u;
+    if (cap < need || cap > hard)
+        cap = hard;
+    if (cap < need)
+        return -1;
+    uint32_t *grown = (uint32_t *)realloc(*pixels, cap * sizeof(uint32_t));
+    if (!grown)
+        return -1;
+    *pixels = grown;
+    *capacity_px = cap;
+    return 0;
+}
 
 enum appui_button_variant {
     APPUI_BTN_DEFAULT,
@@ -42,17 +71,13 @@ enum appui_metric {
     APPUI_STATUS_H = 28,
 };
 
-static int appui_rgb6(int r, int g, int b) {
-    if (r < 0) r = 0; if (r > 5) r = 5;
-    if (g < 0) g = 0; if (g > 5) g = 5;
-    if (b < 0) b = 0; if (b > 5) b = 5;
-    return 40 + r * 36 + g * 6 + b;
+/* Convenience aliases — return 0x00RRGGBB. */
+static uint32_t appui_rgb6(int r, int g, int b) {
+    return plt_cube(r, g, b);
 }
 
-static int appui_gray(int n) {
-    if (n < 0) n = 0;
-    if (n > 14) n = 14;
-    return 25 + n;
+static uint32_t appui_gray(int n) {
+    return plt_gray(n);
 }
 
 static __attribute__((unused)) int appui_min(int a, int b) { return a < b ? a : b; }
@@ -70,26 +95,29 @@ static __attribute__((unused)) int appui_pointer_state(
            ((buttons & 1) ? APPUI_STATE_PRESSED : 0);
 }
 
-static void appui_pixel(uint8_t *fb, int w, int h, int x, int y, int color) {
+static void appui_pixel(uint32_t *fb, int w, int h, int x, int y, uint32_t color) {
     if (x >= 0 && y >= 0 && x < w && y < h)
-        fb[y * w + x] = (uint8_t)color;
+        fb[y * w + x] = color & 0x00FFFFFFu;
 }
 
-static void appui_fill(uint8_t *fb, int w, int h, struct appui_rect r, int color) {
+static void appui_fill(uint32_t *fb, int w, int h, struct appui_rect r,
+                       uint32_t color) {
     if (r.x < 0) { r.w += r.x; r.x = 0; }
     if (r.y < 0) { r.h += r.y; r.y = 0; }
     if (r.x + r.w > w) r.w = w - r.x;
     if (r.y + r.h > h) r.h = h - r.y;
     if (r.w <= 0 || r.h <= 0)
         return;
+    color &= 0x00FFFFFFu;
     for (int yy = 0; yy < r.h; yy++) {
-        uint8_t *row = fb + (r.y + yy) * w + r.x;
-        memset(row, color, (size_t)r.w);
+        uint32_t *row = fb + (r.y + yy) * w + r.x;
+        for (int xx = 0; xx < r.w; xx++)
+            row[xx] = color;
     }
 }
 
 static __attribute__((unused)) void appui_fill_blend(
-    uint8_t *fb, int w, int h, struct appui_rect r, int color, int alpha) {
+    uint32_t *fb, int w, int h, struct appui_rect r, uint32_t color, int alpha) {
     if (r.x < 0) { r.w += r.x; r.x = 0; }
     if (r.y < 0) { r.h += r.y; r.y = 0; }
     if (r.x + r.w > w) r.w = w - r.x;
@@ -97,17 +125,17 @@ static __attribute__((unused)) void appui_fill_blend(
     if (r.w <= 0 || r.h <= 0)
         return;
     for (int yy = 0; yy < r.h; yy++) {
-        uint8_t *row = fb + (r.y + yy) * w + r.x;
+        uint32_t *row = fb + (r.y + yy) * w + r.x;
         for (int xx = 0; xx < r.w; xx++)
-            row[xx] = (uint8_t)plt_blend(color, row[xx], alpha);
+            row[xx] = plt_blend(color, row[xx], alpha);
     }
 }
 
 /* Corner inset (px) per row for a 4px rounded corner. */
 static const uint8_t appui_corner[4] = {3, 2, 1, 1};
 
-static void appui_fill_round(uint8_t *fb, int w, int h, struct appui_rect r,
-                             int color) {
+static void appui_fill_round(uint32_t *fb, int w, int h, struct appui_rect r,
+                             uint32_t color) {
     if (r.w <= 0 || r.h <= 0)
         return;
     /* Thin scrollbars/progress fills cannot carry a four-pixel radius.
@@ -131,7 +159,8 @@ static void appui_fill_round(uint8_t *fb, int w, int h, struct appui_rect r,
                color);
 }
 
-static void appui_border(uint8_t *fb, int w, int h, struct appui_rect r, int hi, int lo) {
+static void appui_border(uint32_t *fb, int w, int h, struct appui_rect r,
+                         uint32_t hi, uint32_t lo) {
     appui_fill(fb, w, h, (struct appui_rect){r.x, r.y, r.w, 1}, hi);
     appui_fill(fb, w, h, (struct appui_rect){r.x, r.y, 1, r.h}, hi);
     appui_fill(fb, w, h, (struct appui_rect){r.x, r.y + r.h - 1, r.w, 1}, lo);
@@ -184,15 +213,13 @@ static __attribute__((unused)) int appui_utf8_prev(const char *text, int pos) {
     return pos;
 }
 
-/* Horizontal tab is a layout control, not a glyph. The built-in bitmap font
- * covers printable ASCII (32..126); HT advances to the next tab stop. */
+/* Horizontal tab is a layout control, not a glyph. */
 enum { APPUI_TAB_COLUMNS = 4 };
 
 static __attribute__((unused)) int appui_tab_width(void) {
     return KFONT_WIDTH * APPUI_TAB_COLUMNS;
 }
 
-/* Advance for a tab stop measured from the start of the current line. */
 static __attribute__((unused)) int appui_tab_advance(int x_from_line_start) {
     int tab = appui_tab_width();
     if (tab <= 0)
@@ -215,9 +242,6 @@ static __attribute__((unused)) int appui_codepoint_width(uint32_t cp) {
     return width > 0 ? width : KFONT_WIDTH;
 }
 
-/* Width of one codepoint at a given column offset from the line start.
- * Prefer this over appui_codepoint_width for custom text loops that may
- * contain tabs. */
 static __attribute__((unused)) int appui_codepoint_advance(
     uint32_t cp, int x_from_line_start) {
     if (cp == '\t')
@@ -226,9 +250,8 @@ static __attribute__((unused)) int appui_codepoint_advance(
 }
 
 static __attribute__((unused)) int appui_draw_codepoint(
-    uint8_t *fb, int w, int h, int x, int y, uint32_t cp,
-    int fg, int bg, struct appui_rect clip) {
-    /* Tab / CR: no ink, only horizontal advance. */
+    uint32_t *fb, int w, int h, int x, int y, uint32_t cp,
+    uint32_t fg, int bg, struct appui_rect clip) {
     if (cp == '\t')
         return appui_tab_width();
     if (cp == '\r' || cp == '\n')
@@ -247,7 +270,6 @@ static __attribute__((unused)) int appui_draw_codepoint(
             alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
         }
     } else {
-        /* Other C0 controls: keep a visible replacement so bad data is obvious. */
         cp = '?';
         alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
     }
@@ -267,9 +289,9 @@ static __attribute__((unused)) int appui_draw_codepoint(
                     appui_pixel(fb, w, h, tx, ty, fg);
                 } else if (coverage <= 0) {
                     if (bg >= 0)
-                        appui_pixel(fb, w, h, tx, ty, bg);
+                        appui_pixel(fb, w, h, tx, ty, (uint32_t)bg);
                 } else {
-                    int under = bg >= 0 ? bg : fb[ty * w + tx];
+                    uint32_t under = bg >= 0 ? (uint32_t)bg : fb[ty * w + tx];
                     appui_pixel(fb, w, h, tx, ty,
                                 plt_blend(fg, under, coverage));
                 }
@@ -279,10 +301,9 @@ static __attribute__((unused)) int appui_draw_codepoint(
     return glyph_w;
 }
 
-/* Like appui_draw_codepoint, but tab advance is relative to the line origin. */
 static __attribute__((unused)) int appui_draw_codepoint_at(
-    uint8_t *fb, int w, int h, int x, int y, uint32_t cp,
-    int fg, int bg, struct appui_rect clip, int line_origin_x) {
+    uint32_t *fb, int w, int h, int x, int y, uint32_t cp,
+    uint32_t fg, int bg, struct appui_rect clip, int line_origin_x) {
     if (cp == '\t')
         return appui_tab_advance(x - line_origin_x);
     return appui_draw_codepoint(fb, w, h, x, y, cp, fg, bg, clip);
@@ -299,8 +320,9 @@ static __attribute__((unused)) int appui_text_width(const char *s) {
     return width;
 }
 
-static void appui_text(uint8_t *fb, int w, int h, int x, int y,
-                       const char *s, int fg, int bg, struct appui_rect clip) {
+static void appui_text(uint32_t *fb, int w, int h, int x, int y,
+                       const char *s, uint32_t fg, int bg,
+                       struct appui_rect clip) {
     int line_origin = x;
     while (s && *s) {
         uint32_t cp = appui_utf8_next(&s);
@@ -316,11 +338,11 @@ static void appui_text(uint8_t *fb, int w, int h, int x, int y,
     }
 }
 
-static void appui_button_ex(uint8_t *fb, int w, int h, struct appui_rect r,
+static void appui_button_ex(uint32_t *fb, int w, int h, struct appui_rect r,
                             const char *label, int variant, int state) {
-    int bg = THEME_WIN_CONTROL;
-    int edge = THEME_WIN_BORDER_INACT;
-    int fg = THEME_TEXT;
+    uint32_t bg = THEME_WIN_CONTROL;
+    uint32_t edge = THEME_WIN_BORDER_INACT;
+    uint32_t fg = THEME_TEXT;
     int disabled = (state & APPUI_STATE_DISABLED) != 0;
     int hovered = (state & APPUI_STATE_HOVERED) != 0 && !disabled;
     int pressed = (state & APPUI_STATE_PRESSED) != 0 && !disabled;
@@ -394,15 +416,15 @@ static void appui_button_ex(uint8_t *fb, int w, int h, struct appui_rect r,
                (struct appui_rect){r.x + 4, r.y + 2, r.w - 8, r.h - 4});
 }
 
-static void appui_button(uint8_t *fb, int w, int h, struct appui_rect r,
+static void appui_button(uint32_t *fb, int w, int h, struct appui_rect r,
                          const char *label, int active) {
     appui_button_ex(fb, w, h, r, label,
                     active ? APPUI_BTN_PRIMARY : APPUI_BTN_DEFAULT, 0);
 }
 
 static __attribute__((unused)) void appui_field_frame(
-    uint8_t *fb, int w, int h, struct appui_rect r, int focused) {
-    int edge = focused ? THEME_FOCUS : THEME_FIELD_BORDER;
+    uint32_t *fb, int w, int h, struct appui_rect r, int focused) {
+    uint32_t edge = focused ? THEME_FOCUS : THEME_FIELD_BORDER;
     appui_fill_round(fb, w, h, r, edge);
     appui_fill_round(fb, w, h,
                      (struct appui_rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},

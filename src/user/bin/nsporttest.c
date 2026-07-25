@@ -13,9 +13,9 @@ int main(void) {
     }
     surface.xrgb[0] = 0x00ff0000u;
     surface.xrgb[1] = 0x0000ff00u;
-    uint8_t *pixels = nsbuzz_surface_present(&surface);
-    if (!pixels || pixels[0] != 196u || pixels[1] != 46u) {
-        puts("nsporttest: surface conversion failed");
+    uint32_t *pixels = nsbuzz_surface_present(&surface);
+    if (!pixels || pixels[0] != 0x00ff0000u || pixels[1] != 0x0000ff00u) {
+        puts("nsporttest: surface present failed");
         nsbuzz_surface_destroy(&surface);
         return 1;
     }

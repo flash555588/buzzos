@@ -23,7 +23,8 @@ enum {
 #define DEFAULT_MP3 "/share/buzzos-demo.mp3"
 
 static struct guiapp_ctx gui;
-static uint8_t pixels[GUIAPP_MAX_W * GUIAPP_MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
 static uint8_t *samples;
 static uint32_t sample_count;
 static unsigned sample_rate = DEFAULT_RATE;
@@ -826,14 +827,14 @@ static void draw_album_art(int w, int h) {
         int note_w = clamp_int(s / 10, 10, 16);
         appui_fill_round(pixels, w, h,
                          (struct appui_rect){cx - hub, cy - hub, hub * 2, hub * 2}, accent);
-        appui_fill(pixels, w, h, (struct appui_rect){cx + 2, cy - stem_h + 4, 3, stem_h}, 15);
-        appui_fill(pixels, w, h, (struct appui_rect){cx + 2, cy - stem_h + 4, note_w, 3}, 15);
+        appui_fill(pixels, w, h, (struct appui_rect){cx + 2, cy - stem_h + 4, 3, stem_h}, THEME_TEXT);
+        appui_fill(pixels, w, h, (struct appui_rect){cx + 2, cy - stem_h + 4, note_w, 3}, THEME_TEXT);
         appui_fill(pixels, w, h,
-                   (struct appui_rect){cx + note_w - 1, cy - stem_h + 4, 3, stem_h / 3}, 15);
+                   (struct appui_rect){cx + note_w - 1, cy - stem_h + 4, 3, stem_h / 3}, THEME_TEXT);
         appui_fill_round(pixels, w, h,
-                         (struct appui_rect){cx - note_w / 2, cy + 2, note_w + 2, note_w - 2}, 15);
+                         (struct appui_rect){cx - note_w / 2, cy + 2, note_w + 2, note_w - 2}, THEME_TEXT);
         appui_fill_round(pixels, w, h,
-                         (struct appui_rect){cx + note_w - 4, cy - stem_h / 2, note_w, note_w - 4}, 15);
+                         (struct appui_rect){cx + note_w - 4, cy - stem_h / 2, note_w, note_w - 4}, THEME_TEXT);
     }
 }
 
@@ -885,7 +886,7 @@ static void draw_waveform(int w, int h, uint32_t pos) {
         else if (i < play_bar)
             color = THEME_ACCENT;
         else if (i == play_bar)
-            color = 15;
+            color = THEME_TEXT;
         else
             color = appui_gray(5);
         draw_vbar(w, h, x, base_y, bar_w, area_h, bh, color);
@@ -930,7 +931,7 @@ static void draw_progress(int w, int h, uint32_t pos) {
     if (thumb_x < track.x) thumb_x = track.x;
     if (thumb_x > track.x + track.w - 14) thumb_x = track.x + track.w - 14;
     appui_fill_round(pixels, w, h,
-                     (struct appui_rect){thumb_x, track.y - 5, 14, track.h + 10}, 15);
+                     (struct appui_rect){thumb_x, track.y - 5, 14, track.h + 10}, THEME_TEXT);
     appui_fill_round(pixels, w, h,
                      (struct appui_rect){thumb_x + 2, track.y - 3, 10, track.h + 6},
                      THEME_ACCENT);
@@ -946,6 +947,12 @@ static void render_frame(int *out_w, int *out_h) {
     layout_sync_from_window();
     int w = layout_w;
     int h = layout_h;
+    if (appui_pixels_ensure(&pixels, &pixels_cap, w, h,
+                            GUIAPP_MAX_W, GUIAPP_MAX_H) < 0) {
+        if (out_w) *out_w = 0;
+        if (out_h) *out_h = 0;
+        return;
+    }
     uint32_t pos = display_playhead();
     int is_playing = samples && playing && pos < sample_count;
     int m = layout_margin();
@@ -964,14 +971,14 @@ static void render_frame(int *out_w, int *out_h) {
     if (text_w < 80) {
         text_x = m;
         text_w = w - 2 * m;
-        draw_label(w, h, text_x, m + art + 8, track_title, 15, text_w);
+        draw_label(w, h, text_x, m + art + 8, track_title, THEME_TEXT, text_w);
         draw_label(w, h, text_x, m + art + 36, track_artist, THEME_TEXT_DIM, text_w);
     } else {
         int ty = m + 8;
         int line = clamp_int(art / 5, 28, 34);
         const char *status;
         int status_color;
-        draw_label(w, h, text_x, ty, track_title, 15, text_w);
+        draw_label(w, h, text_x, ty, track_title, THEME_TEXT, text_w);
         draw_label(w, h, text_x, ty + line, track_artist, THEME_TEXT_DIM, text_w);
         if (!samples) {
             status = "No audio loaded";
@@ -1073,5 +1080,6 @@ int main(int argc, char **argv) {
         (void)join(playback_tid);
     (void)audio_flush();
     free(samples);
+    free(pixels);
     return exit_status;
 }

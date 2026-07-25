@@ -40,6 +40,14 @@ static int syscall3(int nr, int a1, int a2, int a3) {
     return ret;
 }
 
+static int syscall4(int nr, int a1, int a2, int a3, int a4) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret)
+                     : "a"(nr), "b"(a1), "c"(a2), "d"(a3), "S"(a4)
+                     : "memory");
+    return ret;
+}
+
 static int syscall5(int nr, int a1, int a2, int a3, int a4, int a5) {
     int ret;
     __asm__ volatile("int $0x80" : "=a"(ret)
@@ -66,7 +74,8 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_SHM_CREATE=57, SYS_SHM_MAP=58, SYS_SHM_UNMAP=59,
        SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62,
        SYS_AUDIO_QUEUED=63, SYS_AUDIO_FLUSH=64,
-       SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66, SYS_GFX_SET_MODE=67 };
+       SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66, SYS_GFX_SET_MODE=67,
+       SYS_GFX_MAP_SURFACE=68, SYS_GFX_PRESENT=69 };
 
 static void (*exit_handlers[16])(void);
 static int exit_handler_count;
@@ -270,12 +279,12 @@ int gfx_text(int x, int y, const char *s, int fg, int bg) {
                     (int)(uintptr_t)s, fg, bg);
 }
 
-int fb_blit(int x, int y, int w, int h, const uint8_t *pixels) {
+int fb_blit(int x, int y, int w, int h, const uint32_t *pixels) {
     return syscall5(SYS_FB_BLIT, x + gfx_origin_x, y + gfx_origin_y, w, h,
                     (int)(uintptr_t)pixels);
 }
 
-int fb_blit_stride(int x, int y, int w, int h, const uint8_t *pixels,
+int fb_blit_stride(int x, int y, int w, int h, const uint32_t *pixels,
                    int stride) {
     if (w <= 0 || h <= 0 || w > 0xFFFF || h > 0xFFFF || stride < w)
         return -1;
@@ -307,6 +316,30 @@ int gfx_release_display(void) {
 
 int gfx_set_mode(int width, int height) {
     return syscall2(SYS_GFX_SET_MODE, width, height);
+}
+
+int gfx_map_surface(struct gfx_surface_map *out) {
+    struct {
+        uint32_t address;
+        uint32_t width;
+        uint32_t height;
+        uint32_t stride_pixels;
+        uint32_t bytes;
+        uint32_t backend;
+    } raw;
+    if (!out || syscall1(SYS_GFX_MAP_SURFACE, (int)(uintptr_t)&raw) < 0)
+        return -1;
+    out->pixels = (uint32_t *)(uintptr_t)raw.address;
+    out->width = raw.width;
+    out->height = raw.height;
+    out->stride_pixels = raw.stride_pixels;
+    out->bytes = raw.bytes;
+    out->backend = raw.backend;
+    return 0;
+}
+
+int gfx_present(int x, int y, int w, int h) {
+    return syscall4(SYS_GFX_PRESENT, x, y, w, h);
 }
 
 int font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap) {

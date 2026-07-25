@@ -20,15 +20,8 @@ static volatile unsigned key_tail;
 static uint16_t key_queue[KEY_QUEUE_SIZE];
 static uint8_t held_keys[256];
 static uint32_t release_at[256];
-static uint8_t native_pixels[DOOM_W * DOOM_H];
+static uint32_t native_pixels[DOOM_W * DOOM_H];
 static char window_title[GUIAPP_TITLE_MAX] = "DOOM";
-
-static uint8_t rgb_to_index(uint32_t pixel) {
-    unsigned r = ((pixel >> 16) & 255u) * 5u + 127u;
-    unsigned g = ((pixel >> 8) & 255u) * 5u + 127u;
-    unsigned b = (pixel & 255u) * 5u + 127u;
-    return (uint8_t)(40u + (r / 255u) * 36u + (g / 255u) * 6u + b / 255u);
-}
 
 static unsigned char doom_key(int key) {
     switch (key) {
@@ -105,10 +98,9 @@ void DG_DrawFrame(void) {
     if (h < 200) h = 200;
     if (w > GUIAPP_MAX_W) w = GUIAPP_MAX_W;
     if (h > GUIAPP_MAX_H) h = GUIAPP_MAX_H;
-    /* Quantize the native DOOM frame once. Quantizing after scaling made a
-     * maximized window perform up to a million RGB conversions per frame. */
+    /* Present native RGB32; desktop scales into the window. */
     for (int i = 0; i < DOOM_W * DOOM_H; i++)
-        native_pixels[i] = rgb_to_index(DG_ScreenBuffer[i]);
+        native_pixels[i] = DG_ScreenBuffer[i] & 0x00FFFFFFu;
 
     /* Keep the 320x200 frame native while crossing the app boundary.  The
      * desktop already has a cached scaler, so expanding here only caused a
@@ -156,8 +148,8 @@ static int wad_exists(const char *path) {
 static int missing_wad_loop(void) {
     struct guiapp_event event;
     int w = 640, h = 400;
-    uint8_t *pixels = malloc((size_t)GUIAPP_MAX_W * GUIAPP_MAX_H);
-    if (!pixels) return 1;
+    uint32_t *pixels = 0;
+    size_t pixels_cap = 0;
     for (;;) {
         if (guiapp_read_event(&gui, &event) < 0 || event.type == GUIAPP_EVT_CLOSE)
             break;
@@ -166,15 +158,18 @@ static int missing_wad_loop(void) {
             if (w < 360) w = 360; if (w > GUIAPP_MAX_W) w = GUIAPP_MAX_W;
             if (h < 220) h = 220; if (h > GUIAPP_MAX_H) h = GUIAPP_MAX_H;
         }
+        if (appui_pixels_ensure(&pixels, &pixels_cap, w, h,
+                                GUIAPP_MAX_W, GUIAPP_MAX_H) < 0)
+            break;
         appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, appui_gray(2));
-        appui_text(pixels, w, h, 28, 28, "DOOM engine is ready", 15, -1,
+        appui_text(pixels, w, h, 28, 28, "DOOM engine is ready", THEME_TEXT, -1,
                    (struct appui_rect){20, 20, w - 40, 28});
         appui_text(pixels, w, h, 28, 72, "Game data was not found:", appui_rgb6(5, 3, 1), -1,
                    (struct appui_rect){20, 64, w - 40, 28});
-        appui_text(pixels, w, h, 28, 104, DEFAULT_WAD, 15, appui_gray(1),
+        appui_text(pixels, w, h, 28, 104, DEFAULT_WAD, THEME_TEXT, appui_gray(1),
                    (struct appui_rect){20, 96, w - 40, 30});
         appui_text(pixels, w, h, 28, 150,
-                   "Install the shareware doom1.wad, then reopen DOOM.", 15, -1,
+                   "Install the shareware doom1.wad, then reopen DOOM.", THEME_TEXT, -1,
                    (struct appui_rect){20, 142, w - 40, 28});
         if (guiapp_send_frame(&gui, "DOOM - WAD required", w, h, pixels) < 0)
             break;

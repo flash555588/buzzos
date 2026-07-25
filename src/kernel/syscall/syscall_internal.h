@@ -85,5 +85,9 @@ int sys_gfx_acquire(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_gfx_release(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
 int sys_gfx_set_mode(uint32_t width, uint32_t height, uint32_t c,
                      uint32_t d, uint32_t e);
+int sys_gfx_map_surface(uint32_t out_arg, uint32_t b, uint32_t c,
+                        uint32_t d, uint32_t e);
+int sys_gfx_present(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                    uint32_t e);
 
 #endif

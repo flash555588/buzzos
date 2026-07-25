@@ -14,13 +14,6 @@ static int deadline_reached(uint32_t now, uint32_t deadline) {
     return (int32_t)(now - deadline) >= 0;
 }
 
-static uint8_t rgb6(unsigned red, unsigned green, unsigned blue) {
-    unsigned r = (red * 5u + 127u) / 255u;
-    unsigned g = (green * 5u + 127u) / 255u;
-    unsigned b = (blue * 5u + 127u) / 255u;
-    return (uint8_t)(16u + r * 36u + g * 6u + b);
-}
-
 int nsbuzz_surface_resize(struct nsbuzz_surface *surface, int width, int height) {
     if (!surface || width <= 0 || height <= 0)
         return -1;
@@ -29,18 +22,11 @@ int nsbuzz_surface_resize(struct nsbuzz_surface *surface, int width, int height)
         count > (size_t)-1 / sizeof(uint32_t))
         return -1;
     uint32_t *xrgb = malloc(count * sizeof(uint32_t));
-    uint8_t *indexed = malloc(count);
-    if (!xrgb || !indexed) {
-        free(xrgb);
-        free(indexed);
+    if (!xrgb)
         return -1;
-    }
     memset(xrgb, 0, count * sizeof(uint32_t));
-    memset(indexed, 0, count);
     free(surface->xrgb);
-    free(surface->indexed);
     surface->xrgb = xrgb;
-    surface->indexed = indexed;
     surface->width = width;
     surface->height = height;
     return 0;
@@ -50,21 +36,13 @@ void nsbuzz_surface_destroy(struct nsbuzz_surface *surface) {
     if (!surface)
         return;
     free(surface->xrgb);
-    free(surface->indexed);
     memset(surface, 0, sizeof(*surface));
 }
 
-uint8_t *nsbuzz_surface_present(struct nsbuzz_surface *surface) {
-    if (!surface || !surface->xrgb || !surface->indexed)
+uint32_t *nsbuzz_surface_present(struct nsbuzz_surface *surface) {
+    if (!surface || !surface->xrgb)
         return 0;
-    size_t count = (size_t)surface->width * (size_t)surface->height;
-    for (size_t i = 0; i < count; i++) {
-        uint32_t pixel = surface->xrgb[i];
-        surface->indexed[i] = rgb6((pixel >> 16) & 255u,
-                                   (pixel >> 8) & 255u,
-                                   pixel & 255u);
-    }
-    return surface->indexed;
+    return surface->xrgb;
 }
 
 int nsbuzz_schedule(int delay_ms, nsbuzz_callback callback, void *context) {

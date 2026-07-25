@@ -19,7 +19,8 @@ enum {
     IMAGE_MARKER = 1,
 };
 
-static uint8_t pixels[MAX_W * MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
 static char page_text[TEXT_CAP];
 static char url[URL_CAP] = "http://example.com/";
 static char history[HISTORY_MAX][URL_CAP];
@@ -45,7 +46,7 @@ struct http_response {
 
 struct page_image {
     char source[IMAGE_SOURCE_CAP];
-    uint8_t *pixels;
+    uint32_t *pixels;
     int width;
     int height;
     int loaded;
@@ -496,13 +497,11 @@ static int http_success(const struct http_response *response) {
            response->data[9] == '2';
 }
 
-static int palette_color(unsigned r, unsigned g, unsigned b, unsigned a) {
+static uint32_t palette_color(unsigned r, unsigned g, unsigned b, unsigned a) {
     r = (r * a + 255u * (255u - a)) / 255u;
     g = (g * a + 255u * (255u - a)) / 255u;
     b = (b * a + 255u * (255u - a)) / 255u;
-    return appui_rgb6((int)((r * 5u + 127u) / 255u),
-                      (int)((g * 5u + 127u) / 255u),
-                      (int)((b * 5u + 127u) / 255u));
+    return plt_rgb((int)r, (int)g, (int)b);
 }
 
 static int decode_png_image(struct page_image *image, const uint8_t *data, int length,
@@ -540,7 +539,7 @@ static int decode_png_image(struct page_image *image, const uint8_t *data, int l
         free(rgba);
         return -1;
     }
-    uint8_t *indexed = malloc((size_t)draw_w * (size_t)draw_h);
+    uint32_t *indexed = malloc((size_t)draw_w * (size_t)draw_h * sizeof(uint32_t));
     if (!indexed) {
         free(rgba);
         return -1;
@@ -550,7 +549,7 @@ static int decode_png_image(struct page_image *image, const uint8_t *data, int l
         for (int x = 0; x < draw_w; x++) {
             unsigned sx = (unsigned)x * source_w / (unsigned)draw_w;
             const unsigned char *pixel = rgba + ((size_t)sy * source_w + sx) * 4u;
-            indexed[y * draw_w + x] = (uint8_t)palette_color(
+            indexed[y * draw_w + x] = palette_color(
                 pixel[0], pixel[1], pixel[2], pixel[3]);
         }
     }
@@ -874,6 +873,8 @@ int main(int argc, char **argv) {
         if (event.type == GUIAPP_EVT_INIT || event.type == GUIAPP_EVT_RESIZE) {
             w = clamp_int(event.width, 300, MAX_W);
             h = clamp_int(event.height, 190, MAX_H);
+            if (appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+                break;
         } else if (event.type == GUIAPP_EVT_KEY && event.buttons) {
             key(event.key);
         } else if (event.type == GUIAPP_EVT_TEXT) {
@@ -883,9 +884,13 @@ int main(int argc, char **argv) {
         } else if (event.type == GUIAPP_EVT_MOUSE) {
             mouse(event.x, event.y, event.buttons, event.wheel);
         }
+        if (!pixels ||
+            appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+            break;
         render();
         if (guiapp_send_frame(&ctx, title, w, h, pixels) < 0)
             break;
     }
+    free(pixels);
     return 0;
 }

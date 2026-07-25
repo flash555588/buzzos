@@ -1,170 +1,92 @@
 #ifndef BUZZOS_PALETTE_H
 #define BUZZOS_PALETTE_H
 
-/* Shared 8-bit palette helpers for the BuzzOS user-space GUI.
+/* Shared RGB color helpers for the BuzzOS user-space GUI.
  *
- * The kernel framebuffer owns a fixed 256-entry palette (see
- * src/kernel/drv/fb.c): 16 VGA colors, 9 custom accents, a 15-step gray
- * ramp and a 6x6x6 RGB cube.  Everything drawn in user space is a
- * palette index, so alpha effects (anti-aliased text, soft shadows) are
- * emulated by blending in RGB space and quantizing back to the nearest
- * palette entry through a small 4:4:4 lookup table.
+ * The desktop and apps compose in 32-bit 0x00RRGGBB (no alpha in the pixel
+ * value; coverage uses plt_blend).  Scanout is always truecolor: Bochs VBE /
+ * Limine linear FB and virtio-gpu 2D both consume RGB32, matching modern OS
+ * compositor working formats.  There is no 8-bit indexed UI path.
  */
 
 #include <stdint.h>
 
-static int plt_cube(int r, int g, int b) {
+/* Gray ramp matching the old palette gray(0..14): 32 + n * 14. */
+static __attribute__((unused)) uint32_t plt_gray(int n) {
+    if (n < 0) n = 0;
+    if (n > 14) n = 14;
+    uint32_t v = (uint32_t)(32 + n * 14);
+    return (v << 16) | (v << 8) | v;
+}
+
+/* 6x6x6 cube sample (r,g,b each 0..5) → 0xRRGGBB. */
+static __attribute__((unused)) uint32_t plt_cube(int r, int g, int b) {
     if (r < 0) r = 0; if (r > 5) r = 5;
     if (g < 0) g = 0; if (g > 5) g = 5;
     if (b < 0) b = 0; if (b > 5) b = 5;
-    return 40 + r * 36 + g * 6 + b;
+    uint32_t rv = (uint32_t)r * 51u;
+    uint32_t gv = (uint32_t)g * 51u;
+    uint32_t bv = (uint32_t)b * 51u;
+    return (rv << 16) | (gv << 8) | bv;
 }
 
-static int plt_gray(int n) {
-    if (n < 0) n = 0;
-    if (n > 14) n = 14;
-    return 25 + n;
-}
-
-/* Palette index -> 0xRRGGBB.  Mirrors palette_rgb_compute() in the
- * kernel framebuffer driver; keep the two in sync. */
-static uint32_t plt_index_to_rgb(int index) {
-    static const uint32_t base[25] = {
-        0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
-        0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
-        0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
-        0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
-        0x182848, 0x285080, 0x3868B0, 0x5088D8,
-        0x70B0F8, 0x207850, 0x48B870, 0x503820,
-        0x6C2C28
-    };
-    index &= 0xFF;
-    if (index < (int)(sizeof(base) / sizeof(base[0])))
-        return base[index];
-    if (index < 40) {
-        uint32_t v = (uint32_t)(32 + (index - 25) * 14);
-        return (v << 16) | (v << 8) | v;
-    }
-    {
-        uint8_t n = (uint8_t)(index - 40);
-        uint32_t r = (uint32_t)(n / 36u) * 51u;
-        uint32_t g = (uint32_t)((n / 6u) % 6u) * 51u;
-        uint32_t b = (uint32_t)(n % 6u) * 51u;
-        return (r << 16) | (g << 8) | b;
-    }
-}
-
-static uint8_t plt_lut[4096];
-static int plt_lut_ready;
-
-static void plt_lut_build(void) {
-    if (plt_lut_ready)
-        return;
-    for (int r = 0; r < 16; r++) {
-        for (int g = 0; g < 16; g++) {
-            for (int b = 0; b < 16; b++) {
-                int rv = r * 255 / 15;
-                int gv = g * 255 / 15;
-                int bv = b * 255 / 15;
-                int best = 0;
-                long best_dist = 0x7FFFFFFFl;
-                for (int i = 0; i < 256; i++) {
-                    uint32_t rgb = plt_index_to_rgb(i);
-                    int dr = (int)((rgb >> 16) & 0xFFu) - rv;
-                    int dg = (int)((rgb >> 8) & 0xFFu) - gv;
-                    int db = (int)(rgb & 0xFFu) - bv;
-                    long dist = (long)dr * dr + (long)dg * dg +
-                                (long)db * db;
-                    if (dist < best_dist) {
-                        best_dist = dist;
-                        best = i;
-                    }
-                }
-                plt_lut[(r << 8) | (g << 4) | b] = (uint8_t)best;
-            }
-        }
-    }
-    plt_lut_ready = 1;
-}
-
-/* 0xRRGGBB -> nearest palette index. */
-static int plt_rgb_to_index(uint32_t rgb) {
-    plt_lut_build();
-    {
-        int r = (int)((rgb >> 16) & 0xFFu) >> 4;
-        int g = (int)((rgb >> 8) & 0xFFu) >> 4;
-        int b = (int)(rgb & 0xFFu) >> 4;
-        return plt_lut[(r << 8) | (g << 4) | b];
-    }
-}
-
-static int plt_rgb(int r, int g, int b) {
+static __attribute__((unused)) uint32_t plt_rgb(int r, int g, int b) {
     if (r < 0) r = 0; if (r > 255) r = 255;
     if (g < 0) g = 0; if (g > 255) g = 255;
     if (b < 0) b = 0; if (b > 255) b = 255;
-    return plt_rgb_to_index(((uint32_t)r << 16) | ((uint32_t)g << 8) |
-                            (uint32_t)b);
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
-/* Blend palette color fg over palette color bg with 0-255 coverage and
- * return the nearest resulting palette index. */
-static int plt_blend(int fg, int bg, int alpha) {
-    uint32_t f, b;
-    uint32_t r, g, bl;
+/* Blend fg over bg with 0-255 coverage; returns 0x00RRGGBB (no quantization). */
+static uint32_t plt_blend(uint32_t fg, uint32_t bg, int alpha) {
     uint32_t inv;
+    uint32_t r, g, bl;
     if (alpha <= 0)
-        return bg & 0xFF;
+        return bg & 0x00FFFFFFu;
     if (alpha >= 255)
-        return fg & 0xFF;
-    f = plt_index_to_rgb(fg);
-    b = plt_index_to_rgb(bg);
+        return fg & 0x00FFFFFFu;
     inv = (uint32_t)(255 - alpha);
-    r = (((f >> 16) & 0xFFu) * (uint32_t)alpha +
-         ((b >> 16) & 0xFFu) * inv + 127u) / 255u;
-    g = (((f >> 8) & 0xFFu) * (uint32_t)alpha +
-         ((b >> 8) & 0xFFu) * inv + 127u) / 255u;
-    bl = ((f & 0xFFu) * (uint32_t)alpha +
-          (b & 0xFFu) * inv + 127u) / 255u;
-    return plt_rgb_to_index((r << 16) | (g << 8) | bl);
+    r = (((fg >> 16) & 0xFFu) * (uint32_t)alpha +
+         ((bg >> 16) & 0xFFu) * inv + 127u) / 255u;
+    g = (((fg >> 8) & 0xFFu) * (uint32_t)alpha +
+         ((bg >> 8) & 0xFFu) * inv + 127u) / 255u;
+    bl = ((fg & 0xFFu) * (uint32_t)alpha +
+          (bg & 0xFFu) * inv + 127u) / 255u;
+    return (r << 16) | (g << 8) | bl;
 }
 
-/* Cohesive dark theme.  The custom palette entries at 16..24 give the UI a
- * calmer slate/blue identity than the fully saturated RGB cube while keeping
- * every color deterministic on the 8-bit framebuffer. */
-#define THEME_DESKTOP_BASE     16                 /* #182848       */
-#define THEME_DESKTOP_DEEP     plt_gray(0)        /* #202020       */
-#define THEME_TOPBAR           plt_gray(0)
-#define THEME_TOPBAR_BORDER    17                 /* #285080       */
+/* Cohesive dark theme — same visual targets as the former fixed palette. */
+#define THEME_DESKTOP_BASE     0x182848u
+#define THEME_DESKTOP_DEEP     0x202020u
+#define THEME_TOPBAR           THEME_DESKTOP_DEEP
+#define THEME_TOPBAR_BORDER    0x285080u
 
-#define THEME_ACCENT           20                 /* #70B0F8       */
-#define THEME_ACCENT_DIM       19                 /* #5088D8       */
-#define THEME_ACCENT_SOFT      17                 /* #285080       */
+#define THEME_ACCENT           0x70B0F8u
+#define THEME_ACCENT_DIM       0x5088D8u
+#define THEME_ACCENT_SOFT      0x285080u
 #define THEME_FOCUS            THEME_ACCENT
 
-#define THEME_WIN_BODY         plt_gray(1)        /* 46,46,46      */
-#define THEME_WIN_PANEL        plt_gray(2)        /* 60,60,60      */
-#define THEME_WIN_CONTROL      plt_gray(3)        /* 74,74,74      */
-#define THEME_WIN_HOVER        plt_gray(4)        /* 88,88,88      */
-#define THEME_WIN_PRESSED      plt_gray(2)
-#define THEME_WIN_BORDER_ACT   18                 /* #3868B0       */
-#define THEME_WIN_BORDER_INACT plt_gray(3)
-#define THEME_TITLE_ACT        plt_gray(2)
-#define THEME_TITLE_INACT      plt_gray(1)
+#define THEME_WIN_BODY         0x2E2E2Eu
+#define THEME_WIN_PANEL        0x3C3C3Cu
+#define THEME_WIN_CONTROL      0x4A4A4Au
+#define THEME_WIN_HOVER        0x585858u
+#define THEME_WIN_PRESSED      THEME_WIN_PANEL
+#define THEME_WIN_BORDER_ACT   0x3868B0u
+#define THEME_WIN_BORDER_INACT THEME_WIN_CONTROL
+#define THEME_TITLE_ACT        THEME_WIN_PANEL
+#define THEME_TITLE_INACT      THEME_WIN_BODY
 
-#define THEME_TEXT             15                 /* white         */
-#define THEME_TEXT_DIM         plt_gray(10)       /* 172,172,172   */
-#define THEME_TEXT_FAINT       plt_gray(7)        /* 130,130,130   */
-#define THEME_TEXT_ON_LIGHT    0
+#define THEME_TEXT             0xFFFFFFu
+#define THEME_TEXT_DIM         0xACACACu
+#define THEME_TEXT_FAINT       0x828282u
+#define THEME_TEXT_ON_LIGHT    0x000000u
 
-#define THEME_CLOSE_RED        plt_cube(5, 2, 2)  /* (255,102,102) */
+#define THEME_CLOSE_RED        0xFF6666u
 #define THEME_DANGER           THEME_CLOSE_RED
-#define THEME_DANGER_DIM       24                 /* #6C2C28       */
-#define THEME_MIN_YELLOW       plt_cube(5, 4, 1)  /* (255,204,51)  */
-#define THEME_MAX_GREEN        22                 /* #48B870       */
+#define THEME_DANGER_DIM       0x6C2C28u
+#define THEME_MIN_YELLOW       0xFFCC33u
+#define THEME_MAX_GREEN        0x48B870u
 
-/* Semantic application surfaces.  Apps should prefer these names over raw
- * palette indices so light document canvases and dark controls remain an
- * intentional, shared visual system. */
 #define THEME_APP_BG           THEME_WIN_BODY
 #define THEME_TOOLBAR_BG       THEME_WIN_PANEL
 #define THEME_PANEL_BG         THEME_WIN_BODY
@@ -173,7 +95,7 @@ static int plt_blend(int fg, int bg, int alpha) {
 #define THEME_FIELD_BG         THEME_DESKTOP_DEEP
 #define THEME_FIELD_BORDER     THEME_WIN_HOVER
 #define THEME_FIELD_TEXT       THEME_TEXT
-#define THEME_DOCUMENT_BG      plt_gray(14)
+#define THEME_DOCUMENT_BG      0xE4E4E4u
 #define THEME_DOCUMENT_TEXT    THEME_TEXT_ON_LIGHT
 #define THEME_LIST_BG          THEME_WIN_BODY
 #define THEME_LIST_ALT         THEME_PANEL_RAISED
@@ -183,10 +105,8 @@ static int plt_blend(int fg, int bg, int alpha) {
 #define THEME_SELECTION_SOFT   THEME_ACCENT_SOFT
 #define THEME_SELECTION_TEXT   THEME_TEXT
 
-/* The built-in 15x28 font carries a small amount of space above cap height,
- * so glyphs visually sit low in their line box and descenders (y/g/p)
- * get clipped by tight clip rects.  User-space renderers draw glyphs
- * this many pixels higher to compensate (the vacated rows were empty). */
+/* Built-in 15x28 font has empty rows above cap height; user-space draw
+ * glyphs this many pixels higher so descenders stay in tight clips. */
 #define PLT_FONT_Y_SHIFT 4
 
 #endif

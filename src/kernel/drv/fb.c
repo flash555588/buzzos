@@ -5,6 +5,9 @@
 #include "io.h"
 #include "irq.h"
 #include "paging.h"
+#include "pmm.h"
+#include "task.h"
+#include "user_bounds.h"
 #include "virtio_gpu.h"
 
 enum {
@@ -19,6 +22,8 @@ static uint32_t fb_page_offset;
 static int fb_boot_info_valid;
 static int fb_ready;
 static int display_owner_pid;
+static int scanout_mapped_pid;
+static uint32_t scanout_mapped_bytes;
 
 static int fb_gpu_active(void) {
     return fb_ready && fb_info.backend == GFX_BACKEND_VIRTIO_GPU_2D &&
@@ -32,19 +37,71 @@ static volatile uint32_t *fb_row32(int y) {
     return (volatile uint32_t *)(fb_mem + (uint32_t)y * fb_info.pitch);
 }
 
-static int fb_flush_rect(int x, int y, int width, int height) {
-    if (!fb_gpu_active())
-        return 0;
-    if (x < 0) { width += x; x = 0; }
-    if (y < 0) { height += y; y = 0; }
+/* Coalesce GPU uploads: software drawing writes the guest backing store, then
+ * a single TRANSFER+FLUSH covers the union of dirty rectangles.  Flushing on
+ * every putpixel was pathologically slow and held the virtqueue too often. */
+static struct {
+    int valid;
+    int x0;
+    int y0;
+    int x1;
+    int y1;
+} fb_gpu_damage;
+
+static void fb_damage_add(int x, int y, int width, int height) {
+    if (!fb_gpu_active() || width <= 0 || height <= 0)
+        return;
+    if (x < 0) {
+        width += x;
+        x = 0;
+    }
+    if (y < 0) {
+        height += y;
+        y = 0;
+    }
     if (x >= (int)fb_info.width || y >= (int)fb_info.height ||
         width <= 0 || height <= 0)
-        return 0;
+        return;
     if (width > (int)fb_info.width - x)
         width = (int)fb_info.width - x;
     if (height > (int)fb_info.height - y)
         height = (int)fb_info.height - y;
+    int x1 = x + width;
+    int y1 = y + height;
+    if (!fb_gpu_damage.valid) {
+        fb_gpu_damage.x0 = x;
+        fb_gpu_damage.y0 = y;
+        fb_gpu_damage.x1 = x1;
+        fb_gpu_damage.y1 = y1;
+        fb_gpu_damage.valid = 1;
+        return;
+    }
+    if (x < fb_gpu_damage.x0)
+        fb_gpu_damage.x0 = x;
+    if (y < fb_gpu_damage.y0)
+        fb_gpu_damage.y0 = y;
+    if (x1 > fb_gpu_damage.x1)
+        fb_gpu_damage.x1 = x1;
+    if (y1 > fb_gpu_damage.y1)
+        fb_gpu_damage.y1 = y1;
+}
+
+static int fb_flush_damage(void) {
+    if (!fb_gpu_active() || !fb_gpu_damage.valid)
+        return 0;
+    int x = fb_gpu_damage.x0;
+    int y = fb_gpu_damage.y0;
+    int width = fb_gpu_damage.x1 - fb_gpu_damage.x0;
+    int height = fb_gpu_damage.y1 - fb_gpu_damage.y0;
+    fb_gpu_damage.valid = 0;
     return virtio_gpu_flush(x, y, width, height);
+}
+
+static int fb_flush_rect(int x, int y, int width, int height) {
+    if (!fb_gpu_active())
+        return 0;
+    fb_damage_add(x, y, width, height);
+    return fb_flush_damage();
 }
 
 enum {
@@ -98,54 +155,11 @@ static int bochs_vbe_program(uint32_t width, uint32_t height) {
     return 0;
 }
 
-static uint32_t palette_lut[256];
-static int palette_lut_ready;
-
-static uint32_t palette_rgb_compute(uint8_t index) {
-    static const uint32_t base[25] = {
-        0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
-        0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
-        0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
-        0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
-        0x182848, 0x285080, 0x3868B0, 0x5088D8,
-        0x70B0F8, 0x207850, 0x48B870, 0x503820,
-        0x6C2C28
-    };
-    if (index < sizeof(base) / sizeof(base[0]))
-        return base[index];
-    if (index < 40) {
-        uint32_t v = (uint32_t)(32 + (index - 25) * 14);
-        return (v << 16) | (v << 8) | v;
-    }
-    {
-        uint8_t n = (uint8_t)(index - 40);
-        uint32_t r = (uint32_t)(n / 36u);
-        uint32_t g = (uint32_t)((n / 6u) % 6u);
-        uint32_t b = (uint32_t)(n % 6u);
-        r = r * 51u;
-        g = g * 51u;
-        b = b * 51u;
-        return (r << 16) | (g << 8) | b;
-    }
-}
-
-static void palette_init(void) {
-    if (palette_lut_ready)
-        return;
-    for (uint32_t i = 0; i < 256u; i++)
-        palette_lut[i] = palette_rgb_compute((uint8_t)i);
-    palette_lut_ready = 1;
-}
-
-uint32_t fb_palette_rgb(uint8_t index) {
-    palette_init();
-    return palette_lut[index];
-}
-
 static void fb_store_rgb(int x, int y, uint32_t rgb) {
     if (!fb_ready || x < 0 || y < 0 ||
         x >= (int)fb_info.width || y >= (int)fb_info.height)
         return;
+    rgb &= 0x00FFFFFFu;
     volatile uint8_t *p = fb_mem + (uint32_t)y * fb_info.pitch;
     if (fb_info.bpp == 32) {
         if (fb_gpu_active())
@@ -163,9 +177,8 @@ static void fb_store_rgb(int x, int y, uint32_t rgb) {
         uint16_t g = (uint16_t)((rgb >> 10) & 0x3Fu);
         uint16_t b = (uint16_t)((rgb >> 3) & 0x1Fu);
         ((volatile uint16_t *)p)[x] = (uint16_t)((r << 11) | (g << 5) | b);
-    } else {
-        p[x] = (uint8_t)(rgb & 0xFFu);
     }
+    /* 8 bpp and other formats are not supported. */
 }
 
 static uint32_t blend_rgb(uint32_t fg, uint32_t bg, uint32_t alpha) {
@@ -184,42 +197,41 @@ static const uint8_t *font_alpha_for(char c) {
     return &kfont_alpha[ch - KFONT_FIRST][0][0];
 }
 
-static void draw_glyph(int x, int y, char c, uint8_t fg, int bg) {
+static void draw_glyph(int x, int y, char c, uint32_t fg_rgb, int bg_rgb) {
     const uint8_t *alpha = font_alpha_for(c);
-    uint32_t fg_rgb = fb_palette_rgb(fg);
-    uint32_t bg_rgb = bg >= 0 ? fb_palette_rgb((uint8_t)bg) : 0;
+    uint32_t bg = bg_rgb >= 0 ? (uint32_t)bg_rgb : 0;
     for (int py = 0; py < KFONT_HEIGHT; py++) {
         for (int px = 0; px < KFONT_WIDTH; px++) {
             uint8_t a = alpha[py * KFONT_WIDTH + px];
             if (a == 0) {
-                if (bg >= 0)
-                    fb_store_rgb(x + px, y + py, bg_rgb);
+                if (bg_rgb >= 0)
+                    fb_store_rgb(x + px, y + py, bg);
                 continue;
             }
-            uint32_t rgb = (bg >= 0 && a < 255) ?
-                           blend_rgb(fg_rgb, bg_rgb, a) : fg_rgb;
+            uint32_t rgb = (bg_rgb >= 0 && a < 255) ?
+                           blend_rgb(fg_rgb, bg, a) : fg_rgb;
             fb_store_rgb(x + px, y + py, rgb);
         }
     }
 }
 
-static int draw_unicode_glyph(int x, int y, uint32_t cp, uint8_t fg, int bg) {
+static int draw_unicode_glyph(int x, int y, uint32_t cp, uint32_t fg_rgb,
+                              int bg_rgb) {
     uint8_t bits[UFONT_BYTES];
     int width = font_unicode_lookup(cp, bits);
     if (width <= 0) {
-        draw_glyph(x, y, '?', fg, bg);
+        draw_glyph(x, y, '?', fg_rgb, bg_rgb);
         return FB_FONT_W;
     }
-    uint32_t fg_rgb = fb_palette_rgb(fg);
-    uint32_t bg_rgb = bg >= 0 ? fb_palette_rgb((uint8_t)bg) : 0;
+    uint32_t bg = bg_rgb >= 0 ? (uint32_t)bg_rgb : 0;
     for (int py = 0; py < UFONT_HEIGHT; py++) {
         for (int px = 0; px < width; px++) {
             int on = (bits[py * UFONT_STRIDE + px / 8] &
                       (uint8_t)(0x80u >> (px & 7))) != 0;
             if (on)
                 fb_store_rgb(x + px, y + py, fg_rgb);
-            else if (bg >= 0)
-                fb_store_rgb(x + px, y + py, bg_rgb);
+            else if (bg_rgb >= 0)
+                fb_store_rgb(x + px, y + py, bg);
         }
     }
     return width;
@@ -263,7 +275,8 @@ void fb_set_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
                         uint32_t pitch, uint32_t bpp) {
     if (phys_addr > 0xFFFFFFFFull || !width || !height || !pitch)
         return;
-    if (!(bpp == 8 || bpp == 16 || bpp == 24 || bpp == 32))
+    /* Truecolor only — no 8 bpp indexed framebuffer path. */
+    if (!(bpp == 16 || bpp == 24 || bpp == 32))
         return;
     uint32_t page_offset = (uint32_t)phys_addr & 0xFFFu;
     if ((uint64_t)pitch * height + page_offset > KERNEL_FB_SIZE)
@@ -286,11 +299,11 @@ void fb_init(void) {
     if (!fb_ready) {
         fb_info.width = 1;
         fb_info.height = 1;
-        fb_info.pitch = 1;
-        fb_info.bpp = 8;
+        fb_info.pitch = 4;
+        fb_info.bpp = 32;
         fb_info.backend = GFX_BACKEND_FRAMEBUFFER;
     }
-    palette_init();
+    fb_gpu_damage.valid = 0;
     if (fb_ready && virtio_gpu_init(fb_info.width, fb_info.height) == 0) {
         fb_info.pitch = fb_info.width * 4u;
         fb_info.bpp = 32;
@@ -322,11 +335,15 @@ int fb_set_mode(uint32_t width, uint32_t height) {
     if (fb_gpu_active()) {
         if (virtio_gpu_set_mode(width, height) < 0)
             return -1;
+        fb_gpu_damage.valid = 0;
         fb_info.width = width;
         fb_info.height = height;
         fb_info.pitch = width * 4u;
         fb_info.bpp = 32;
         fb_info.backend = GFX_BACKEND_VIRTIO_GPU_2D;
+        /* Caller (compositor) must re-map the scanout after mode change. */
+        if (scanout_mapped_pid)
+            (void)fb_unmap_scanout_user(scanout_mapped_pid);
         return 0;
     }
 
@@ -358,21 +375,23 @@ int fb_restore_boot_mode(void) {
     return fb_set_mode(fb_boot_info.width, fb_boot_info.height);
 }
 
-int fb_clear(uint8_t color) {
+int fb_clear(uint32_t rgb) {
     if (!fb_ready)
         return -1;
-    return fb_fill_rect(0, 0, (int)fb_info.width, (int)fb_info.height, color);
+    return fb_fill_rect(0, 0, (int)fb_info.width, (int)fb_info.height, rgb);
 }
 
-int fb_putpixel(int x, int y, uint8_t color) {
+int fb_putpixel(int x, int y, uint32_t rgb) {
     if (!fb_ready || x < 0 || y < 0 ||
         x >= (int)fb_info.width || y >= (int)fb_info.height)
         return -1;
-    fb_store_rgb(x, y, fb_palette_rgb(color));
-    return fb_flush_rect(x, y, 1, 1);
+    fb_store_rgb(x, y, rgb & 0x00FFFFFFu);
+    /* Defer GPU upload: callers that batch pixels flush via fill/blit/present. */
+    fb_damage_add(x, y, 1, 1);
+    return 0;
 }
 
-int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
+int fb_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
     if (!fb_ready)
         return -1;
     if (x < 0) { w += x; x = 0; }
@@ -381,7 +400,7 @@ int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
     if (y + h > (int)fb_info.height) h = (int)fb_info.height - y;
     if (w <= 0 || h <= 0)
         return 0;
-    uint32_t rgb = fb_palette_rgb(color);
+    rgb &= 0x00FFFFFFu;
     if (fb_info.bpp == 32) {
         for (int yy = 0; yy < h; yy++) {
             volatile uint32_t *dst = fb_row32(y + yy) + x;
@@ -403,43 +422,42 @@ int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
     return fb_flush_rect(x, y, w, h);
 }
 
-int fb_blit8_stride(int x, int y, int w, int h,
-                    const uint8_t *pixels, int stride) {
+int fb_blit32_stride(int x, int y, int w, int h,
+                     const uint32_t *pixels, int stride) {
     if (!fb_ready || !pixels || x < 0 || y < 0 || w <= 0 || h <= 0 ||
         stride < w)
         return -1;
     if (x + w > (int)fb_info.width || y + h > (int)fb_info.height)
         return -1;
-    palette_init();
     if (fb_info.bpp == 32) {
         for (int yy = 0; yy < h; yy++) {
-            const uint8_t *src = pixels + yy * stride;
+            const uint32_t *src = pixels + yy * stride;
             volatile uint32_t *dst = fb_row32(y + yy) + x;
             int xx = 0;
             for (; xx + 4 <= w; xx += 4) {
-                dst[xx] = palette_lut[src[xx]];
-                dst[xx + 1] = palette_lut[src[xx + 1]];
-                dst[xx + 2] = palette_lut[src[xx + 2]];
-                dst[xx + 3] = palette_lut[src[xx + 3]];
+                dst[xx] = src[xx] & 0x00FFFFFFu;
+                dst[xx + 1] = src[xx + 1] & 0x00FFFFFFu;
+                dst[xx + 2] = src[xx + 2] & 0x00FFFFFFu;
+                dst[xx + 3] = src[xx + 3] & 0x00FFFFFFu;
             }
             for (; xx < w; xx++)
-                dst[xx] = palette_lut[src[xx]];
+                dst[xx] = src[xx] & 0x00FFFFFFu;
         }
         return fb_flush_rect(x, y, w, h);
     }
     for (int yy = 0; yy < h; yy++) {
-        const uint8_t *src = pixels + yy * stride;
+        const uint32_t *src = pixels + yy * stride;
         for (int xx = 0; xx < w; xx++)
-            fb_store_rgb(x + xx, y + yy, fb_palette_rgb(src[xx]));
+            fb_store_rgb(x + xx, y + yy, src[xx] & 0x00FFFFFFu);
     }
     return fb_flush_rect(x, y, w, h);
 }
 
-int fb_blit8(int x, int y, int w, int h, const uint8_t *pixels) {
-    return fb_blit8_stride(x, y, w, h, pixels, w);
+int fb_blit32(int x, int y, int w, int h, const uint32_t *pixels) {
+    return fb_blit32_stride(x, y, w, h, pixels, w);
 }
 
-int fb_text(int x, int y, const char *s, uint8_t fg, int bg) {
+int fb_text(int x, int y, const char *s, uint32_t fg_rgb, int bg_rgb) {
     if (!fb_ready || !s)
         return -1;
     int start_x = x;
@@ -457,10 +475,10 @@ int fb_text(int x, int y, const char *s, uint8_t fg, int bg) {
             continue;
         }
         if (cp < 0x80u) {
-            draw_glyph(x, y, (char)cp, fg, bg);
+            draw_glyph(x, y, (char)cp, fg_rgb, bg_rgb);
             x += FB_FONT_W;
         } else {
-            x += draw_unicode_glyph(x, y, cp, fg, bg);
+            x += draw_unicode_glyph(x, y, cp, fg_rgb, bg_rgb);
         }
         if (x > max_x) max_x = x;
         if (x < min_x) min_x = x;
@@ -493,7 +511,7 @@ int fb_present_rgb32(int x, int y, int width, int height,
             for (; col < width; col++)
                 destination[col] = source[col];
         }
-        __asm__ volatile("sfence" ::: "memory");
+        __sync_synchronize();
         return fb_flush_rect(x, y, width, height);
     }
 
@@ -502,7 +520,7 @@ int fb_present_rgb32(int x, int y, int width, int height,
         for (int col = 0; col < width; col++)
             fb_store_rgb(x + col, y + row, source[col]);
     }
-    __asm__ volatile("sfence" ::: "memory");
+    __sync_synchronize();
     return fb_flush_rect(x, y, width, height);
 }
 
@@ -519,9 +537,87 @@ int fb_display_acquire(int pid) {
     return result;
 }
 
+int fb_unmap_scanout_user(int pid) {
+    if (pid <= 0 || scanout_mapped_pid != pid)
+        return 0;
+    uint32_t cr3 = paging_current_cr3();
+    if (scanout_mapped_bytes)
+        (void)paging_unmap_user_range(cr3, USER_DISPLAY_START, scanout_mapped_bytes);
+    scanout_mapped_pid = 0;
+    scanout_mapped_bytes = 0;
+    return 0;
+}
+
+int fb_map_scanout_user(int pid, struct fb_scanout_map *out) {
+    if (!out || !fb_ready || pid <= 0 ||
+        pid != display_owner_pid || pid != task_get_pid())
+        return -1;
+    if (fb_info.bpp != 32)
+        return -1;
+
+    uintptr_t phys = 0;
+    uint32_t bytes = 0;
+    uint32_t stride_px = fb_info.width;
+    uint32_t pixel_offset = 0;
+    if (fb_gpu_active()) {
+        phys = virtio_gpu_backing_phys();
+        bytes = virtio_gpu_backing_bytes();
+        stride_px = virtio_gpu_stride();
+    } else {
+        phys = paging_framebuffer_phys();
+        pixel_offset = fb_page_offset;
+        bytes = fb_info.pitch * fb_info.height + pixel_offset;
+        if (fb_info.pitch >= 4u)
+            stride_px = fb_info.pitch / 4u;
+    }
+    if (!phys || !bytes)
+        return -1;
+    bytes = (bytes + PAGE_SIZE - 1u) & ~(PAGE_SIZE - 1u);
+    if (bytes > USER_DISPLAY_SIZE)
+        return -1;
+
+    /* Drop a previous map before installing the new one (mode change). */
+    if (scanout_mapped_pid == pid)
+        (void)fb_unmap_scanout_user(pid);
+
+    uint32_t cr3 = paging_current_cr3();
+    uint32_t pte = PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_WT | PAGE_CD;
+    if (paging_map_user_phys(cr3, USER_DISPLAY_START, phys, bytes, pte) < 0)
+        return -1;
+
+    scanout_mapped_pid = pid;
+    scanout_mapped_bytes = bytes;
+    out->user_va = USER_DISPLAY_START + pixel_offset;
+    out->width = fb_info.width;
+    out->height = fb_info.height;
+    out->stride_pixels = stride_px;
+    out->bytes = bytes;
+    out->backend = fb_info.backend;
+    return 0;
+}
+
+int fb_present_rect(int pid, int x, int y, int w, int h) {
+    if (pid <= 0 || pid != display_owner_pid || !fb_ready)
+        return -1;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x >= (int)fb_info.width || y >= (int)fb_info.height || w <= 0 || h <= 0)
+        return 0;
+    if (w > (int)fb_info.width - x)
+        w = (int)fb_info.width - x;
+    if (h > (int)fb_info.height - y)
+        h = (int)fb_info.height - y;
+    if (fb_gpu_active())
+        return virtio_gpu_flush(x, y, w, h);
+    /* Linear framebuffer: compositor wrote scanout memory directly. */
+    return 0;
+}
+
 int fb_display_release(int pid) {
     if (pid <= 0)
         return -1;
+    if (scanout_mapped_pid == pid)
+        (void)fb_unmap_scanout_user(pid);
     uint32_t flags = irq_save();
     int result = -1;
     if (display_owner_pid == pid) {

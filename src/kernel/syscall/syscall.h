@@ -17,6 +17,14 @@ struct syscall_gfx_info {
     uint32_t bpp;
     uint32_t backend;
 };
+struct syscall_gfx_surface {
+    uint32_t address;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride_pixels;
+    uint32_t bytes;
+    uint32_t backend;
+};
 struct syscall_shm_mapping {
     uint32_t token;
     uint32_t address;
@@ -43,7 +51,8 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_SHM_CREATE=57, SYS_SHM_MAP=58, SYS_SHM_UNMAP=59,
        SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62,
        SYS_AUDIO_QUEUED=63, SYS_AUDIO_FLUSH=64,
-       SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66, SYS_GFX_SET_MODE=67 };
+       SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66, SYS_GFX_SET_MODE=67,
+       SYS_GFX_MAP_SURFACE=68, SYS_GFX_PRESENT=69 };
 
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);

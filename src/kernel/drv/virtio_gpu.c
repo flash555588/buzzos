@@ -46,8 +46,9 @@ enum {
     VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM = 2,
     VIRTIO_GPU_MAX_SCANOUTS = 16,
 
+    /* Match fb_set_mode / GUIAPP_MAX_* so 1920x1200 (16:10) is allowed. */
     GPU_MAX_WIDTH = 1920,
-    GPU_MAX_HEIGHT = 1080,
+    GPU_MAX_HEIGHT = 1200,
     GPU_BACKING_BYTES = GPU_MAX_WIDTH * GPU_MAX_HEIGHT * 4,
 };
 
@@ -382,6 +383,9 @@ static int gpu_submit(const void *request, uint32_t request_size,
         response_size > PAGE_SIZE || !gpu_notify)
         return -1;
 
+    /* Keep IRQ off only while publishing descriptors/notify. Spinning with
+     * IRQs masked freezes the PIT and has been observed to leave boot in a
+     * corrupted state after a failed GPU probe. */
     uint32_t irq_flags = irq_save();
     bytes_copy(gpu_request, request, request_size);
     bytes_zero(gpu_response, response_size);
@@ -401,6 +405,7 @@ static int gpu_submit(const void *request, uint32_t request_size,
     gpu_avail->idx = gpu_avail_index;
     __sync_synchronize();
     *gpu_notify = GPU_QUEUE_INDEX;
+    irq_restore(irq_flags);
 
     int complete = 0;
     for (uint32_t spin = 0; spin < 10000000u; spin++) {
@@ -411,19 +416,15 @@ static int gpu_submit(const void *request, uint32_t request_size,
         __asm__ volatile("pause");
     }
     if (!complete) {
-        irq_restore(irq_flags);
         serial_puts("[gpu] virtqueue command timeout\n");
         return -1;
     }
     __sync_synchronize();
     struct virtq_used_elem *used =
         &gpu_used->ring[used_before % gpu_queue_size];
-    if (used->id != 0) {
-        irq_restore(irq_flags);
+    if (used->id != 0)
         return -1;
-    }
     bytes_copy(response, gpu_response, response_size);
-    irq_restore(irq_flags);
     return 0;
 }
 
@@ -432,7 +433,15 @@ static int gpu_submit_expect(const void *request, uint32_t request_size,
     struct virtio_gpu_ctrl_hdr response;
     if (gpu_submit(request, request_size, &response, sizeof(response)) < 0)
         return -1;
-    return response.type == expected_response ? 0 : -1;
+    if (response.type != expected_response) {
+        serial_puts("[gpu] cmd response=");
+        serial_puthex(response.type);
+        serial_puts(" expected=");
+        serial_puthex(expected_response);
+        serial_puts("\n");
+        return -1;
+    }
+    return 0;
 }
 
 static int gpu_get_display_info(void) {
@@ -447,14 +456,8 @@ static int gpu_get_display_info(void) {
     serial_puthex(response.modes[0].enabled);
     serial_puts(" preferred=");
     serial_puthex(response.modes[0].r.width);
-    serial_putc('x');
+    serial_puts("x");
     serial_puthex(response.modes[0].r.height);
-    if (gpu_device_config) {
-        volatile uint32_t *config =
-            (volatile uint32_t *)(uintptr_t)gpu_device_config;
-        serial_puts(" outputs=");
-        serial_puthex(config[2]);
-    }
     serial_puts("\n");
     return 0;
 }
@@ -481,7 +484,9 @@ static int gpu_transfer_flush_resource(uint32_t resource_id,
     transfer.offset = ((uint64_t)(uint32_t)y * resource_width +
                        (uint32_t)x) * 4u;
     transfer.resource_id = resource_id;
-    __asm__ volatile("sfence" ::: "memory");
+    /* Full barrier is enough on i386; avoid assuming SSE sfence availability
+     * in every build flag combination. */
+    __sync_synchronize();
     if (gpu_submit_expect(&transfer, sizeof(transfer),
                           VIRTIO_GPU_RESP_OK_NODATA) < 0)
         return -1;
@@ -513,17 +518,49 @@ static int gpu_create_scanout(uint32_t width, uint32_t height) {
     create.width = width;
     create.height = height;
     if (gpu_submit_expect(&create, sizeof(create),
-                          VIRTIO_GPU_RESP_OK_NODATA) < 0)
+                          VIRTIO_GPU_RESP_OK_NODATA) < 0) {
+        serial_puts("[gpu] RESOURCE_CREATE_2D failed\n");
         return -1;
+    }
+
+    /* Page-align DMA length (QEMU maps whole pages) but do not exceed the
+     * allocated backing slab.  Also avoid overshooting the 2D resource size
+     * by more than a page of padding when possible. */
+    uint32_t attach_bytes =
+        (uint32_t)((bytes + (PAGE_SIZE - 1u)) & ~((uint64_t)PAGE_SIZE - 1u));
+    if (attach_bytes == 0 || attach_bytes > GPU_BACKING_BYTES)
+        attach_bytes = (uint32_t)bytes;
+    if (attach_bytes < (uint32_t)bytes)
+        attach_bytes = (uint32_t)bytes;
 
     struct virtio_gpu_attach_one attach = {0};
     attach.command.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
     attach.command.resource_id = new_resource;
     attach.command.nr_entries = 1;
     attach.entry.addr = (uint64_t)gpu_backing_phys;
-    attach.entry.length = GPU_BACKING_BYTES;
+    attach.entry.length = attach_bytes;
     if (gpu_submit_expect(&attach, sizeof(attach),
                           VIRTIO_GPU_RESP_OK_NODATA) < 0) {
+        serial_puts("[gpu] RESOURCE_ATTACH_BACKING failed phys=");
+        serial_puthex((uint32_t)gpu_backing_phys);
+        serial_puts(" len=");
+        serial_puthex(attach_bytes);
+        serial_puts("\n");
+        (void)gpu_unref_resource(new_resource);
+        return -1;
+    }
+
+    struct virtio_gpu_set_scanout scanout = {0};
+    scanout.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    scanout.r.x = 0;
+    scanout.r.y = 0;
+    scanout.r.width = width;
+    scanout.r.height = height;
+    scanout.scanout_id = 0;
+    scanout.resource_id = new_resource;
+    if (gpu_submit_expect(&scanout, sizeof(scanout),
+                          VIRTIO_GPU_RESP_OK_NODATA) < 0) {
+        serial_puts("[gpu] SET_SCANOUT failed\n");
         (void)gpu_unref_resource(new_resource);
         return -1;
     }
@@ -531,18 +568,7 @@ static int gpu_create_scanout(uint32_t width, uint32_t height) {
     bytes_zero(gpu_backing, (uint32_t)bytes);
     if (gpu_transfer_flush_resource(new_resource, width, 0, 0,
                                     (int)width, (int)height) < 0) {
-        (void)gpu_unref_resource(new_resource);
-        return -1;
-    }
-
-    struct virtio_gpu_set_scanout scanout = {0};
-    scanout.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
-    scanout.r.width = width;
-    scanout.r.height = height;
-    scanout.scanout_id = 0;
-    scanout.resource_id = new_resource;
-    if (gpu_submit_expect(&scanout, sizeof(scanout),
-                          VIRTIO_GPU_RESP_OK_NODATA) < 0) {
+        serial_puts("[gpu] TRANSFER/FLUSH failed\n");
         (void)gpu_unref_resource(new_resource);
         return -1;
     }
@@ -589,16 +615,39 @@ int virtio_gpu_init(uint32_t width, uint32_t height) {
 
     uint32_t backing_pages =
         (GPU_BACKING_BYTES + PAGE_SIZE - 1u) / PAGE_SIZE;
-    gpu_backing_phys = pmm_alloc_pages(backing_pages);
+    /* Avoid guest GPAs in the first 1 MiB: some hosts refuse virtio DMA maps
+     * into the real-mode / BIOS hole (logs showed phys=0x23000). */
+    gpu_backing_phys = 0;
+    for (int attempt = 0; attempt < 16 && !gpu_backing_phys; attempt++) {
+        uintptr_t phys = pmm_alloc_pages(backing_pages);
+        if (!phys)
+            break;
+        if (phys >= 0x100000u) {
+            gpu_backing_phys = phys;
+            break;
+        }
+        serial_puts("[gpu] skip low backing ");
+        serial_puthex((uint32_t)phys);
+        serial_puts("\n");
+        pmm_free_pages(phys, backing_pages);
+    }
     if (!gpu_backing_phys) {
-        gpu_status_failed();
         serial_puts("[gpu] scanout backing allocation failed\n");
         return -1;
     }
     gpu_backing = (uint32_t *)gpu_backing_phys;
+    serial_puts("[gpu] backing phys=");
+    serial_puthex((uint32_t)gpu_backing_phys);
+    serial_puts("\n");
     if (gpu_create_scanout(width, height) < 0) {
-        gpu_status_failed();
-        serial_puts("[gpu] 2D resource setup failed\n");
+        serial_puts("[gpu] 2D resource setup failed; falling back to boot FB\n");
+        /* Soft-fail: do not mark the device FAILED (that can wedge later MMIO
+         * on some QEMU builds). Free the unused backing and keep gpu_is_ready=0
+         * so fb.c continues on the Limine linear framebuffer. */
+        pmm_free_pages(gpu_backing_phys, backing_pages);
+        gpu_backing = 0;
+        gpu_backing_phys = 0;
+        gpu_resource_id = 0;
         return -1;
     }
     gpu_is_ready = 1;
@@ -636,6 +685,16 @@ uint32_t *virtio_gpu_pixels(void) {
 
 uint32_t virtio_gpu_stride(void) {
     return gpu_is_ready ? gpu_width : 0;
+}
+
+uintptr_t virtio_gpu_backing_phys(void) {
+    return gpu_is_ready ? gpu_backing_phys : 0;
+}
+
+uint32_t virtio_gpu_backing_bytes(void) {
+    if (!gpu_is_ready || !gpu_width || !gpu_height)
+        return 0;
+    return gpu_width * gpu_height * 4u;
 }
 
 int virtio_gpu_flush(int x, int y, int width, int height) {

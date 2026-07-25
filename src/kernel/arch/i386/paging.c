@@ -24,6 +24,10 @@ static void paging_unlock(void) {
     __sync_lock_release(&paging_locked);
 }
 
+uintptr_t paging_framebuffer_phys(void) {
+    return kernel_fb_phys;
+}
+
 void paging_set_framebuffer(uintptr_t phys_addr, uint32_t size) {
     if (!phys_addr || !size)
         return;
@@ -477,6 +481,65 @@ void paging_destroy_user_space(uint32_t cr3) {
 
     pmm_free_pages((uintptr_t)pd, 1);
     paging_unlock();
+}
+
+int paging_map_user_phys(uint32_t cr3, uint32_t va, uintptr_t phys, uint32_t size,
+                         uint32_t pte_flags) {
+    if (!size || (va & (PAGE_SIZE - 1u)) || (phys & (PAGE_SIZE - 1u)))
+        return -1;
+    uint32_t end;
+    if (add_overflows_u32(va, size, &end))
+        return -1;
+    if (va < USER_SPACE_START || end > USER_SPACE_END)
+        return -1;
+    uint32_t *pd = space_page_directory(cr3);
+    if (!pd)
+        return -1;
+    uint32_t flags = pte_flags | PAGE_PRESENT | PAGE_USER;
+    uint32_t pages = (size + PAGE_SIZE - 1u) / PAGE_SIZE;
+    paging_lock();
+    for (uint32_t i = 0; i < pages; i++) {
+        uint32_t cur = va + i * PAGE_SIZE;
+        uint32_t *pt = ensure_user_page_table(pd, pde_index(cur));
+        if (!pt) {
+            paging_unlock();
+            return -1;
+        }
+        uint32_t idx = pte_index(cur);
+        /* Replace any prior mapping of this VA (display remap on mode change). */
+        pt[idx] = (uint32_t)(phys + i * PAGE_SIZE) | flags;
+    }
+    if (paging_current_cr3() == cr3)
+        flush_tlb();
+    paging_unlock();
+    return 0;
+}
+
+int paging_unmap_user_range(uint32_t cr3, uint32_t va, uint32_t size) {
+    if (!size || (va & (PAGE_SIZE - 1u)))
+        return -1;
+    uint32_t end;
+    if (add_overflows_u32(va, size, &end))
+        return -1;
+    if (va < USER_SPACE_START || end > USER_SPACE_END)
+        return -1;
+    uint32_t *pd = space_page_directory(cr3);
+    if (!pd)
+        return -1;
+    uint32_t pages = (size + PAGE_SIZE - 1u) / PAGE_SIZE;
+    paging_lock();
+    for (uint32_t i = 0; i < pages; i++) {
+        uint32_t cur = va + i * PAGE_SIZE;
+        uint32_t pde = pd[pde_index(cur)];
+        if (!(pde & PAGE_PRESENT))
+            continue;
+        uint32_t *pt = (uint32_t *)(uintptr_t)(pde & 0xFFFFF000u);
+        pt[pte_index(cur)] = 0;
+    }
+    if (paging_current_cr3() == cr3)
+        flush_tlb();
+    paging_unlock();
+    return 0;
 }
 
 int paging_map_shared_pages(uint32_t va, const uintptr_t *pages, uint32_t count) {

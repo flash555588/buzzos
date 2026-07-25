@@ -12,14 +12,12 @@ struct bitmap {
     bool opaque;
 };
 
-static uint8_t palette_colour(colour value) {
+/* NetSurf colour is 0xBBGGRR; convert to 0x00RRGGBB for the desktop. */
+static uint32_t rgb_colour(colour value) {
     unsigned red = value & 255u;
     unsigned green = (value >> 8) & 255u;
     unsigned blue = (value >> 16) & 255u;
-    unsigned r = (red * 5u + 127u) / 255u;
-    unsigned g = (green * 5u + 127u) / 255u;
-    unsigned b = (blue * 5u + 127u) / 255u;
-    return (uint8_t)(40u + r * 36u + g * 6u + b);
+    return plt_rgb((int)red, (int)green, (int)blue);
 }
 
 static int font_scale(const plot_font_style_t *style) {
@@ -115,7 +113,7 @@ static struct gui_layout_table buzzos_layout = {
 struct gui_layout_table *buzzos_layout_table = &buzzos_layout;
 
 void buzzos_plot_target_init(struct buzzos_plot_target *target,
-                             uint8_t *pixels, int width, int height,
+                             uint32_t *pixels, int width, int height,
                              int offset_y) {
     target->pixels = pixels;
     target->width = width;
@@ -127,12 +125,13 @@ void buzzos_plot_target_init(struct buzzos_plot_target *target,
     target->clip_y1 = height - offset_y;
 }
 
-static void pixel(struct buzzos_plot_target *target, int x, int y, uint8_t colour_value) {
+static void pixel(struct buzzos_plot_target *target, int x, int y,
+                  uint32_t colour_value) {
     if (x < target->clip_x0 || x >= target->clip_x1 ||
         y < target->clip_y0 || y >= target->clip_y1) return;
     y += target->offset_y;
     if (x >= 0 && x < target->width && y >= 0 && y < target->height)
-        target->pixels[y * target->width + x] = colour_value;
+        target->pixels[y * target->width + x] = colour_value & 0x00FFFFFFu;
 }
 
 static nserror plot_clip(const struct redraw_context *ctx, const struct rect *clip) {
@@ -151,7 +150,7 @@ static nserror plot_line(const struct redraw_context *ctx,
     int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
     int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
     int error = dx + dy;
-    uint8_t c = palette_colour(style->stroke_colour);
+    uint32_t c = rgb_colour(style->stroke_colour);
     for (;;) {
         pixel(target, x0, y0, c);
         if (x0 == x1 && y0 == y1) break;
@@ -166,7 +165,7 @@ static nserror plot_rectangle(const struct redraw_context *ctx,
                               const plot_style_t *style, const struct rect *rect) {
     struct buzzos_plot_target *target = ctx->priv;
     if (style->fill_type != PLOT_OP_TYPE_NONE) {
-        uint8_t c = palette_colour(style->fill_colour);
+        uint32_t c = rgb_colour(style->fill_colour);
         for (int y = rect->y0; y < rect->y1; y++)
             for (int x = rect->x0; x < rect->x1; x++) pixel(target, x, y, c);
     }
@@ -183,8 +182,8 @@ static nserror plot_rectangle(const struct redraw_context *ctx,
 static nserror plot_disc(const struct redraw_context *ctx,
                          const plot_style_t *style, int cx, int cy, int radius) {
     struct buzzos_plot_target *target = ctx->priv;
-    uint8_t c = palette_colour(style->fill_type != PLOT_OP_TYPE_NONE ?
-                               style->fill_colour : style->stroke_colour);
+    uint32_t c = rgb_colour(style->fill_type != PLOT_OP_TYPE_NONE ?
+                            style->fill_colour : style->stroke_colour);
     for (int y = -radius; y <= radius; y++)
         for (int x = -radius; x <= radius; x++)
             if (x * x + y * y <= radius * radius) pixel(target, cx + x, cy + y, c);
@@ -230,10 +229,8 @@ static nserror plot_bitmap(const struct redraw_context *ctx, struct bitmap *bitm
             int sx = dx * bitmap->width / width;
             const uint8_t *rgba = source + (size_t)sy * stride + (size_t)sx * 4u;
             if (rgba[3] < 32) continue;
-            unsigned r = (rgba[0] * 5u + 127u) / 255u;
-            unsigned g = (rgba[1] * 5u + 127u) / 255u;
-            unsigned b = (rgba[2] * 5u + 127u) / 255u;
-            pixel(target, x + dx, y + dy, (uint8_t)(40u + r * 36u + g * 6u + b));
+            pixel(target, x + dx, y + dy,
+                  plt_rgb((int)rgba[0], (int)rgba[1], (int)rgba[2]));
         }
     }
     return NSERROR_OK;
@@ -247,7 +244,7 @@ static nserror plot_text(const struct redraw_context *ctx,
     const char *end = text + length;
     int scale = font_scale(style);
     int top = y - (KFONT_HEIGHT - 2) * scale;
-    uint8_t colour_value = palette_colour(style->foreground);
+    uint32_t colour_value = rgb_colour(style->foreground);
     bool bold = style->weight >= 600;
     while (cursor < end) {
         uint32_t cp = bounded_codepoint(&cursor, end);

@@ -1,6 +1,7 @@
 #ifndef BUZZOS_GUIAPP_H
 #define BUZZOS_GUIAPP_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define GUIAPP_MAGIC 0x47554941u
@@ -11,8 +12,10 @@
 #define GUIAPP_TEXT_MAX 32
 #define GUIAPP_SHARED_HEADER_SIZE 4096
 #define GUIAPP_SHARED_PIXELS (GUIAPP_MAX_W * GUIAPP_MAX_H)
+/* Surfaces are 32bpp 0x00RRGGBB (4 bytes per pixel). */
+#define GUIAPP_BYTES_PER_PIXEL 4u
 #define GUIAPP_SHARED_SIZE_FOR_PIXELS(pixels) \
-    (GUIAPP_SHARED_HEADER_SIZE + (pixels))
+    (GUIAPP_SHARED_HEADER_SIZE + (size_t)(pixels) * GUIAPP_BYTES_PER_PIXEL)
 #define GUIAPP_SHARED_SIZE GUIAPP_SHARED_SIZE_FOR_PIXELS(GUIAPP_SHARED_PIXELS)
 
 enum {
@@ -103,13 +106,13 @@ int guiapp_parse_args(int argc, char **argv, struct guiapp_ctx *ctx);
  * geometry even if several RESIZE events were queued. */
 int guiapp_read_event(struct guiapp_ctx *ctx, struct guiapp_event *ev);
 int guiapp_send_frame(struct guiapp_ctx *ctx, const char *title,
-                      int width, int height, const uint8_t *pixels);
+                      int width, int height, const uint32_t *pixels);
 int guiapp_send_scaled_frame(struct guiapp_ctx *ctx, const char *title,
-                             int width, int height, const uint8_t *pixels,
+                             int width, int height, const uint32_t *pixels,
                              int source_width, int source_height);
 int guiapp_send_dirty(struct guiapp_ctx *ctx, const char *title,
                       int width, int height, int x, int y, int dirty_w, int dirty_h,
-                      const uint8_t *pixels, int stride);
+                      const uint32_t *pixels, int stride);
 int guiapp_request_launch(struct guiapp_ctx *ctx, const char *target,
                           const char *argument);
 int guiapp_set_clipboard(struct guiapp_ctx *ctx, const char *text);

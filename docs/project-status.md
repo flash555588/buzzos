@@ -36,8 +36,9 @@ filesystem, and a user-space GUI app manager.
   process-wide termination.
 - User GUI helpers: seeded apps use `src/user/libc/appui.h` for lightweight
   controls and `src/user/libc/guiapp.h` for the desktop-hosted app protocol.
-  Live-resize / composition trade-offs (1:1 blit, configure coalesce, SHM
-  seqlock stride) are documented in `docs/user-gui.md`.
+  The desktop and apps compose in **RGB32**. With virtio-gpu, the compositor
+  prefers **zero-copy scanout** (`gfx_map_surface` + `gfx_present` damage
+  upload). Live-resize trade-offs and the display model are in `docs/user-gui.md`.
 - App packaging: optional `.app` manifests provide `name`, `kind`, `version`,
   `summary`, `state`, `source`, and `readme` metadata for the App Manager.
 - App registry: `tools/gen_app_registry.py` generates `build/generated/app_registry.h`

@@ -36,7 +36,8 @@ static const char *const TB_LABELS[TB_COUNT] = {
     "Open", "New", "Save", "Run", "REPL", "Clear"
 };
 
-static uint8_t pixels[MAX_W * MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
 static char textbuf[TEXT_CAP];
 static uint8_t tok_color[TEXT_CAP];
 static int text_len;
@@ -71,23 +72,23 @@ static char complete_items[COMPLETE_MAX][32];
 static int dirty_color = 1;
 static lua_State *L;
 
-/* Syntax palette (document is light bg, so use dark-ish hues). */
+/* Token kinds stored in tok_color[]; map to RGB32 for the light document. */
 enum {
-    COL_DEFAULT = 0,   /* black-ish */
-    COL_KEYWORD = 1,   /* blue */
-    COL_STRING  = 2,   /* green */
-    COL_COMMENT = 3,   /* gray */
-    COL_NUMBER  = 4,   /* brown/orange */
+    COL_DEFAULT = 0,
+    COL_KEYWORD = 1,
+    COL_STRING  = 2,
+    COL_COMMENT = 3,
+    COL_NUMBER  = 4,
     COL_SYMBOL  = 5,
 };
 
-static int token_paint_color(int kind) {
+static uint32_t token_paint_color(int kind) {
     switch (kind) {
-    case COL_KEYWORD: return 1;              /* blue */
-    case COL_STRING:  return 2;              /* green */
-    case COL_COMMENT: return plt_gray(8);
-    case COL_NUMBER:  return 6;              /* brown */
-    case COL_SYMBOL:  return plt_gray(4);
+    case COL_KEYWORD: return plt_rgb(0x1a, 0x56, 0xb0); /* blue */
+    case COL_STRING:  return plt_rgb(0x16, 0x7a, 0x3a); /* green */
+    case COL_COMMENT: return plt_rgb(0x6a, 0x6a, 0x6a); /* gray */
+    case COL_NUMBER:  return plt_rgb(0xb0, 0x5a, 0x12); /* brown/orange */
+    case COL_SYMBOL:  return plt_rgb(0x4a, 0x4a, 0x58);
     default:          return THEME_DOCUMENT_TEXT;
     }
 }
@@ -1017,7 +1018,7 @@ static void render(void) {
             continue;
         }
         int advance = appui_codepoint_advance(c, x - line_origin);
-        int col = token_paint_color(tok_color[pos]);
+        uint32_t col = token_paint_color(tok_color[pos]);
         if (y + KFONT_HEIGHT >= clip.y && y < clip.y + clip.h &&
             x + advance >= clip.x && x < clip.x + clip.w)
             (void)appui_draw_codepoint_at(pixels, w, h, x, y, c, col, -1, clip,
@@ -1312,6 +1313,8 @@ int main(int argc, char **argv) {
         if (ev.type == GUIAPP_EVT_INIT || ev.type == GUIAPP_EVT_RESIZE) {
             w = clamp_int(ev.width, 480, MAX_W);
             h = clamp_int(ev.height, 320, MAX_H);
+            if (appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+                break;
             ensure_cursor_visible();
         } else if (ev.type == GUIAPP_EVT_KEY && ev.buttons) {
             key(ev.key);
@@ -1330,6 +1333,9 @@ int main(int argc, char **argv) {
         } else if (ev.type == GUIAPP_EVT_MOUSE) {
             mouse(&ctx, ev.x, ev.y, ev.buttons, ev.wheel);
         }
+        if (!pixels ||
+            appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+            break;
         render();
         if (guiapp_send_frame(&ctx, window_title, w, h, pixels) < 0)
             break;
@@ -1340,5 +1346,6 @@ int main(int argc, char **argv) {
         lua_close(L);
         L = 0;
     }
+    free(pixels);
     return 0;
 }

@@ -4,7 +4,7 @@
 
 enum { W = 360, H = 360, EXPR_CAP = 96 };
 
-static uint8_t pixels[W * H];
+static uint32_t pixels[W * H];
 static char expr[EXPR_CAP];
 static char display[EXPR_CAP];
 static int expr_len;

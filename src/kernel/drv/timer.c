@@ -75,13 +75,21 @@ void timer_init(void) {
 }
 
 void timer_irq(void) {
+    /* How many scheduler jiffies this IRQ accounts for.  With the ACPI PM
+     * timebase, one IRQ can advance several ticks when the guest runs behind
+     * real time; charge the running task for all of them so CPU% matches wall
+     * time (otherwise cpu_ticks stays at 1/IRQ while jiffies jump). */
+    uint32_t before = ticks;
     if (acpi_pm_port)
         update_elapsed_time();
     else
         ticks++;
+    uint32_t advanced = ticks - before;
+    if (advanced == 0)
+        advanced = 1;
     /* Preempt: round-robin to the next ready task. schedule() handles the
      * cli/sti and the no-op case when nothing else is runnable. */
-    sched_tick();
+    sched_tick(advanced);
 }
 
 uint32_t timer_ticks(void) {

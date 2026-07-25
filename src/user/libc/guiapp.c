@@ -83,8 +83,8 @@ int guiapp_read_event(struct guiapp_ctx *ctx, struct guiapp_event *ev) {
     return 0;
 }
 
-static uint8_t *shared_pixels(struct guiapp_ctx *ctx) {
-    return (uint8_t *)ctx->shared + GUIAPP_SHARED_HEADER_SIZE;
+static uint32_t *shared_pixels(struct guiapp_ctx *ctx) {
+    return (uint32_t *)((uint8_t *)ctx->shared + GUIAPP_SHARED_HEADER_SIZE);
 }
 
 static int surface_fits(struct guiapp_ctx *ctx, int width, int height) {
@@ -113,15 +113,17 @@ static void end_surface_write(struct guiapp_ctx *ctx, uint32_t sequence,
 }
 
 static int publish_frame(struct guiapp_ctx *ctx, const char *title,
-                         int width, int height, const uint8_t *pixels, int stride) {
+                         int width, int height, const uint32_t *pixels,
+                         int stride) {
     struct guiapp_frame frame;
     if (!ctx || !ctx->shared || !pixels || stride < width ||
         !surface_fits(ctx, width, height))
         return -1;
     uint32_t sequence = begin_surface_write(ctx);
-    uint8_t *dst = shared_pixels(ctx);
+    uint32_t *dst = shared_pixels(ctx);
     for (int y = 0; y < height; y++)
-        memcpy(dst + y * width, pixels + y * stride, (size_t)width);
+        memcpy(dst + y * width, pixels + y * stride,
+               (size_t)width * sizeof(uint32_t));
     end_surface_write(ctx, sequence, width, height);
 
     init_frame(&frame, GUIAPP_FRAME_FULL);
@@ -137,22 +139,22 @@ static int publish_frame(struct guiapp_ctx *ctx, const char *title,
 }
 
 int guiapp_send_frame(struct guiapp_ctx *ctx, const char *title,
-                      int width, int height, const uint8_t *pixels) {
+                      int width, int height, const uint32_t *pixels) {
     return publish_frame(ctx, title, width, height, pixels, width);
 }
 
 int guiapp_send_scaled_frame(struct guiapp_ctx *ctx, const char *title,
-                             int width, int height, const uint8_t *pixels,
+                             int width, int height, const uint32_t *pixels,
                              int source_width, int source_height) {
     struct guiapp_frame frame;
     if (!ctx || !ctx->shared || !pixels || width <= 0 || height <= 0 ||
         !surface_fits(ctx, source_width, source_height))
         return -1;
     uint32_t sequence = begin_surface_write(ctx);
-    uint8_t *dst = shared_pixels(ctx);
+    uint32_t *dst = shared_pixels(ctx);
     for (int y = 0; y < source_height; y++)
         memcpy(dst + y * source_width, pixels + y * source_width,
-               (size_t)source_width);
+               (size_t)source_width * sizeof(uint32_t));
     end_surface_write(ctx, sequence, source_width, source_height);
     init_frame(&frame, GUIAPP_FRAME_SCALED);
     frame.width = width > GUIAPP_MAX_W ? GUIAPP_MAX_W : width;
@@ -166,7 +168,7 @@ int guiapp_send_scaled_frame(struct guiapp_ctx *ctx, const char *title,
 
 int guiapp_send_dirty(struct guiapp_ctx *ctx, const char *title,
                       int width, int height, int x, int y, int dirty_w, int dirty_h,
-                      const uint8_t *pixels, int stride) {
+                      const uint32_t *pixels, int stride) {
     if (!ctx || !ctx->shared || !pixels || stride < width ||
         !surface_fits(ctx, width, height))
         return -1;
@@ -181,10 +183,11 @@ int guiapp_send_dirty(struct guiapp_ctx *ctx, const char *title,
         return publish_frame(ctx, title, width, height, pixels, stride);
 
     uint32_t sequence = begin_surface_write(ctx);
-    uint8_t *dst = shared_pixels(ctx);
+    uint32_t *dst = shared_pixels(ctx);
     for (int row = 0; row < dirty_h; row++)
         memcpy(dst + (y + row) * width + x,
-               pixels + (y + row) * stride + x, (size_t)dirty_w);
+               pixels + (y + row) * stride + x,
+               (size_t)dirty_w * sizeof(uint32_t));
     end_surface_write(ctx, sequence, width, height);
 
     struct guiapp_frame frame;

@@ -65,6 +65,42 @@ UTF-8 selection; Browser, Files dialogs, and Calculator copy/cut their current
 field. Paste is delivered through the same `GUIAPP_EVT_TEXT` path used by the
 system input method.
 
+## Pixel Format (Modern Truecolor Path)
+
+BuzzOS follows the modern desktop model: **working buffers and scanout are
+32-bit truecolor (`0x00RRGGBB`)**, not an 8-bit indexed UI palette.
+
+| Layer | Format |
+| --- | --- |
+| App pixels / `guiapp` SHM | `uint32_t` RGB32, 4 bytes/pixel |
+| Desktop backbuffer (`/bin/gui`) | RGB32 |
+| Kernel `fb_blit` / `fb_fill` / `fb_text` | RGB32 arguments and blits |
+| Bochs VBE / Limine linear FB | 32 bpp modes |
+| virtio-gpu 2D | RGBX resource + dirty `TRANSFER`/`FLUSH` |
+| Desktop compose | Prefer **zero-copy**: `gfx_map_surface` maps scanout into the compositor; `gfx_present` only flushes damage (GPU) or is a no-op (linear FB) |
+| App pixel buffers | **Dynamic** via `appui_pixels_ensure` — sized to the current window (+slack), not a static `GUIAPP_MAX_W×MAX_H` reservation |
+
+There is **no** 8-bit indexed framebuffer path (boot FB must be 16/24/32 bpp;
+GUI and scanout are RGB32). Theme colors in `palette.h` are literal RGB;
+`plt_blend` blends in RGB. The text console keeps a small **VGA-16 RGB table**
+locally for character attributes only.
+
+### GPU usage model (virtio-gpu 2D)
+
+BuzzOS does not have a 3D or hardware window compositor. “Full use” of the
+available GPU means:
+
+1. Guest scanout memory is the composition target (`USER_DISPLAY_START` map).
+2. Software draws RGB32 directly into that memory (no intermediate full-screen
+   blit into the kernel on the hot path).
+3. Each damaged region is uploaded once via `TRANSFER_TO_HOST_2D` +
+   `RESOURCE_FLUSH` (`gfx_present`).
+4. If mapping fails, the desktop falls back to a private backbuffer +
+   `fb_blit_stride` (extra copy).
+
+SHM slots are sized for a full-screen RGB32 surface
+(`USER_SHM_SLOT_SIZE` ≈ 10 MiB: header + 1920×1200×4).
+
 ## Live Resize And Composition (Design Compromises)
 
 This section records intentional trade-offs in `/bin/gui` and `guiapp`, not
@@ -96,10 +132,11 @@ Modern desktops **do** scale the previous client buffer to the new window size
 while the client catches up. That looks smooth when scaling is GPU-filtered
 (bilinear or better).
 
-BuzzOS software-composes an 8-bit palette framebuffer with nearest-neighbor
-only. Fractional stretch (especially ratios near 1, such as 501/500) turns
-high-frequency UI and text into **moiré / banding** that shimmers every mouse
-pixel during a drag. That is a product choice under current constraints:
+BuzzOS software-composes RGB32 with nearest-neighbor scaling only (no cheap
+bilinear filter). Fractional stretch (especially ratios near 1, such as
+501/500) still turns high-frequency UI and text into **moiré / banding** that
+shimmers every mouse pixel during a drag. That is a product choice under
+current constraints:
 
 - **Keep:** 1:1 blit + solid margins while the app lags (may flash a body-color
   strip; no moiré).

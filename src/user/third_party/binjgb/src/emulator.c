@@ -2210,10 +2210,9 @@ static void check_joyp_intr(Emulator* e) {
   JOYP.last_p10_p13 = p10_p13;
 }
 
-/* BuzzOS presents an 8-bit 6x6x6 colour cube. Quantize when a Game Boy
- * palette entry changes instead of converting all 23040 pixels every frame.
- * The encoded index stays in RGBA's low byte, preserving the framebuffer
- * layout expected by the rest of binjgb. */
+/* Optional legacy path: quantize to the old 6x6x6 index cube.  The BuzzOS
+ * desktop is RGB32, so the default (no BINJGB_BUZZOS_INDEXED_COLOR) keeps
+ * full RGBA and lets gameboy.c convert to 0x00RRGGBB once per frame. */
 static inline RGBA output_color(RGBA color) {
 #ifdef BINJGB_BUZZOS_INDEXED_COLOR
   u32 r = color & 255u;

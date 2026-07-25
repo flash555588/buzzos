@@ -12,7 +12,8 @@ enum {
     TOOL_BUTTON_GAP = 8,
 };
 
-static uint8_t pixels[MAX_W * MAX_H];
+static uint32_t *pixels;
+static size_t pixels_cap;
 static char textbuf[TEXT_CAP];
 static int text_len;
 static int cursor;
@@ -640,6 +641,8 @@ int main(int argc, char **argv) {
         if (ev.type == GUIAPP_EVT_INIT || ev.type == GUIAPP_EVT_RESIZE) {
             w = clamp_int(ev.width, 220, MAX_W);
             h = clamp_int(ev.height, 160, MAX_H);
+            if (appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+                break;
             ensure_cursor_visible();
         } else if (ev.type == GUIAPP_EVT_KEY && ev.buttons) {
             key(ev.key);
@@ -651,10 +654,14 @@ int main(int argc, char **argv) {
         } else if (ev.type == GUIAPP_EVT_MOUSE) {
             mouse(ev.x, ev.y, ev.buttons, ev.wheel);
         }
+        if (!pixels ||
+            appui_pixels_ensure(&pixels, &pixels_cap, w, h, MAX_W, MAX_H) < 0)
+            break;
         render();
         if (guiapp_send_frame(&ctx, window_title, w, h, pixels) < 0)
             break;
         report_caret(&ctx);
     }
+    free(pixels);
     return 0;
 }
