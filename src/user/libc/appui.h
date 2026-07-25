@@ -13,6 +13,20 @@ struct appui_rect {
     int h;
 };
 
+enum appui_button_variant {
+    APPUI_BTN_DEFAULT,
+    APPUI_BTN_PRIMARY,
+    APPUI_BTN_DANGER,
+    APPUI_BTN_GHOST,
+};
+
+enum appui_button_state {
+    APPUI_STATE_HOVERED = 1 << 0,
+    APPUI_STATE_PRESSED = 1 << 1,
+    APPUI_STATE_SELECTED = 1 << 2,
+    APPUI_STATE_DISABLED = 1 << 3,
+};
+
 static int appui_rgb6(int r, int g, int b) {
     if (r < 0) r = 0; if (r > 5) r = 5;
     if (g < 0) g = 0; if (g > 5) g = 5;
@@ -33,6 +47,14 @@ static int appui_inside(int x, int y, struct appui_rect r) {
     return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
 }
 
+static __attribute__((unused)) int appui_pointer_state(
+    struct appui_rect r, int x, int y, int buttons) {
+    if (!appui_inside(x, y, r))
+        return 0;
+    return APPUI_STATE_HOVERED |
+           ((buttons & 1) ? APPUI_STATE_PRESSED : 0);
+}
+
 static void appui_pixel(uint8_t *fb, int w, int h, int x, int y, int color) {
     if (x >= 0 && y >= 0 && x < w && y < h)
         fb[y * w + x] = (uint8_t)color;
@@ -48,6 +70,21 @@ static void appui_fill(uint8_t *fb, int w, int h, struct appui_rect r, int color
     for (int yy = 0; yy < r.h; yy++) {
         uint8_t *row = fb + (r.y + yy) * w + r.x;
         memset(row, color, (size_t)r.w);
+    }
+}
+
+static __attribute__((unused)) void appui_fill_blend(
+    uint8_t *fb, int w, int h, struct appui_rect r, int color, int alpha) {
+    if (r.x < 0) { r.w += r.x; r.x = 0; }
+    if (r.y < 0) { r.h += r.y; r.y = 0; }
+    if (r.x + r.w > w) r.w = w - r.x;
+    if (r.y + r.h > h) r.h = h - r.y;
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    for (int yy = 0; yy < r.h; yy++) {
+        uint8_t *row = fb + (r.y + yy) * w + r.x;
+        for (int xx = 0; xx < r.w; xx++)
+            row[xx] = (uint8_t)plt_blend(color, row[xx], alpha);
     }
 }
 
@@ -205,16 +242,85 @@ static void appui_text(uint8_t *fb, int w, int h, int x, int y,
     }
 }
 
-static void appui_button(uint8_t *fb, int w, int h, struct appui_rect r,
-                         const char *label, int active) {
-    int bg = active ? THEME_ACCENT_DIM : THEME_WIN_CONTROL;
-    int edge = active ? THEME_ACCENT : appui_gray(0);
+static void appui_button_ex(uint8_t *fb, int w, int h, struct appui_rect r,
+                            const char *label, int variant, int state) {
+    int bg = THEME_WIN_CONTROL;
+    int edge = THEME_WIN_BORDER_INACT;
+    int fg = THEME_TEXT;
+    int disabled = (state & APPUI_STATE_DISABLED) != 0;
+    int hovered = (state & APPUI_STATE_HOVERED) != 0 && !disabled;
+    int pressed = (state & APPUI_STATE_PRESSED) != 0 && !disabled;
+
+    if (variant == APPUI_BTN_PRIMARY) {
+        bg = THEME_ACCENT_DIM;
+        edge = THEME_ACCENT;
+    } else if (variant == APPUI_BTN_DANGER) {
+        bg = THEME_DANGER_DIM;
+        edge = THEME_DANGER;
+    } else if (variant == APPUI_BTN_GHOST) {
+        bg = THEME_PANEL_BG;
+        edge = THEME_PANEL_BG;
+    }
+    if (state & APPUI_STATE_SELECTED) {
+        bg = pressed ? THEME_SELECTION_BG : THEME_SELECTION_SOFT;
+        edge = THEME_ACCENT_DIM;
+    } else if (hovered) {
+        if (variant == APPUI_BTN_PRIMARY) {
+            bg = THEME_ACCENT;
+        } else if (variant == APPUI_BTN_DANGER) {
+            bg = plt_blend(THEME_DANGER, THEME_DANGER_DIM, 120);
+        } else {
+            bg = THEME_WIN_HOVER;
+            edge = variant == APPUI_BTN_GHOST ? THEME_WIN_HOVER :
+                                                THEME_FIELD_BORDER;
+        }
+    }
+    if (pressed && !(state & APPUI_STATE_SELECTED)) {
+        if (variant == APPUI_BTN_PRIMARY)
+            bg = THEME_ACCENT_SOFT;
+        else if (variant == APPUI_BTN_DANGER)
+            bg = THEME_DANGER_DIM;
+        else
+            bg = THEME_WIN_PRESSED;
+    }
+    if (hovered && !pressed &&
+        (variant == APPUI_BTN_PRIMARY || variant == APPUI_BTN_DANGER))
+        fg = THEME_TEXT_ON_LIGHT;
+    if (disabled) {
+        bg = THEME_PANEL_RAISED;
+        edge = THEME_DIVIDER;
+        fg = THEME_TEXT_FAINT;
+    }
+
     appui_fill_round(fb, w, h, r, edge);
     appui_fill_round(fb, w, h,
                      (struct appui_rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
                      bg);
-    appui_text(fb, w, h, r.x + 8, r.y + 6, label, THEME_TEXT, -1,
+    if (!(state & APPUI_STATE_DISABLED) && r.w > 8)
+        appui_fill(fb, w, h, (struct appui_rect){r.x + 4, r.y + 2, r.w - 8, 1},
+                   plt_blend(THEME_TEXT, bg, 28));
+
+    int label_w = appui_text_width(label);
+    int tx = r.x + appui_max(6, (r.w - label_w) / 2);
+    int ty = r.y + (r.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT +
+             (pressed ? 1 : 0);
+    appui_text(fb, w, h, tx, ty, label, fg, -1,
                (struct appui_rect){r.x + 4, r.y + 2, r.w - 8, r.h - 4});
+}
+
+static void appui_button(uint8_t *fb, int w, int h, struct appui_rect r,
+                         const char *label, int active) {
+    appui_button_ex(fb, w, h, r, label,
+                    active ? APPUI_BTN_PRIMARY : APPUI_BTN_DEFAULT, 0);
+}
+
+static __attribute__((unused)) void appui_field_frame(
+    uint8_t *fb, int w, int h, struct appui_rect r, int focused) {
+    int edge = focused ? THEME_FOCUS : THEME_FIELD_BORDER;
+    appui_fill_round(fb, w, h, r, edge);
+    appui_fill_round(fb, w, h,
+                     (struct appui_rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
+                     THEME_FIELD_BG);
 }
 
 static __attribute__((unused)) void appui_copy_text(char *dst, const char *src, int cap) {

@@ -2,6 +2,7 @@
 #include "fb.h"
 #include "font_builtin.h"
 #include "font_unicode.h"
+#include "io.h"
 #include "irq.h"
 #include "paging.h"
 
@@ -12,8 +13,62 @@ enum {
 
 static volatile uint8_t *fb_mem = (uint8_t *)KERNEL_FB_VIRT;
 static struct gfx_info fb_info;
+static struct gfx_info fb_boot_info;
+static uint32_t fb_page_offset;
+static int fb_boot_info_valid;
 static int fb_ready;
 static int display_owner_pid;
+
+enum {
+    VBE_DISPI_INDEX_PORT = 0x01CE,
+    VBE_DISPI_DATA_PORT = 0x01CF,
+    VBE_DISPI_INDEX_ID = 0,
+    VBE_DISPI_INDEX_XRES = 1,
+    VBE_DISPI_INDEX_YRES = 2,
+    VBE_DISPI_INDEX_BPP = 3,
+    VBE_DISPI_INDEX_ENABLE = 4,
+    VBE_DISPI_INDEX_VIRT_WIDTH = 6,
+    VBE_DISPI_INDEX_X_OFFSET = 8,
+    VBE_DISPI_INDEX_Y_OFFSET = 9,
+    VBE_DISPI_ID0 = 0xB0C0,
+    VBE_DISPI_ID5 = 0xB0C5,
+    VBE_DISPI_ENABLED = 0x01,
+    VBE_DISPI_LFB_ENABLED = 0x40,
+};
+
+static uint16_t bochs_vbe_read(uint16_t index) {
+    outw(VBE_DISPI_INDEX_PORT, index);
+    return inw(VBE_DISPI_DATA_PORT);
+}
+
+static void bochs_vbe_write(uint16_t index, uint16_t value) {
+    outw(VBE_DISPI_INDEX_PORT, index);
+    outw(VBE_DISPI_DATA_PORT, value);
+}
+
+static int bochs_vbe_available(void) {
+    uint16_t id = bochs_vbe_read(VBE_DISPI_INDEX_ID);
+    return id >= VBE_DISPI_ID0 && id <= VBE_DISPI_ID5;
+}
+
+static int bochs_vbe_program(uint32_t width, uint32_t height) {
+    if (width > 0xFFFFu || height > 0xFFFFu)
+        return -1;
+    bochs_vbe_write(VBE_DISPI_INDEX_ENABLE, 0);
+    bochs_vbe_write(VBE_DISPI_INDEX_XRES, (uint16_t)width);
+    bochs_vbe_write(VBE_DISPI_INDEX_YRES, (uint16_t)height);
+    bochs_vbe_write(VBE_DISPI_INDEX_BPP, 32);
+    bochs_vbe_write(VBE_DISPI_INDEX_VIRT_WIDTH, (uint16_t)width);
+    bochs_vbe_write(VBE_DISPI_INDEX_X_OFFSET, 0);
+    bochs_vbe_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+    bochs_vbe_write(VBE_DISPI_INDEX_ENABLE,
+                    VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+    if (bochs_vbe_read(VBE_DISPI_INDEX_XRES) != width ||
+        bochs_vbe_read(VBE_DISPI_INDEX_YRES) != height ||
+        bochs_vbe_read(VBE_DISPI_INDEX_BPP) != 32)
+        return -1;
+    return 0;
+}
 
 static uint32_t palette_lut[256];
 static int palette_lut_ready;
@@ -178,13 +233,19 @@ void fb_set_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
         return;
     if (!(bpp == 8 || bpp == 16 || bpp == 24 || bpp == 32))
         return;
-    if (pitch * height > KERNEL_FB_SIZE)
+    uint32_t page_offset = (uint32_t)phys_addr & 0xFFFu;
+    if ((uint64_t)pitch * height + page_offset > KERNEL_FB_SIZE)
         return;
-    fb_mem = (uint8_t *)(KERNEL_FB_VIRT + ((uint32_t)phys_addr & 0xFFFu));
+    fb_page_offset = page_offset;
+    fb_mem = (uint8_t *)(KERNEL_FB_VIRT + fb_page_offset);
     fb_info.width = width;
     fb_info.height = height;
     fb_info.pitch = pitch;
     fb_info.bpp = bpp;
+    if (!fb_boot_info_valid) {
+        fb_boot_info = fb_info;
+        fb_boot_info_valid = 1;
+    }
     fb_ready = 1;
 }
 
@@ -202,6 +263,44 @@ void fb_init(void) {
 void fb_get_info(struct gfx_info *out) {
     if (out)
         *out = fb_info;
+}
+
+int fb_set_mode(uint32_t width, uint32_t height) {
+    if (!fb_ready || width < 640u || height < 480u ||
+        width > 1920u || height > 1080u)
+        return -1;
+    uint64_t bytes = (uint64_t)width * height * 4u;
+    if (bytes + fb_page_offset > KERNEL_FB_SIZE || !bochs_vbe_available())
+        return -1;
+    if (fb_info.width == width && fb_info.height == height &&
+        fb_info.bpp == 32)
+        return 0;
+
+    struct gfx_info previous = fb_info;
+    uint32_t flags = irq_save();
+    if (bochs_vbe_program(width, height) < 0) {
+        (void)bochs_vbe_program(previous.width, previous.height);
+        irq_restore(flags);
+        return -1;
+    }
+    uint32_t virtual_width = bochs_vbe_read(VBE_DISPI_INDEX_VIRT_WIDTH);
+    if (virtual_width < width)
+        virtual_width = width;
+    fb_info.width = width;
+    fb_info.height = height;
+    fb_info.pitch = virtual_width * 4u;
+    fb_info.bpp = 32;
+    irq_restore(flags);
+    return 0;
+}
+
+int fb_restore_boot_mode(void) {
+    if (!fb_boot_info_valid)
+        return -1;
+    if (fb_info.width == fb_boot_info.width &&
+        fb_info.height == fb_boot_info.height)
+        return 0;
+    return fb_set_mode(fb_boot_info.width, fb_boot_info.height);
 }
 
 int fb_clear(uint8_t color) {

@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 #define GUIAPP_MAGIC 0x47554941u
-#define GUIAPP_MAX_W 1280
-#define GUIAPP_MAX_H 800
+#define GUIAPP_MAX_W 1920
+#define GUIAPP_MAX_H 1080
 #define GUIAPP_TITLE_MAX 32
 #define GUIAPP_PATH_MAX 128
 #define GUIAPP_TEXT_MAX 32

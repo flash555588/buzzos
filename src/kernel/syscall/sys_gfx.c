@@ -115,8 +115,21 @@ int sys_gfx_release(uint32_t a, uint32_t b, uint32_t c,
                     uint32_t d, uint32_t e) {
     (void)a; (void)b; (void)c; (void)d; (void)e;
     int pid = task_get_pid();
+    if (!user_owns_display())
+        return -1;
+    (void)fb_restore_boot_mode();
+    mouse_clamp_to_screen();
     if (fb_display_release(pid) < 0)
         return -1;
     console_activate(1);
+    return 0;
+}
+
+int sys_gfx_set_mode(uint32_t width, uint32_t height, uint32_t c,
+                     uint32_t d, uint32_t e) {
+    (void)c; (void)d; (void)e;
+    if (!user_owns_display() || fb_set_mode(width, height) < 0)
+        return -1;
+    mouse_clamp_to_screen();
     return 0;
 }

@@ -121,5 +121,6 @@ void syscall_init(void) {
     syscall_table[SYS_AUDIO_FLUSH] = sys_audio_flush;
     syscall_table[SYS_GFX_ACQUIRE] = sys_gfx_acquire;
     syscall_table[SYS_GFX_RELEASE] = sys_gfx_release;
+    syscall_table[SYS_GFX_SET_MODE] = sys_gfx_set_mode;
     serial_puts("[syscall] VFS-backed syscalls ready\n");
 }

@@ -10,6 +10,9 @@ static char display[EXPR_CAP];
 static int expr_len;
 static int parse_error;
 static int prev_buttons;
+static int pointer_x = -1;
+static int pointer_y = -1;
+static int pointer_buttons;
 static const char *parse_p;
 
 static void set_display(const char *s) {
@@ -226,16 +229,34 @@ static void press_label(const char *s) {
 }
 
 static void render(void) {
-    appui_fill(pixels, W, H, (struct appui_rect){0, 0, W, H}, appui_gray(3));
-    appui_fill(pixels, W, H, (struct appui_rect){16, 18, W - 32, 72}, 15);
-    appui_border(pixels, W, H, (struct appui_rect){16, 18, W - 32, 72}, appui_gray(8), appui_gray(1));
-    appui_text(pixels, W, H, 28, 43, display[0] ? display : "0", 0, -1,
-               (struct appui_rect){26, 26, W - 52, 52});
-    for (int i = 0; i < (int)(sizeof(labels) / sizeof(labels[0])); i++)
-        appui_button(pixels, W, H, button_rect(i), labels[i], strcmp(labels[i], "=") == 0);
+    appui_fill(pixels, W, H, (struct appui_rect){0, 0, W, H}, THEME_APP_BG);
+    struct appui_rect display_rect = {16, 18, W - 32, 72};
+    appui_field_frame(pixels, W, H, display_rect, 0);
+    const char *value = display[0] ? display : "0";
+    int value_w = appui_text_width(value);
+    int value_x = display_rect.x + display_rect.w - 12 - value_w;
+    if (value_x < display_rect.x + 12)
+        value_x = display_rect.x + 12;
+    appui_text(pixels, W, H, value_x, 43, value, THEME_FIELD_TEXT, -1,
+               (struct appui_rect){display_rect.x + 10, display_rect.y + 8,
+                                   display_rect.w - 20, display_rect.h - 16});
+    for (int i = 0; i < (int)(sizeof(labels) / sizeof(labels[0])); i++) {
+        struct appui_rect r = button_rect(i);
+        int variant = APPUI_BTN_DEFAULT;
+        if (strcmp(labels[i], "=") == 0)
+            variant = APPUI_BTN_PRIMARY;
+        else if (strcmp(labels[i], "C") == 0)
+            variant = APPUI_BTN_DANGER;
+        appui_button_ex(pixels, W, H, r, labels[i], variant,
+                        appui_pointer_state(r, pointer_x, pointer_y,
+                                            pointer_buttons));
+    }
 }
 
 static void mouse(int x, int y, int buttons) {
+    pointer_x = x;
+    pointer_y = y;
+    pointer_buttons = buttons;
     int pressed = (buttons & 1) && !(prev_buttons & 1);
     prev_buttons = buttons;
     if (!pressed)

@@ -223,7 +223,7 @@ def main():
                 "/BuzzOS\n"
                 "    protocol: multiboot2\n"
                 "    kernel_path: boot():/kernel.elf\n"
-                "    resolution: 1280x800\n"
+                "    resolution: 1600x900\n"
             ).encode("ascii"),
         },
         {

@@ -23,7 +23,15 @@ if ($LASTEXITCODE -ne 0) { throw "Could not generate HTML element lookup" }
 New-Item -ItemType Directory -Force $BuildDir | Out-Null
 $generator = Join-Path $BuildDir "gen_parser.exe"
 $generatorSource = Join-Path $Workspace "libcss/src/parse/properties/css_property_parser_gen.c"
-& clang $generatorSource -D_CRT_SECURE_NO_WARNINGS -o $generator
+$zig = Get-Command zig.exe -ErrorAction SilentlyContinue
+if ($null -ne $zig) {
+    # The generator is a host utility, not a freestanding BuzzOS binary.
+    # Prefer Zig's bundled Windows libc when the machine has no MSVC SDK;
+    # this keeps the otherwise freestanding build independent of host headers.
+    & $zig.Source cc $generatorSource -D_CRT_SECURE_NO_WARNINGS -o $generator
+} else {
+    & clang $generatorSource -D_CRT_SECURE_NO_WARNINGS -o $generator
+}
 if ($LASTEXITCODE -ne 0) { throw "Could not build CSS property generator" }
 $propertyRoot = Join-Path $Workspace "libcss/src/parse/properties"
 foreach ($line in Get-Content (Join-Path $propertyRoot "properties.gen")) {
@@ -97,7 +105,12 @@ Get-ChildItem (Join-Path $nsutils "src") -Recurse -Filter *.c |
 if ($LASTEXITCODE -ne 0) { throw "Could not compile nshtmltest" }
 $objects = @("build/user/crt0.o", "build/user/libc.o",
              (Join-Path $BuildDir "nshtmltest.o")) + @($compiledObjects)
-& ld.lld -m elf_i386 -T build/user/user.ld -nostdlib -o $Output @objects
+$responseFile = Join-Path $BuildDir "link-nshtmltest.rsp"
+$linkArguments = @("-m", "elf_i386", "-T", "build/user/user.ld",
+                   "-nostdlib", "-o", $Output) + $objects
+$linkArguments | ForEach-Object { '"' + $_ + '"' } |
+    Set-Content -Encoding Ascii $responseFile
+& ld.lld "@$responseFile"
 if ($LASTEXITCODE -ne 0) { throw "Could not link nshtmltest" }
 & llvm-objcopy --strip-sections $Output
 if ($LASTEXITCODE -ne 0) { throw "Could not strip nshtmltest" }

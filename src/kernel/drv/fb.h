@@ -15,6 +15,8 @@ void fb_set_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
                         uint32_t pitch, uint32_t bpp);
 void fb_init(void);
 void fb_get_info(struct gfx_info *out);
+int  fb_set_mode(uint32_t width, uint32_t height);
+int  fb_restore_boot_mode(void);
 uint32_t fb_palette_rgb(uint8_t index);
 
 int  fb_clear(uint8_t color);

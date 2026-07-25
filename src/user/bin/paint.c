@@ -25,6 +25,9 @@ static int lx;
 static int ly;
 static int w = 560;
 static int h = 360;
+static int pointer_x = -1;
+static int pointer_y = -1;
+static int pointer_buttons;
 
 static const int palette[] = {
     0, 15, 196, 46, 21, 226, 201, 208,
@@ -180,25 +183,45 @@ static void fill_canvas(int x, int y, int c) {
 }
 
 static void render(void) {
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, appui_gray(3));
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, 70}, appui_gray(2));
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, 70}, THEME_TOOLBAR_BG);
     const char *tools[] = {"Brush", "Erase", "Line", "Rect", "Fill"};
     const char *tools_short[] = {"B", "E", "Line", "Rect", "Fill"};
     int bw = toolbar_button_w();
-    for (int i = 0; i < 5; i++)
-        appui_button(pixels, w, h, tool_rect(i), bw < 54 ? tools_short[i] : tools[i], tool == i);
-    appui_button(pixels, w, h, clear_rect(), bw < 54 ? "Clr" : "Clear", 0);
+    for (int i = 0; i < 5; i++) {
+        struct appui_rect r = tool_rect(i);
+        int state = appui_pointer_state(r, pointer_x, pointer_y, pointer_buttons);
+        if (tool == i)
+            state |= APPUI_STATE_SELECTED;
+        appui_button_ex(pixels, w, h, r,
+                        bw < 54 ? tools_short[i] : tools[i],
+                        APPUI_BTN_DEFAULT, state);
+    }
+    struct appui_rect clear = clear_rect();
+    appui_button_ex(pixels, w, h, clear, bw < 54 ? "Clr" : "Clear",
+                    APPUI_BTN_DANGER,
+                    appui_pointer_state(clear, pointer_x, pointer_y,
+                                        pointer_buttons));
     for (int i = 0; i < palette_count(); i++) {
         struct appui_rect r = color_rect(i);
-        appui_fill(pixels, w, h, r, palette[i]);
-        appui_border(pixels, w, h, r, i == color ? 15 : appui_gray(8), appui_gray(1));
+        int edge = i == color ? THEME_FOCUS : THEME_FIELD_BORDER;
+        appui_fill(pixels, w, h, r, edge);
+        appui_fill(pixels, w, h,
+                   (struct appui_rect){r.x + 2, r.y + 2, r.w - 4, r.h - 4},
+                   palette[i]);
+        if (i == color)
+            appui_border(pixels, w, h,
+                         (struct appui_rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
+                         THEME_TEXT, THEME_DESKTOP_DEEP);
     }
 
     int view_w = appui_max(1, w - CX * 2);
     int view_h = appui_max(1, h - CY - 16);
     if (view_w > CANVAS_MAX_W) view_w = CANVAS_MAX_W;
     if (view_h > CANVAS_MAX_H) view_h = CANVAS_MAX_H;
-    appui_fill(pixels, w, h, (struct appui_rect){CX - 1, CY - 1, view_w + 2, view_h + 2}, appui_gray(1));
+    appui_fill(pixels, w, h,
+               (struct appui_rect){CX - 1, CY - 1, view_w + 2, view_h + 2},
+               THEME_FIELD_BORDER);
     for (int y = 0; y < view_h; y++)
         for (int x = 0; x < view_w; x++)
             pixels[(CY + y) * w + CX + x] = canvas[y * CANVAS_MAX_W + x];
@@ -234,7 +257,9 @@ static void render(void) {
 static void render_canvas_view(void) {
     int view_w = canvas_view_w();
     int view_h = canvas_view_h();
-    appui_fill(pixels, w, h, (struct appui_rect){CX - 1, CY - 1, view_w + 2, view_h + 2}, appui_gray(1));
+    appui_fill(pixels, w, h,
+               (struct appui_rect){CX - 1, CY - 1, view_w + 2, view_h + 2},
+               THEME_FIELD_BORDER);
     for (int y = 0; y < view_h; y++)
         for (int x = 0; x < view_w; x++)
             pixels[(CY + y) * w + CX + x] = canvas[y * CANVAS_MAX_W + x];
@@ -270,6 +295,9 @@ static void render_canvas_view(void) {
 }
 
 static int mouse(int x, int y, int buttons) {
+    pointer_x = x;
+    pointer_y = y;
+    pointer_buttons = buttons;
     int canvas_dirty = 0;
     for (int i = 0; i < 5; i++)
         if ((buttons & 1) && appui_inside(x, y, tool_rect(i))) {
