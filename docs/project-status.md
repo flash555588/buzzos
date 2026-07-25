@@ -31,6 +31,8 @@ filesystem, and a user-space GUI app manager.
 - GUI apps: `textedit`, `paint`, and `calculator`.
 - User GUI helpers: seeded apps use `src/user/libc/appui.h` for lightweight
   controls and `src/user/libc/guiapp.h` for the desktop-hosted app protocol.
+  Live-resize / composition trade-offs (1:1 blit, configure coalesce, SHM
+  seqlock stride) are documented in `docs/user-gui.md`.
 - App packaging: optional `.app` manifests provide `name`, `kind`, `version`,
   `summary`, `state`, `source`, and `readme` metadata for the App Manager.
 - App registry: `tools/gen_app_registry.py` generates `build/generated/app_registry.h`

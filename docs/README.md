@@ -21,7 +21,7 @@
   - multiboot2 入口、中断入口、IRQ EOI
   - `switch_context`、`setjmp/longjmp` 和汇编调试
 - 想看当前项目成熟度、验证方式和下一步路线：[Project Status](project-status.md)。
-- 想看用户态 GUI 和 `/fs/apps` app 示例：[User GUI Example](user-gui.md)。
+- 想看用户态 GUI 和 `/fs/apps` app 示例：[User GUI Example](user-gui.md)（含 live resize / 合成妥协与 SHM stride 约定）。
 - 想看阶段性项目日志和本轮成熟化记录：[Changelog](../CHANGELOG.md)。
 
 如果你只是想快速看项目入口，再回到仓库根目录的 [README.md](../README.md)。

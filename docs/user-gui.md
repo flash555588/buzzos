@@ -65,6 +65,88 @@ UTF-8 selection; Browser, Files dialogs, and Calculator copy/cut their current
 field. Paste is delivered through the same `GUIAPP_EVT_TEXT` path used by the
 system input method.
 
+## Live Resize And Composition (Design Compromises)
+
+This section records intentional trade-offs in `/bin/gui` and `guiapp`, not
+temporary hacks. Revisit them only with a clear upgrade path (for example GPU
+filtering), not by re-enabling known-bad shortcuts.
+
+### Goals (aligned with modern compositors)
+
+- Window chrome geometry updates immediately while the user drags an edge.
+- Apps receive live size changes (`GUIAPP_EVT_RESIZE`) so they can re-layout.
+- Until the app presents a matching frame, the desktop must not show torn or
+  wrongly strided pixels.
+- Maximize, display-mode changes, and mouse-up always push a final size.
+
+### What we do today
+
+| Layer | Behavior |
+| --- | --- |
+| Configure publish | Desktop writes the latest content size into the shared surface header (`configure_width` / `configure_height`) on geometry changes. |
+| Event path | `guiapp_read_event` overlays those fields onto `INIT` / `RESIZE` so queued intermediate sizes still deliver **current** geometry (coalesce). |
+| In-flight limit | At most one RESIZE is outstanding per app until a frame is presented (`resize_inflight`). Paces configures to the app’s present rate instead of flooding the event pipe every mouse sample. |
+| Force sync | Mouse-up after edge drag, maximize, and mode change call `sync_app_size(..., force)` so the final size is never stuck behind in-flight. |
+| 1:1 UI blit | Normal apps (`GUIAPP_FRAME_FULL` / `DIRTY`) are composited **1:1** into the content rect (top-left). If the surface is temporarily smaller, fill body-colored margins; if larger, clip. **No fractional nearest-neighbor stretch** of text/UI while the surface lags the chrome. |
+| Seqlock blit | Pixel copy always takes `shared->width` / `shared->height` **inside** the sequence lock (`blit_shared_1to1` / `blit_shared_scaled`). Never use a stale session `surface_w` as row stride. |
+
+### Why not “stretch the last buffer like DWM / Wayland”?
+
+Modern desktops **do** scale the previous client buffer to the new window size
+while the client catches up. That looks smooth when scaling is GPU-filtered
+(bilinear or better).
+
+BuzzOS software-composes an 8-bit palette framebuffer with nearest-neighbor
+only. Fractional stretch (especially ratios near 1, such as 501/500) turns
+high-frequency UI and text into **moiré / banding** that shimmers every mouse
+pixel during a drag. That is a product choice under current constraints:
+
+- **Keep:** 1:1 blit + solid margins while the app lags (may flash a body-color
+  strip; no moiré).
+- **Do not re-enable:** fractional nearest-neighbor live-resize stretch for
+  normal UI, unless a higher-quality filter exists.
+- **Later upgrade path:** filtered stretch preview (true modern live-resize
+  look) *in addition to* the seqlock stride rules below—not instead of them.
+
+### Critical fix: SHM stride vs session cache (FileManager striping)
+
+Heavy apps (Files, Browser, Paint, …) take longer to re-layout and present.
+During live resize they often write a **new** buffer size into SHM before the
+desktop session fields `surface_w` / `surface_h` are updated from the frame
+pipe. If composition memcpy’s with the **old** width as stride against a
+**new** row layout, every scanline misaligns → diagonal **stripes / 花纹**.
+
+TextEdit is small and fast, so the race window is short; denser apps hit it
+reliably.
+
+**Rule (do not regress):** under a stable even `shared->sequence`, read
+`shared->width` and `shared->height` in the same critical section as the pixel
+copy; retry if sequence or dimensions change. Session dimensions remain for
+damage bookkeeping and policy, not as the sole source of truth for SHM layout
+at blit time.
+
+### How this differs from “modern OS” defaults
+
+| Topic | Typical modern OS | BuzzOS compromise |
+| --- | --- | --- |
+| Live preview while client lags | GPU-scale last buffer to new size | 1:1 + body margins (no cheap filtered scale) |
+| Continuous configure during drag | Yes | Yes, but one in-flight RESIZE; size coalesced via SHM configure fields |
+| Tear-free present | Compositor + client protocol | Seqlock on shared surface + stride from live header |
+
+### Implementation map
+
+- Desktop: `src/user/bin/gui.c` — `publish_app_configure`, `sync_app_size`,
+  `flush_pending_app_resizes`, `blit_shared_1to1`, `blit_shared_scaled`,
+  `draw_app_window`, `scaled_view_rect`.
+- Protocol: `src/user/libc/guiapp.h` / `guiapp.c` — `configure_width` /
+  `configure_height` on `struct guiapp_shared_surface`; overlay in
+  `guiapp_read_event`.
+
+Apps that only call `guiapp_read_event` and present full (or dirty) frames get
+coalesced live sizes automatically; they should re-layout from event
+`width` / `height` and not assume intermediate sizes still in the pipe are
+authoritative without the configure overlay.
+
 The desktop Terminal keeps a UTF-8 input mirror for clipboard operations, and
 the shell line editor accepts multibyte input instead of filtering bytes above
 ASCII. Left/Right, Backspace, and Delete move across complete UTF-8 characters.

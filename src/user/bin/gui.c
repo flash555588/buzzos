@@ -122,7 +122,11 @@ struct app_session {
     int scale_source_h;
     int want_w;
     int want_h;
-    int resize_dirty;
+    /* Written from the UI thread and the app reader thread. */
+    volatile int resize_dirty;
+    /* 1 after RESIZE/INIT sent until a frame arrives — paces configures to
+     * the app's present rate (modern compositor in-flight limit). */
+    volatile int resize_inflight;
     int reader_tid;
     volatile int reader_dead;
     volatile int closing;
@@ -867,6 +871,8 @@ static int app_send_text(int slot, const char *value) {
     return write_full(app_sessions[slot].to_fd, &ev, (int)sizeof(ev));
 }
 
+static void app_target_size(int id, int *tw, int *th);
+
 static int app_read_frame(int slot) {
     if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used)
         return -1;
@@ -957,15 +963,32 @@ static int app_read_frame(int slot) {
     app_sessions[slot].source_w = source_w;
     app_sessions[slot].source_h = source_h;
     app_sessions[slot].last_sequence = frame.sequence;
+    /* App presented — allow the next live-resize configure. */
+    app_sessions[slot].resize_inflight = 0;
     copy_text(app_sessions[slot].title, frame.title, sizeof(app_sessions[slot].title));
     windows[WIN_APP_BASE + slot].title = app_sessions[slot].title[0]
         ? app_sessions[slot].title : "Application";
     if (title_changed && focus == WIN_APP_BASE + slot)
         topbar_damage();
     clamp_scroll(WIN_APP_BASE + slot);
+    {
+        int tw;
+        int th;
+        app_target_size(WIN_APP_BASE + slot, &tw, &th);
+        if (tw != app_sessions[slot].want_w || th != app_sessions[slot].want_h)
+            app_sessions[slot].resize_dirty = 1;
+    }
     if (full_change) {
-        win_damage(WIN_APP_BASE + slot);
-        dock_damage();
+        /* Title changes affect the Dock label; size-only frames must not
+         * thrash the whole dock.  While the user is live-dragging this
+         * window's edge, the mouse path already damages the chrome — only
+         * mark the content dirty so we do not fight a second full redraw. */
+        if (title_changed)
+            dock_damage();
+        if (resize_win == WIN_APP_BASE + slot)
+            app_note_dirty(slot, (struct rect){0, 0, source_w, source_h});
+        else
+            win_damage(WIN_APP_BASE + slot);
     } else {
         struct rect dirty = frame.type == GUIAPP_FRAME_DIRTY
             ? (struct rect){frame.x, frame.y, frame.dirty_w, frame.dirty_h}
@@ -1004,7 +1027,24 @@ static void app_target_size(int id, int *tw, int *th) {
     *th = clamp_i(c.h, 140, APP_SURFACE_MAX_H);
 }
 
-static int sync_app_size(int id) {
+/* Publish latest content size into SHM so apps coalesce live-resize. */
+static void publish_app_configure(int slot) {
+    if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used ||
+        !app_sessions[slot].shared)
+        return;
+    int tw;
+    int th;
+    app_target_size(WIN_APP_BASE + slot, &tw, &th);
+    if (tw <= 0 || th <= 0)
+        return;
+    app_sessions[slot].shared->configure_width = (uint32_t)tw;
+    app_sessions[slot].shared->configure_height = (uint32_t)th;
+    __sync_synchronize();
+}
+
+/* force=0: one configure in flight until the app presents (live resize).
+ * force=1: mouse-up / maximize / mode change — always push final size. */
+static int sync_app_size(int id, int force) {
     int slot = app_slot_for_win(id);
     if (slot < 0 || !app_sessions[slot].used)
         return -1;
@@ -1013,17 +1053,19 @@ static int sync_app_size(int id) {
     app_target_size(id, &target_w, &target_h);
     if (target_w <= 0 || target_h <= 0)
         return -1;
-    /* want_w/want_h are the last dimensions already submitted. Do not flood
-     * the event pipe while waiting for the application's next frame. */
+    publish_app_configure(slot);
     if (target_w == app_sessions[slot].want_w &&
         target_h == app_sessions[slot].want_h) {
         app_sessions[slot].resize_dirty = 0;
         return 0;
     }
+    if (!force && app_sessions[slot].resize_inflight)
+        return 0;
     app_sessions[slot].want_w = target_w;
     app_sessions[slot].want_h = target_h;
     if (app_send_event(slot, GUIAPP_EVT_RESIZE, 0, 0, 0, 0, 0) < 0)
         return -1;
+    app_sessions[slot].resize_inflight = 1;
     app_sessions[slot].resize_dirty = 0;
     scroll_x[id] = 0;
     scroll_y[id] = 0;
@@ -1056,6 +1098,8 @@ static void run_app_with_arg(const char *path, const char *argument) {
     shared->capacity_pixels = surface_pixels;
     shared->width = 0;
     shared->height = 0;
+    shared->configure_width = 0;
+    shared->configure_height = 0;
 
     int ev_pipe[2] = {-1, -1};
     int frame_pipe[2] = {-1, -1};
@@ -1119,6 +1163,7 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].surface_w = 0;
     app_sessions[slot].surface_h = 0;
     app_sessions[slot].resize_dirty = 0;
+    app_sessions[slot].resize_inflight = 0;
     app_sessions[slot].reader_dead = 0;
     app_sessions[slot].closing = 0;
     app_sessions[slot].shm_token = mapping.token;
@@ -1131,6 +1176,7 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].caret_y = 0;
     app_sessions[slot].caret_valid = 0;
     copy_text(app_sessions[slot].title, "Application", sizeof(app_sessions[slot].title));
+    publish_app_configure(slot);
 
     app_sessions[slot].reader_tid = spawn(app_reader_functions[slot]);
     if (app_sessions[slot].reader_tid < 0 ||
@@ -1139,6 +1185,8 @@ static void run_app_with_arg(const char *path, const char *argument) {
         close_window(id);
         return;
     }
+    /* INIT is an in-flight configure until the first presented frame. */
+    app_sessions[slot].resize_inflight = 1;
 
     copy_text(msg, "started pid ", sizeof(msg));
     append_uint(msg, (unsigned int)pid, sizeof(msg));
@@ -1332,23 +1380,174 @@ static struct rect content_rect(int id) {
                          r.w - 30, r.h - WINDOW_TITLE_H - 44};
 }
 
+/* Fit the source aspect ratio into the current content rect (letterboxed). */
 static struct rect scaled_view_rect(int id, int slot) {
     struct rect c = content_rect(id);
-    int aw = app_sessions[slot].surface_w;
-    int ah = app_sessions[slot].surface_h;
     int source_w = app_sessions[slot].source_w;
     int source_h = app_sessions[slot].source_h;
-    if (!app_sessions[slot].scaled_surface || aw <= 0 || ah <= 0 ||
-        source_w <= 0 || source_h <= 0)
+    if (!app_sessions[slot].scaled_surface || source_w <= 0 || source_h <= 0)
         return c;
-    int vw = aw;
-    int vh = aw * source_h / source_w;
-    if (vh > ah) {
-        vh = ah;
-        vw = ah * source_w / source_h;
+    int vw = c.w;
+    int vh = c.w * source_h / source_w;
+    if (vh > c.h) {
+        vh = c.h;
+        vw = c.h * source_w / source_h;
     }
-    return (struct rect){c.x + (aw - vw) / 2,
-                         c.y + (ah - vh) / 2, vw, vh};
+    if (vw < 1)
+        vw = 1;
+    if (vh < 1)
+        vh = 1;
+    return (struct rect){c.x + (c.w - vw) / 2,
+                         c.y + (c.h - vh) / 2, vw, vh};
+}
+
+/* Nearest-neighbor scale into dst.  Source size is taken from the shared
+ * header inside the seqlock so a concurrent resize cannot pair a new
+ * buffer layout with a stale stride (that reads as diagonal striping). */
+static int blit_shared_scaled(int slot, const uint8_t *pixels, struct rect dst) {
+    if (dst.w <= 0 || dst.h <= 0)
+        return 1;
+    struct rect visible = intersect_rect(dst, compose_clip);
+    if (visible.w <= 0 || visible.h <= 0)
+        return 1;
+    struct guiapp_shared_surface *shared = app_sessions[slot].shared;
+    if (!shared || !pixels)
+        return 0;
+    int vw = dst.w;
+    int vh = dst.h;
+    int dx = dst.x;
+    int dy = dst.y;
+    int copied = 0;
+    for (int attempt = 0; attempt < 100 && !copied; attempt++) {
+        uint32_t sequence = shared->sequence;
+        if (sequence & 1u) {
+            yield();
+            continue;
+        }
+        __sync_synchronize();
+        int aw = (int)shared->width;
+        int ah = (int)shared->height;
+        if (aw <= 0 || ah <= 0 ||
+            aw > APP_SURFACE_MAX_W || ah > APP_SURFACE_MAX_H) {
+            yield();
+            continue;
+        }
+        int use_map = vw <= APP_SURFACE_MAX_W && vh <= APP_SURFACE_MAX_H;
+        if (use_map &&
+            (app_sessions[slot].scale_map_w != vw ||
+             app_sessions[slot].scale_map_h != vh ||
+             app_sessions[slot].scale_source_w != aw ||
+             app_sessions[slot].scale_source_h != ah)) {
+            for (int x = 0; x < vw; x++)
+                app_sessions[slot].xmap[x] = (uint16_t)(x * aw / vw);
+            for (int y = 0; y < vh; y++)
+                app_sessions[slot].ymap[y] = (uint16_t)(y * ah / vh);
+            app_sessions[slot].scale_map_w = vw;
+            app_sessions[slot].scale_map_h = vh;
+            app_sessions[slot].scale_source_w = aw;
+            app_sessions[slot].scale_source_h = ah;
+        }
+        int xscale = vw / aw;
+        int yscale = vh / ah;
+        int integer_scale = xscale > 0 && yscale > 0 &&
+            xscale * aw == vw && yscale * ah == vh;
+        if (integer_scale) {
+            int first_x = visible.x - dx;
+            int cached_sy = -1;
+            for (int y = 0; y < visible.h; y++) {
+                uint8_t *row = fb + (visible.y + y) * sw + visible.x;
+                int sy = (visible.y + y - dy) / yscale;
+                if (sy != cached_sy) {
+                    const uint8_t *src = pixels + sy * aw;
+                    int out = 0;
+                    int pos = first_x;
+                    while (out < visible.w) {
+                        int sx = pos / xscale;
+                        int run = xscale - pos % xscale;
+                        if (run > visible.w - out)
+                            run = visible.w - out;
+                        memset(scaled_scanline + out, src[sx], (size_t)run);
+                        out += run;
+                        pos += run;
+                    }
+                    cached_sy = sy;
+                }
+                memcpy(row, scaled_scanline, (size_t)visible.w);
+            }
+        } else if (use_map) {
+            int cached_sy = -1;
+            for (int y = 0; y < visible.h; y++) {
+                uint8_t *row = fb + (visible.y + y) * sw + visible.x;
+                int sy = app_sessions[slot].ymap[visible.y + y - dy];
+                if (sy != cached_sy) {
+                    const uint8_t *src = pixels + sy * aw;
+                    int sx0 = visible.x - dx;
+                    for (int x = 0; x < visible.w; x++)
+                        scaled_scanline[x] =
+                            src[app_sessions[slot].xmap[sx0 + x]];
+                    cached_sy = sy;
+                }
+                memcpy(row, scaled_scanline, (size_t)visible.w);
+            }
+        } else {
+            for (int y = 0; y < visible.h; y++) {
+                uint8_t *row = fb + (visible.y + y) * sw + visible.x;
+                int sy = (visible.y + y - dy) * ah / vh;
+                const uint8_t *src = pixels + sy * aw;
+                for (int xx = 0; xx < visible.w; xx++)
+                    row[xx] = src[(visible.x - dx + xx) * aw / vw];
+            }
+        }
+        __sync_synchronize();
+        copied = shared->sequence == sequence &&
+            shared->width == (uint32_t)aw &&
+            shared->height == (uint32_t)ah;
+        if (!copied && (attempt & 3) == 3)
+            yield();
+    }
+    return copied;
+}
+
+/* 1:1 blit of the live shared buffer into content (top-left).  Stride always
+ * comes from shared->width inside the seqlock — never from a stale
+ * session surface_w (FileManager-sized frames made this look like 花纹). */
+static int blit_shared_1to1(int slot, const uint8_t *pixels, struct rect content) {
+    struct guiapp_shared_surface *shared = app_sessions[slot].shared;
+    if (!shared || !pixels || content.w <= 0 || content.h <= 0)
+        return 0;
+    int copied = 0;
+    for (int attempt = 0; attempt < 100 && !copied; attempt++) {
+        uint32_t sequence = shared->sequence;
+        if (sequence & 1u) {
+            yield();
+            continue;
+        }
+        __sync_synchronize();
+        int aw = (int)shared->width;
+        int ah = (int)shared->height;
+        if (aw <= 0 || ah <= 0 ||
+            aw > APP_SURFACE_MAX_W || ah > APP_SURFACE_MAX_H) {
+            yield();
+            continue;
+        }
+        struct rect src = {content.x, content.y, aw, ah};
+        struct rect visible = intersect_rect(
+            intersect_rect(src, content), compose_clip);
+        if (visible.w > 0 && visible.h > 0) {
+            int sx = visible.x - content.x;
+            int sy = visible.y - content.y;
+            for (int y = 0; y < visible.h; y++)
+                memcpy(fb + (visible.y + y) * sw + visible.x,
+                       pixels + (sy + y) * aw + sx, (size_t)visible.w);
+        }
+        __sync_synchronize();
+        copied = shared->sequence == sequence &&
+            shared->width == (uint32_t)aw &&
+            shared->height == (uint32_t)ah;
+        if (!copied && (attempt & 3) == 3)
+            yield();
+    }
+    return copied;
 }
 
 static struct rect close_rect(int id) {
@@ -1592,8 +1791,10 @@ static void relayout_after_mode_change(int old_sw, int old_sh) {
         restore = fit_window_rect(restore, old_sw, old_sh, dock_y);
         windows[id].restore = restore;
         windows[id].r = windows[id].maximized ? work : restore;
-        if (app_sessions[slot].used)
+        if (app_sessions[slot].used) {
             app_sessions[slot].resize_dirty = 1;
+            (void)sync_app_size(id, 1);
+        }
     }
     for (int id = 0; id < WIN_COUNT; id++)
         clamp_scroll(id);
@@ -1844,7 +2045,6 @@ static void draw_app_window(int id) {
             fill(c, THEME_WIN_BODY);
         return;
     }
-    uint32_t sequence;
     const uint8_t *pixels = (const uint8_t *)shared +
         GUIAPP_SHARED_HEADER_SIZE;
     if (app_sessions[slot].scaled_surface && source_w > 0 && source_h > 0) {
@@ -1853,122 +2053,24 @@ static void draw_app_window(int id) {
         int vh = view.h;
         int dx = view.x;
         int dy = view.y;
-        int right = ox + aw;
-        int bottom = oy + ah;
-        fill((struct rect){ox, oy, aw, dy - oy}, 0);
-        fill((struct rect){ox, dy + vh, aw, bottom - (dy + vh)}, 0);
+        fill((struct rect){ox, oy, c.w, dy - oy}, 0);
+        fill((struct rect){ox, dy + vh, c.w, (oy + c.h) - (dy + vh)}, 0);
         fill((struct rect){ox, dy, dx - ox, vh}, 0);
-        fill((struct rect){dx + vw, dy, right - (dx + vw), vh}, 0);
-        struct rect visible = intersect_rect(intersect_rect(view, clip), compose_clip);
-        if (visible.w <= 0 || visible.h <= 0)
-            return;
-        if (app_sessions[slot].scale_map_w != vw ||
-            app_sessions[slot].scale_map_h != vh ||
-            app_sessions[slot].scale_source_w != source_w ||
-            app_sessions[slot].scale_source_h != source_h) {
-            for (int x = 0; x < vw; x++)
-                app_sessions[slot].xmap[x] = (uint16_t)(x * source_w / vw);
-            for (int y = 0; y < vh; y++)
-                app_sessions[slot].ymap[y] = (uint16_t)(y * source_h / vh);
-            app_sessions[slot].scale_map_w = vw;
-            app_sessions[slot].scale_map_h = vh;
-            app_sessions[slot].scale_source_w = source_w;
-            app_sessions[slot].scale_source_h = source_h;
-        }
-        int xscale = vw / source_w, yscale = vh / source_h;
-        /* Copy straight into the backbuffer, retrying until the seqlock
-         * confirms a tear-free pass.  Intermediate tears never reach the
-         * screen: the display is only updated from the backbuffer after
-         * compose finishes. */
-        int copied = 0;
-        for (int attempt = 0; attempt < 100 && !copied; attempt++) {
-            sequence = shared->sequence;
-            if (sequence & 1u) {
-                yield();
-                continue;
-            }
-            __sync_synchronize();
-        if (xscale > 0 && yscale > 0 &&
-            xscale * source_w == vw && yscale * source_h == vh) {
-            /* Expand each source row only once, then reuse it for all of its
-             * vertically repeated rows.  The old loop expanded every output
-             * row separately (and made tens of thousands of tiny memset
-             * calls per second for a 4x Game Boy surface). */
-            int first_x = visible.x - dx;
-            int cached_sy = -1;
-            for (int y = 0; y < visible.h; y++) {
-                uint8_t *dst = fb + (visible.y + y) * sw + visible.x;
-                int sy = (visible.y + y - dy) / yscale;
-                if (sy != cached_sy) {
-                    const uint8_t *src = pixels + sy * source_w;
-                    int out = 0, pos = first_x;
-                    while (out < visible.w) {
-                        int sx = pos / xscale;
-                        int run = xscale - pos % xscale;
-                        if (run > visible.w - out) run = visible.w - out;
-                        memset(scaled_scanline + out, src[sx], (size_t)run);
-                        out += run;
-                        pos += run;
-                    }
-                    cached_sy = sy;
-                }
-                memcpy(dst, scaled_scanline, (size_t)visible.w);
-            }
-        } else {
-            int cached_sy = -1;
-            for (int y = 0; y < visible.h; y++) {
-                uint8_t *dst = fb + (visible.y + y) * sw + visible.x;
-                int sy = app_sessions[slot].ymap[visible.y + y - dy];
-                if (sy != cached_sy) {
-                    const uint8_t *src = pixels + sy * source_w;
-                    int sx = visible.x - dx;
-                    for (int x = 0; x < visible.w; x++)
-                        scaled_scanline[x] =
-                            src[app_sessions[slot].xmap[sx + x]];
-                    cached_sy = sy;
-                }
-                memcpy(dst, scaled_scanline, (size_t)visible.w);
-            }
-        }
-            __sync_synchronize();
-            copied = shared->sequence == sequence;
-            if (!copied && (attempt & 3) == 3)
-                yield();
-        }
-        if (!copied)
+        fill((struct rect){dx + vw, dy, (ox + c.w) - (dx + vw), vh}, 0);
+        if (!blit_shared_scaled(slot, pixels, view))
             app_note_dirty(slot, (struct rect){0, 0, source_w, source_h});
         return;
     }
-    /* Paint only the margins around the surface; the surface area is
-     * (re)painted below once the seqlock confirms a clean copy. */
-    fill((struct rect){ox + aw, c.y, (c.x + c.w) - (ox + aw), c.h},
-         THEME_WIN_BODY);
-    fill((struct rect){c.x, oy + ah, c.w, (c.y + c.h) - (oy + ah)},
-         THEME_WIN_BODY);
-    struct rect visible = intersect_rect(
-        intersect_rect((struct rect){ox, oy, aw, ah}, clip), compose_clip);
-    if (visible.w > 0 && visible.h > 0) {
-        int sx = visible.x - ox;
-        int sy = visible.y - oy;
-        int copied = 0;
-        for (int attempt = 0; attempt < 100 && !copied; attempt++) {
-            sequence = shared->sequence;
-            if (sequence & 1u) {
-                yield();
-                continue;
-            }
-            __sync_synchronize();
-            for (int y = 0; y < visible.h; y++)
-                memcpy(fb + (visible.y + y) * sw + visible.x,
-                       pixels + (sy + y) * aw + sx, (size_t)visible.w);
-            __sync_synchronize();
-            copied = shared->sequence == sequence;
-            if (!copied && (attempt & 3) == 3)
-                yield();
-        }
-        if (!copied)
-            app_note_dirty(slot, (struct rect){0, 0, aw, ah});
-    }
+    (void)clip;
+    (void)aw;
+    (void)ah;
+    /* Fill content first so lag margins are solid; blit uses SHM width as
+     * stride under the seqlock (stale surface_w + new layout = 花纹). */
+    fill(c, THEME_WIN_BODY);
+    if (!blit_shared_1to1(slot, pixels, c))
+        app_note_dirty(slot, (struct rect){0, 0,
+            app_sessions[slot].surface_w > 0 ? app_sessions[slot].surface_w : c.w,
+            app_sessions[slot].surface_h > 0 ? app_sessions[slot].surface_h : c.h});
 }
 
 static int collect_open_apps(int ids[MAX_GUI_APPS]) {
@@ -2448,12 +2550,12 @@ static struct rect app_damage_to_screen(int slot, struct rect dirty) {
         !windows[id].visible || windows[id].minimized)
         return (struct rect){0, 0, 0, 0};
     struct rect content = content_rect(id);
+    struct rect screen = (struct rect){0, 0, sw, sh};
     if (!app_sessions[slot].scaled_surface) {
         struct rect area = {
             content.x + dirty.x, content.y + dirty.y, dirty.w, dirty.h
         };
-        return intersect_rect(area,
-            intersect_rect(content, (struct rect){0, 0, sw, sh}));
+        return intersect_rect(area, intersect_rect(content, screen));
     }
     int source_w = app_sessions[slot].source_w;
     int source_h = app_sessions[slot].source_h;
@@ -2470,8 +2572,7 @@ static struct rect app_damage_to_screen(int slot, struct rect dirty) {
     int y2 = view.y +
         ((dirty.y + dirty.h) * view.h + source_h - 1) / source_h;
     struct rect area = {x1 - 1, y1 - 1, x2 - x1 + 2, y2 - y1 + 2};
-    return intersect_rect(area,
-        intersect_rect(view, (struct rect){0, 0, sw, sh}));
+    return intersect_rect(area, intersect_rect(view, screen));
 }
 
 static int top_window_at(int x, int y) {
@@ -2613,8 +2714,10 @@ static void apply_resize(int id, int mx, int my) {
     resize_start_y = my;
     resize_start_rect = r;
     int slot = app_slot_for_win(id);
-    if (slot >= 0 && app_sessions[slot].used)
+    if (slot >= 0 && app_sessions[slot].used) {
         app_sessions[slot].resize_dirty = 1;
+        publish_app_configure(slot);
+    }
     clamp_scroll(id);
 }
 
@@ -2714,7 +2817,7 @@ static void toggle_maximize(int id) {
     int slot = app_slot_for_win(id);
     if (slot >= 0 && app_sessions[slot].used) {
         app_sessions[slot].resize_dirty = 1;
-        (void)sync_app_size(id);
+        (void)sync_app_size(id, 1);
     }
 }
 
@@ -2813,13 +2916,13 @@ static void update_hover_app(int force) {
 }
 
 static void flush_pending_app_resizes(void) {
-    /* Send coalesced resize events to apps even mid-drag so their content
-     * relayouts live.  sync_app_size() dedups against want_w/want_h, so
-     * unchanged sizes cost nothing. */
+    /* Modern live resize: publish configure every frame and issue RESIZE
+     * when the previous present completed (resize_inflight).  Stretch
+     * covers the gap; guiapp_read_event overlays latest configure size. */
     for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
         if (!app_sessions[slot].used || !app_sessions[slot].resize_dirty)
             continue;
-        (void)sync_app_size(WIN_APP_BASE + slot);
+        (void)sync_app_size(WIN_APP_BASE + slot, 0);
     }
 }
 
@@ -3404,7 +3507,7 @@ static void handle_mouse(void) {
         scroll_drag_win = -1;
         resize_win = -1;
         if (finished_resize >= WIN_APP_BASE)
-            (void)sync_app_size(finished_resize);
+            (void)sync_app_size(finished_resize, 1);
         update_hover_app(1);
     }
     if (left && resize_win >= 0) {

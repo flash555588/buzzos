@@ -80,6 +80,11 @@ struct guiapp_shared_surface {
     uint32_t capacity_pixels;
     volatile uint32_t width;
     volatile uint32_t height;
+    /* Desktop → app: latest content size for live-resize.  guiapp_read_event
+     * overlays these onto INIT/RESIZE so queued intermediate events still
+     * deliver the current geometry (Wayland-style configure coalesce). */
+    volatile uint32_t configure_width;
+    volatile uint32_t configure_height;
 };
 
 struct guiapp_ctx {
@@ -91,6 +96,9 @@ struct guiapp_ctx {
 };
 
 int guiapp_parse_args(int argc, char **argv, struct guiapp_ctx *ctx);
+/* Blocking read.  INIT/RESIZE width/height are replaced with the desktop's
+ * latest configure size when present, so apps always layout to current
+ * geometry even if several RESIZE events were queued. */
 int guiapp_read_event(struct guiapp_ctx *ctx, struct guiapp_event *ev);
 int guiapp_send_frame(struct guiapp_ctx *ctx, const char *title,
                       int width, int height, const uint8_t *pixels);

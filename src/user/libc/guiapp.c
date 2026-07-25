@@ -65,7 +65,22 @@ int guiapp_read_event(struct guiapp_ctx *ctx, struct guiapp_event *ev) {
         return -1;
     if (read_full(ctx->event_fd, ev, (int)sizeof(*ev)) < 0)
         return -1;
-    return ev->magic == GUIAPP_MAGIC ? 0 : -1;
+    if (ev->magic != GUIAPP_MAGIC)
+        return -1;
+    /* Live-resize coalesce: always layout to the desktop's latest content
+     * size, not a stale intermediate RESIZE still sitting in the pipe. */
+    if (ctx->shared &&
+        (ev->type == GUIAPP_EVT_INIT || ev->type == GUIAPP_EVT_RESIZE)) {
+        __sync_synchronize();
+        uint32_t cw = ctx->shared->configure_width;
+        uint32_t ch = ctx->shared->configure_height;
+        if (cw > 0 && ch > 0 &&
+            cw <= (uint32_t)GUIAPP_MAX_W && ch <= (uint32_t)GUIAPP_MAX_H) {
+            ev->width = (int32_t)cw;
+            ev->height = (int32_t)ch;
+        }
+    }
+    return 0;
 }
 
 static uint8_t *shared_pixels(struct guiapp_ctx *ctx) {
