@@ -815,9 +815,11 @@ int minifs_unlink(const char *path) {
     }
     free_inode_blocks(ino);
     zero(&inodes[ino], sizeof(inodes[ino]));
-    flush_inode(ino);
+    int ret = flush_inode(ino);
+    if (ret == 0)
+        ret = block_cache_flush();
     minifs_unlock();
-    return 0;
+    return ret;
 }
 
 int minifs_rmdir(const char *path) {
@@ -840,9 +842,11 @@ int minifs_rmdir(const char *path) {
     }
     free_inode_blocks(ino);
     zero(&inodes[ino], sizeof(inodes[ino]));
-    flush_inode(ino);
+    int ret = flush_inode(ino);
+    if (ret == 0)
+        ret = block_cache_flush();
     minifs_unlock();
-    return 0;
+    return ret;
 }
 
 int minifs_rename(const char *old_path, const char *new_path) {
@@ -877,9 +881,11 @@ int minifs_rename(const char *old_path, const char *new_path) {
         return -1;
     }
     inodes[ino].parent = (uint16_t)new_parent;
-    flush_inode(ino);
+    int ret = flush_inode(ino);
+    if (ret == 0)
+        ret = block_cache_flush();
     minifs_unlock();
-    return 0;
+    return ret;
 }
 
 int minifs_truncate(const char *path) {

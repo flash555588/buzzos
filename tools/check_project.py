@@ -315,23 +315,27 @@ def check_runtime_lifecycle():
 
     for snippet in [
         "shutdown_desktop",
-        "join(term_reader_tid)",
-        "waitpid(term_pid",
+        "join(app_sessions[slot].reader_tid)",
+        "waitpid(app_sessions[slot].pid",
         "desktop_dirty",
         "tick - last_render_tick >= 60u",
-        "sync_app_size(finished_resize)",
+        "sync_app_size(finished_resize, 1)",
     ]:
         if snippet not in gui_c:
             fail(f"desktop lifecycle/event-driven rendering is missing: {snippet}")
     for snippet in ["threadreusetest", "socketleak: opened 8", "3072"]:
         if snippet not in smoke:
             fail(f"resource/TCP smoke coverage is missing: {snippet}")
-    for snippet in ["textedit-maximized", "filemanager", "filemanager-textedit",
-                    "filemanager-terminal-exec", "app protocol ended",
-                    "many-windows", "dock-expanded",
+    for snippet in ["textedit-maximized", "textedit-drag-restored",
+                    "alt-tab-launcher", "launcher-search",
+                    "launcher-no-results", "filemanager",
+                    "filemanager-textedit", "filemanager-terminal-exec",
+                    "app protocol ended", "many-windows",
+                    "taskbar-minimized", "taskbar-restored",
+                    "taskbar-tooltip",
                     "Move-MouseRelative", "Click-Left"]:
         if snippet not in gui_smoke:
-            fail(f"live TextEdit resize coverage is missing: {snippet}")
+            fail(f"GUI interaction smoke coverage is missing: {snippet}")
 
     ok("runtime lifecycle: IRQ state, process exit, thread/socket reuse, GUI shutdown/live resize, and idle redraw are covered")
 
@@ -752,6 +756,7 @@ def check_procfs_diagnostics():
     procfs = read_text("src/kernel/fs/procfs.c")
     shell_c = read_text("src/user/bin/shell.c")
     gui_c = read_text("src/user/bin/gui.c")
+    terminal_c = read_text("src/user/bin/terminal.c")
     report_py = read_text("tools/project_report.py")
     smoke_ps1 = read_text("scripts/smoke.ps1")
 
@@ -807,12 +812,12 @@ def check_procfs_diagnostics():
     if "cmd_fsinfo" not in shell_c or 'cmd_cat("/proc/fs")' not in shell_c:
         fail("shell is missing fsinfo /proc/fs command")
     for snippet in [
-        'argv[0] = "/bin/sh"',
+        'shell_argv[] = {"/bin/sh"}',
         'spawn_process_args("/bin/sh"',
         "SPAWN_FLAG_INHERIT_STDIO",
-        "terminal_send_key",
+        "send_key",
     ]:
-        if snippet not in gui_c:
+        if snippet not in terminal_c:
             fail(f"GUI terminal is not attached to the full /bin/sh command surface: {snippet}")
     if "collect_health_interfaces" not in report_py or "/proc/health" not in report_py:
         fail("project report is missing health interface summary")
@@ -849,8 +854,8 @@ def check_procfs_diagnostics():
         "minifs_max_file_size\\s+32441856",
         "mount\\s+/fs",
         "driver\\s+minifs",
-        "inodes_total\\s+128",
-        "blocks_total\\s+3959",
+        "inodes_total\\s+2048",
+        "blocks_total\\s+63363",
         "host_repair\\s+make fs-repair",
         "gui:interfaces,make:report",
         "fs_status\\s+ok",
@@ -1375,6 +1380,7 @@ def check_gui_style():
         if snippet not in guiapp_h:
             fail(f"guiapp.h is missing cross-app launch feature: {snippet}")
     gui_c = read_text("src/user/bin/gui.c")
+    terminal_c = read_text("src/user/bin/terminal.c")
     textedit_c = read_text("src/user/bin/textedit.c")
     files_c = read_text("src/user/bin/filemanager.c")
     pinyin_h = read_text("src/user/bin/pinyin_data.h")
@@ -1391,11 +1397,12 @@ def check_gui_style():
     for snippet in ["draw_context_menu", "clipboard_command", "GUIAPP_CMD_COPY", "GUIAPP_CMD_CUT"]:
         if snippet not in gui_c:
             fail(f"desktop is missing context clipboard feature: {snippet}")
-    for snippet in ["term_input", "terminal_input_append", 'terminal_send("\\x15"']:
-        if snippet not in gui_c:
+    for snippet in ["input_line", "track_input_text", 'send_shell("\\x15"']:
+        if snippet not in terminal_c:
             fail(f"desktop Terminal is missing UTF-8 clipboard input tracking: {snippet}")
-    for snippet in ["terminal_position_at", "terminal_has_selection", "terminal_copy_selection", "term_selecting"]:
-        if snippet not in gui_c:
+    for snippet in ["position_from_mouse_locked", "selection_exists_locked",
+                    "copy_selection_locked", "selection_dragging"]:
+        if snippet not in terminal_c:
             fail(f"desktop Terminal is missing visible mouse selection: {snippet}")
     for snippet in ["utf8_prev", "utf8_next", "c <= 255", "c == 0x15"]:
         if snippet not in shell_c:
@@ -1424,8 +1431,9 @@ def check_gui_style():
     for snippet in ["is_elf_file", "has_gui_manifest", "guiapp_request_exec"]:
         if snippet not in files_c:
             fail(f"filemanager is missing CLI/GUI executable dispatch: {snippet}")
-    for snippet in ["GUIAPP_FRAME_EXEC", "terminal_execute_path", "exec_target_allowed"]:
-        if snippet not in guiapp_h + gui_c:
+    for snippet in ["GUIAPP_FRAME_EXEC", 'run_app_with_arg("/fs/apps/terminal"',
+                    "exec_target_allowed", "send_shell(argv[4]"]:
+        if snippet not in guiapp_h + gui_c + terminal_c:
             fail(f"desktop is missing non-GUI ELF terminal dispatch: {snippet}")
     for snippet in ["app_reader_loop", "app_reader_functions", "reader_dead", "reap_dead_apps"]:
         if snippet not in gui_c:

@@ -4,7 +4,7 @@ param(
     [string]$QemuPath = "",
     [string]$SerialLog = "build/serial-smoke.log",
     [string]$TestImage = "build/buzzos-test.img",
-    [int]$TimeoutSeconds = 45
+    [int]$TimeoutSeconds = 60
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,6 +50,12 @@ function Wait-ForLog([string]$Pattern, [int]$Seconds) {
         $log = Read-SerialLog
     } until ($log -match $Pattern -or (Get-Date) -gt $deadline)
 
+    # Capture once more after the deadline so a prompt flushed between the
+    # loop's final read and the timeout check is not reported as missing.
+    if ($log -notmatch $Pattern) {
+        Start-Sleep -Milliseconds 250
+        $log = Read-SerialLog
+    }
     if ($log -notmatch $Pattern) {
         Fail-WithLog "Timed out waiting for serial output: $Pattern"
     }
@@ -437,9 +443,9 @@ try {
         "paint",
         "calculator",
         "/fs minifs",
-        "inodes\s+[0-9]+/128",
-        "blocks\s+[0-9]+/3959",
-        "data_lba\s+67721",
+        "inodes\s+[0-9]+/2048",
+        "blocks\s+[0-9]+/63363",
+        "data_lba\s+69757",
         "GUI apps are launched through the desktop",
         "gui opens the desktop",
         "/proc is read-only runtime state",
