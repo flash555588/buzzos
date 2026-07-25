@@ -51,6 +51,10 @@ static char status[96] = "Ready";
 static int input_mode;
 static char input_text[24];
 static int input_len;
+/* 0=normal, 1=open-for app, 2=new-for app (desktop file picker). */
+static int pick_mode;
+static char pick_app[PATH_CAP];
+static char window_title[GUIAPP_TITLE_MAX] = "Files";
 
 static int clamp_int(int value, int lo, int hi) {
     if (value < lo) return lo;
@@ -249,6 +253,30 @@ static int has_extension(const char *path, const char *extension) {
     return 1;
 }
 
+static int starts_with(const char *text, const char *prefix) {
+    while (*prefix) {
+        if (*text++ != *prefix++)
+            return 0;
+    }
+    return 1;
+}
+
+static void launch_picked(struct guiapp_ctx *ctx, const char *path) {
+    if (!pick_app[0] || !path || !path[0]) {
+        set_status("No target app for picker");
+        return;
+    }
+    if (guiapp_request_launch(ctx, pick_app, path) < 0) {
+        set_status("Could not open in target app");
+        return;
+    }
+    /* Temporary picker windows close themselves after handing off. */
+    if (pick_mode == 1 || pick_mode == 2)
+        exit(0);
+    appui_copy_text(status, "Opened: ", sizeof(status));
+    appui_append_text(status, path, sizeof(status));
+}
+
 static void open_selected(struct guiapp_ctx *ctx) {
     if (selected < 0 || selected >= entry_count)
         return;
@@ -265,6 +293,11 @@ static void open_selected(struct guiapp_ctx *ctx) {
         set_status("This item cannot be opened");
         return;
     }
+    /* Picker mode: hand the chosen file back to the requesting app. */
+    if (pick_mode == 1 || pick_mode == 2) {
+        launch_picked(ctx, path);
+        return;
+    }
     /* Match by extension before ELF sniffing so ROM/audio assets never go
      * through the generic exec path (even if a header looks odd). */
     if (has_extension(path, ".gb") || has_extension(path, ".gbc")) {
@@ -279,6 +312,13 @@ static void open_selected(struct guiapp_ctx *ctx) {
             set_status("Could not launch Music");
         else
             set_status("Opened in Music");
+        return;
+    }
+    if (has_extension(path, ".lua")) {
+        if (guiapp_request_launch(ctx, "/fs/apps/luaide", path) < 0)
+            set_status("Could not launch LuaIDE");
+        else
+            set_status("Opened in LuaIDE");
         return;
     }
     if (is_elf_file(path)) {
@@ -318,27 +358,54 @@ static void begin_input(int mode) {
     }
 }
 
-static void finish_input(void) {
+static void finish_input(struct guiapp_ctx *ctx) {
     char path[PATH_CAP];
     char old_path[PATH_CAP];
     int rc = -1;
     const char *result = "Operation failed";
+    path[0] = 0;
     if (input_mode != MODE_DELETE && !is_valid_name(input_text)) {
         set_status("Enter a valid name");
         return;
     }
     if (input_mode == MODE_NEW_DIR) {
-        if (join_path(path, current_path, input_text) == 0)
+        if (join_path(path, current_path, input_text) == 0) {
+            struct stat st;
+            if (stat(path, &st) == 0) {
+                set_status("Name already exists");
+                return;
+            }
             rc = mkdir(path);
+        }
         result = rc == 0 ? "Folder created" : "Could not create folder";
     } else if (input_mode == MODE_NEW_FILE) {
-        if (join_path(path, current_path, input_text) == 0)
+        if (join_path(path, current_path, input_text) == 0) {
+            struct stat st;
+            if (stat(path, &st) == 0) {
+                set_status("Name already exists");
+                return;
+            }
             rc = create(path);
+        }
         result = rc == 0 ? "File created" : "Could not create file";
+        /* New-file picker: open the created document in the target app. */
+        if (rc == 0 && pick_mode == 2 && path[0]) {
+            input_mode = MODE_NONE;
+            (void)scan_directory();
+            launch_picked(ctx, path);
+            return;
+        }
     } else if (input_mode == MODE_RENAME) {
         selected_path(old_path);
-        if (old_path[0] && join_path(path, current_path, input_text) == 0)
+        if (old_path[0] && join_path(path, current_path, input_text) == 0) {
+            struct stat st;
+            /* Allow rename to the same path; otherwise refuse collisions. */
+            if (strcmp(old_path, path) != 0 && stat(path, &st) == 0) {
+                set_status("Name already exists");
+                return;
+            }
             rc = rename(old_path, path);
+        }
         result = rc == 0 ? "Item renamed" : "Could not rename item";
     } else if (input_mode == MODE_DELETE) {
         selected_path(path);
@@ -758,9 +825,9 @@ static void render(void) {
     draw_dialog();
 }
 
-static int handle_dialog_click(int x, int y) {
+static int handle_dialog_click(struct guiapp_ctx *ctx, int x, int y) {
     if (appui_inside(x, y, dialog_button_rect(0))) {
-        finish_input();
+        finish_input(ctx);
         return 1;
     }
     if (appui_inside(x, y, dialog_button_rect(1))) {
@@ -773,7 +840,7 @@ static int handle_dialog_click(int x, int y) {
 
 static void click(struct guiapp_ctx *ctx, int x, int y) {
     if (input_mode != MODE_NONE) {
-        (void)handle_dialog_click(x, y);
+        (void)handle_dialog_click(ctx, x, y);
         return;
     }
     if (appui_inside(x, y, nav_button_rect(0)) && nav_button_enabled(0)) {
@@ -857,7 +924,7 @@ static void handle_mouse(struct guiapp_ctx *ctx, int x, int y, int buttons, int 
 static void handle_key(struct guiapp_ctx *ctx, int key) {
     if (input_mode != MODE_NONE) {
         if (key == '\r' || key == '\n') {
-            finish_input();
+            finish_input(ctx);
         } else if (key == GUIAPP_KEY_BACKSPACE || key == 127) {
             if (input_mode != MODE_DELETE && input_len > 0)
                 input_text[input_len = appui_utf8_prev(input_text, input_len)] = 0;
@@ -908,11 +975,41 @@ static void handle_command(struct guiapp_ctx *ctx, int command) {
     }
 }
 
+static void configure_picker(const char *argument) {
+    pick_mode = 0;
+    pick_app[0] = 0;
+    appui_copy_text(window_title, "Files", sizeof(window_title));
+    if (!argument || !argument[0])
+        return;
+    if (starts_with(argument, "openfor:")) {
+        pick_mode = 1;
+        appui_copy_text(pick_app, argument + 8, sizeof(pick_app));
+        appui_copy_text(window_title, "Open File", sizeof(window_title));
+        set_status("Select a file, then Open");
+    } else if (starts_with(argument, "newfor:")) {
+        pick_mode = 2;
+        appui_copy_text(pick_app, argument + 7, sizeof(pick_app));
+        appui_copy_text(window_title, "New File", sizeof(window_title));
+        set_status("Choose folder, then name the new file");
+        begin_input(MODE_NEW_FILE);
+        /* Prefer a sensible default name for the target app. */
+        if (strstr(pick_app, "luaide")) {
+            appui_copy_text(input_text, "untitled.lua", sizeof(input_text));
+            input_len = (int)strlen(input_text);
+        } else if (strstr(pick_app, "textedit")) {
+            appui_copy_text(input_text, "untitled.txt", sizeof(input_text));
+            input_len = (int)strlen(input_text);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     struct guiapp_ctx ctx;
     struct guiapp_event event;
     if (guiapp_parse_args(argc, argv, &ctx) < 0)
         return 1;
+    if (argc > 4)
+        configure_picker(argv[4]);
     (void)scan_directory();
     for (;;) {
         if (guiapp_read_event(&ctx, &event) < 0 || event.type == GUIAPP_EVT_CLOSE)
@@ -931,7 +1028,7 @@ int main(int argc, char **argv) {
             handle_mouse(&ctx, event.x, event.y, event.buttons, event.wheel);
         }
         render();
-        if (guiapp_send_frame(&ctx, "Files", w, h, pixels) < 0)
+        if (guiapp_send_frame(&ctx, window_title, w, h, pixels) < 0)
             break;
     }
     return 0;

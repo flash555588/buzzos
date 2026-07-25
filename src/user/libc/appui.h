@@ -161,7 +161,30 @@ static __attribute__((unused)) int appui_utf8_prev(const char *text, int pos) {
     return pos;
 }
 
+/* Horizontal tab is a layout control, not a glyph. The built-in bitmap font
+ * covers printable ASCII (32..126); HT advances to the next tab stop. */
+enum { APPUI_TAB_COLUMNS = 4 };
+
+static __attribute__((unused)) int appui_tab_width(void) {
+    return KFONT_WIDTH * APPUI_TAB_COLUMNS;
+}
+
+/* Advance for a tab stop measured from the start of the current line. */
+static __attribute__((unused)) int appui_tab_advance(int x_from_line_start) {
+    int tab = appui_tab_width();
+    if (tab <= 0)
+        return KFONT_WIDTH;
+    if (x_from_line_start < 0)
+        x_from_line_start = 0;
+    int advance = tab - (x_from_line_start % tab);
+    return advance <= 0 ? tab : advance;
+}
+
 static __attribute__((unused)) int appui_codepoint_width(uint32_t cp) {
+    if (cp == '\t')
+        return appui_tab_width();
+    if (cp == '\r' || cp == '\n')
+        return 0;
     if (cp < 0x80u)
         return KFONT_WIDTH;
     uint8_t bits[FONT_GLYPH_BYTES];
@@ -169,9 +192,25 @@ static __attribute__((unused)) int appui_codepoint_width(uint32_t cp) {
     return width > 0 ? width : KFONT_WIDTH;
 }
 
+/* Width of one codepoint at a given column offset from the line start.
+ * Prefer this over appui_codepoint_width for custom text loops that may
+ * contain tabs. */
+static __attribute__((unused)) int appui_codepoint_advance(
+    uint32_t cp, int x_from_line_start) {
+    if (cp == '\t')
+        return appui_tab_advance(x_from_line_start);
+    return appui_codepoint_width(cp);
+}
+
 static __attribute__((unused)) int appui_draw_codepoint(
     uint8_t *fb, int w, int h, int x, int y, uint32_t cp,
     int fg, int bg, struct appui_rect clip) {
+    /* Tab / CR: no ink, only horizontal advance. */
+    if (cp == '\t')
+        return appui_tab_width();
+    if (cp == '\r' || cp == '\n')
+        return 0;
+
     uint8_t bits[FONT_GLYPH_BYTES];
     const uint8_t *alpha = 0;
     int glyph_w = KFONT_WIDTH;
@@ -185,6 +224,7 @@ static __attribute__((unused)) int appui_draw_codepoint(
             alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
         }
     } else {
+        /* Other C0 controls: keep a visible replacement so bad data is obvious. */
         cp = '?';
         alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
     }
@@ -216,29 +256,40 @@ static __attribute__((unused)) int appui_draw_codepoint(
     return glyph_w;
 }
 
+/* Like appui_draw_codepoint, but tab advance is relative to the line origin. */
+static __attribute__((unused)) int appui_draw_codepoint_at(
+    uint8_t *fb, int w, int h, int x, int y, uint32_t cp,
+    int fg, int bg, struct appui_rect clip, int line_origin_x) {
+    if (cp == '\t')
+        return appui_tab_advance(x - line_origin_x);
+    return appui_draw_codepoint(fb, w, h, x, y, cp, fg, bg, clip);
+}
+
 static __attribute__((unused)) int appui_text_width(const char *s) {
     int width = 0;
     while (s && *s) {
         uint32_t cp = appui_utf8_next(&s);
         if (cp == '\n')
             break;
-        width += appui_codepoint_width(cp);
+        width += appui_codepoint_advance(cp, width);
     }
     return width;
 }
 
 static void appui_text(uint8_t *fb, int w, int h, int x, int y,
                        const char *s, int fg, int bg, struct appui_rect clip) {
+    int line_origin = x;
     while (s && *s) {
         uint32_t cp = appui_utf8_next(&s);
         if (cp == '\n') {
             y += KFONT_HEIGHT;
-            x = clip.x;
+            x = line_origin;
             continue;
         }
         if (x >= clip.x + clip.w)
             return;
-        x += appui_draw_codepoint(fb, w, h, x, y, cp, fg, bg, clip);
+        x += appui_draw_codepoint_at(fb, w, h, x, y, cp, fg, bg, clip,
+                                     line_origin);
     }
 }
 

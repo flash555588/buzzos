@@ -1,0 +1,12 @@
+-- LuaIDE sample
+local function greet(name)
+    print("Hello, " .. name .. "!")
+end
+
+greet("BuzzOS")
+
+-- try: change the name, press Run
+-- or focus REPL and type: 1+2
+for i = 1, 3 do
+    print("tick", i)
+end

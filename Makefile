@@ -156,7 +156,7 @@ NETSURF_PORT_OBJ := $(BUILD)/user/netsurf_buzzos_platform.o
 NSHTMLTEST_ELF := $(BUILD)/user/nshtmltest.elf
 NETSURF_ELF := $(BUILD)/user/netsurf.elf
 NSMONKEY_ELF := $(BUILD)/user/nsmonkey.elf
-GUI_APP_NAMES := terminal textedit paint calculator filemanager browser doom music gameboy
+GUI_APP_NAMES := terminal textedit paint calculator filemanager browser doom music gameboy luaide
 GUI_APP_ELFS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).elf)
 GUI_APP_SRCS := $(foreach app,$(GUI_APP_NAMES),src/user/bin/$(app).c)
 GUI_APP_OBJS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).o)
@@ -186,7 +186,9 @@ LUA_LIB_SRCS := \
 	lauxlib.c lbaselib.c lcorolib.c ldblib.c liolib.c lmathlib.c loadlib.c \
 	loslib.c lstrlib.c ltablib.c lutf8lib.c linit.c
 LUA_SRCS := $(LUA_CORE_SRCS) $(LUA_LIB_SRCS) lua.c
+LUA_LIB_ONLY_SRCS := $(LUA_CORE_SRCS) $(LUA_LIB_SRCS)
 LUA_OBJS := $(foreach src,$(LUA_SRCS),$(BUILD)/user/lua/$(src:.c=.o))
+LUA_LIB_OBJS := $(foreach src,$(LUA_LIB_ONLY_SRCS),$(BUILD)/user/lua/$(src:.c=.o))
 LUA_ELF := $(BUILD)/user/lua.elf
 SETJMP_OBJ := $(BUILD)/user/setjmp.o
 LUA_FLAGS := -I$(LUA_DIR) -include $(LUA_PORT_H) \
@@ -440,6 +442,18 @@ $(LUA_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(SETJMP_OBJ) \
 		$(LUA_OBJS) $(BUILD)/user/user.ld | $(BUILD)/user
 	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(SETJMP_OBJ) $(LUA_OBJS)
+	$(OBJCOPY) --strip-sections $@
+
+$(BUILD)/user/luaide.o: src/user/bin/luaide.c $(USER_HEADERS) $(LUA_PORT_H) \
+		$(LUA_DIR)/lua.h $(LUA_DIR)/lauxlib.h $(LUA_DIR)/lualib.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) $(LUA_FLAGS) -c $< -o $@
+
+$(BUILD)/user/luaide.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
+		$(BUILD)/user/guiapp.o $(SETJMP_OBJ) $(BUILD)/user/luaide.o \
+		$(LUA_LIB_OBJS) $(BUILD)/user/user.ld | $(BUILD)/user
+	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
+		$(SETJMP_OBJ) $(BUILD)/user/luaide.o $(LUA_LIB_OBJS)
 	$(OBJCOPY) --strip-sections $@
 
 $(NSPORTTEST_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \

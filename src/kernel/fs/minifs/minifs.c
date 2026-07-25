@@ -742,11 +742,11 @@ int minifs_create(const char *path) {
         minifs_unlock();
         return -1;
     }
-    int old = dir_find(parent, leaf, leaf_len);
-    if (old >= 0) {
-        int ret = inodes[old].type == MINIFS_FILE ? 0 : -1;
+    /* Exclusive create: existing names (file or directory) always fail.
+     * open(O_CREAT) must treat "already exists" itself — see minifs_vfs. */
+    if (dir_find(parent, leaf, leaf_len) >= 0) {
         minifs_unlock();
-        return ret;
+        return -1;
     }
     int ino = alloc_inode(MINIFS_FILE, (uint16_t)parent);
     if (ino < 0) {

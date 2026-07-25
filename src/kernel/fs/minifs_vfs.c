@@ -55,8 +55,13 @@ static const struct vnode_ops minifs_dir_ops = {
 
 static int minifs_fs_open(const char *abs, const char *rel, int flags, struct open_file *of) {
     (void)abs;
-    if ((flags & O_CREAT) && minifs_create(rel) < 0)
-        return -1;
+    /* O_CREAT: create only when missing. minifs_create is exclusive and
+     * returns -1 if the name already exists; that is success for open. */
+    if (flags & O_CREAT) {
+        uint16_t probe;
+        if (minifs_open(rel, &probe) < 0 && minifs_create(rel) < 0)
+            return -1;
+    }
     uint16_t ino;
     if (minifs_open(rel, &ino) < 0)
         return -1;

@@ -566,11 +566,36 @@ static uint32_t gui_utf8_next(const char **text) {
     return cp;
 }
 
+enum { GUI_TAB_COLUMNS = 4 };
+
+static int gui_tab_width(void) { return KFONT_WIDTH * GUI_TAB_COLUMNS; }
+
+static int gui_tab_advance(int x_from_line_start) {
+    int tab = gui_tab_width();
+    if (tab <= 0)
+        return KFONT_WIDTH;
+    if (x_from_line_start < 0)
+        x_from_line_start = 0;
+    int advance = tab - (x_from_line_start % tab);
+    return advance <= 0 ? tab : advance;
+}
+
 static int gui_codepoint_width(uint32_t cp) {
-    if (cp < 0x80u) return KFONT_WIDTH;
+    if (cp == '\t')
+        return gui_tab_width();
+    if (cp == '\r' || cp == '\n')
+        return 0;
+    if (cp < 0x80u)
+        return KFONT_WIDTH;
     uint8_t bits[FONT_GLYPH_BYTES];
     int width = font_glyph(cp, bits, sizeof(bits));
     return width > 0 ? width : KFONT_WIDTH;
+}
+
+static int gui_codepoint_advance(uint32_t cp, int x_from_line_start) {
+    if (cp == '\t')
+        return gui_tab_advance(x_from_line_start);
+    return gui_codepoint_width(cp);
 }
 
 static int gui_text_width(const char *s) {
@@ -578,20 +603,27 @@ static int gui_text_width(const char *s) {
     while (s && *s) {
         uint32_t cp = gui_utf8_next(&s);
         if (cp == '\n') break;
-        width += gui_codepoint_width(cp);
+        width += gui_codepoint_advance(cp, width);
     }
     return width;
 }
 
 static void text_clip(int x, int y, const char *s, int fg, int bg, struct rect clip) {
+    int line_origin = x;
     y -= PLT_FONT_Y_SHIFT;
     while (s && *s) {
         uint32_t cp = gui_utf8_next(&s);
         if (cp == '\n') {
             y += KFONT_HEIGHT;
-            x = clip.x;
+            x = line_origin;
             continue;
         }
+        if (cp == '\t') {
+            x += gui_tab_advance(x - line_origin);
+            continue;
+        }
+        if (cp == '\r')
+            continue;
         if (x >= clip.x + clip.w)
             return;
         uint8_t bits[FONT_GLYPH_BYTES];

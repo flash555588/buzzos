@@ -16,6 +16,10 @@ short log for reviewers and contributors; deeper design notes live under
   (`freopen`, `ungetc`, `tmpfile`, …), math (`exp`/`log`/`asin`/…), ctype,
   `localeconv`, and more complete `strftime`.
 - Seeds `/fs/hello.lua`; shell help topic `help lua`.
+- Added desktop **LuaIDE** (`/fs/apps/luaide`): syntax highlighting, keyword
+  auto-complete, New/Save, Run buffer, and an interactive REPL line.
+- LuaIDE Open/New go through Files (`openfor:` / `newfor:` picker args);
+  `.lua` files open in LuaIDE from the file manager.
 
 ### Project Introduction
 

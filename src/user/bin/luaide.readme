@@ -1,0 +1,23 @@
+LuaIDE for BuzzOS
+
+A simple desktop Lua development environment.
+
+Features:
+  - Syntax highlighting (keywords, strings, comments, numbers)
+  - Keyword / library auto-complete (Tab, Up/Down, Enter)
+  - New / Save buffer to a file under /fs
+  - Run current buffer through the embedded Lua 5.4 engine
+  - Interactive REPL line at the bottom
+
+Toolbar:
+  Open    browse with Files and open the chosen file (new window)
+  New     create a file via Files (name dialog), then open it
+  Save    write the current path
+  Run     execute the whole editor buffer
+  REPL    focus the bottom input line
+  Clear   clear the output panel
+
+Default document: /fs/luaide.lua
+Double-click a .lua file in Files also opens LuaIDE.
+Picker protocol for other apps: launch Files with argument
+  openfor:/fs/apps/<app>   or   newfor:/fs/apps/<app>
