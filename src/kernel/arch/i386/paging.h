@@ -29,6 +29,8 @@ int paging_copy_to_user_space(uint32_t cr3, uint32_t va,
 int paging_zero_user_space(uint32_t cr3, uint32_t va, uint32_t size);
 int paging_map_shared_pages(uint32_t va, const uintptr_t *pages, uint32_t count);
 int paging_unmap_shared_pages(uint32_t cr3, uint32_t va, uint32_t count);
+/* Count resident user mappings in a process address space. */
+uint32_t paging_count_user_pages(uint32_t cr3);
 
 /* Page directory and table entry flags */
 enum {

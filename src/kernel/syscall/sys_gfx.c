@@ -28,6 +28,7 @@ int sys_gfx_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t 
     out->height = info.height;
     out->pitch = info.pitch;
     out->bpp = info.bpp;
+    out->backend = info.backend;
     return 0;
 }
 

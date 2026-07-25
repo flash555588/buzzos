@@ -39,6 +39,9 @@ short log for reviewers and contributors; deeper design notes live under
 - Added `/bin/echo` and `/bin/cat`, multi-stage shell pipelines, basic
   redirection, and stdio inheritance for spawned user programs.
 - Added a user-space GUI app center backed by `/fs/apps`.
+- Added a graphical System Monitor with live sortable process CPU and
+  resident-memory metrics, resource-history graphs, pause/refresh controls,
+  and confirmed process termination.
 - Seeded GUI examples:
   - `textedit`: a multiline text editor with persistent document storage.
   - `paint`: a mouse-driven canvas with color/tool controls and saved artwork.

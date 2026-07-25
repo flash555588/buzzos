@@ -15,6 +15,7 @@ struct syscall_gfx_info {
     uint32_t height;
     uint32_t pitch;
     uint32_t bpp;
+    uint32_t backend;
 };
 struct syscall_shm_mapping {
     uint32_t token;

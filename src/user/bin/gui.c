@@ -147,6 +147,7 @@ struct app_session {
 
 static int sw;
 static int sh;
+static uint32_t display_backend;
 static uint8_t fb[MAX_SW * MAX_SH];
 static int running = 1;
 static int display_acquired;
@@ -197,6 +198,7 @@ static int pointer_drawn_valid;
 static int keyevent_fd = -1;
 static unsigned int tick;
 static unsigned int last_render_tick;
+static uint32_t last_app_tick_ms;
 static volatile int desktop_dirty = 1;
 static volatile uint32_t app_frame_dirty_mask;
 
@@ -1176,11 +1178,17 @@ static void run_app_with_arg(const char *path, const char *argument) {
     }
 
     int id = WIN_APP_BASE + slot;
+    int default_w = APP_DEFAULT_W + 30;
+    int default_h = APP_DEFAULT_H + 70;
+    if (strcmp(path, "/fs/apps/taskmanager") == 0) {
+        default_w = 820;
+        default_h = 590;
+    }
     windows[id].title = app_sessions[slot].title;
     windows[id].r = (struct rect){
         80 + slot * 36, 74 + slot * 34,
-        min_i(APP_DEFAULT_W + 30, sw - 120),
-        min_i(APP_DEFAULT_H + 70, sh - 150)
+        min_i(default_w, sw - 120),
+        min_i(default_h, sh - 150)
     };
     windows[id].restore = windows[id].r;
     windows[id].visible = 1;
@@ -1868,6 +1876,7 @@ static int switch_display_mode(int index) {
     }
     sw = (int)info.width;
     sh = (int)info.height;
+    display_backend = info.backend;
     mode_error_until = 0;
     relayout_after_mode_change(old_sw, old_sh);
     return 0;
@@ -2023,7 +2032,11 @@ static void draw_status(void) {
     append_aspect(line, sizeof(line), sw, sh);
     append_text(line, ")", sizeof(line));
     text_clip(ox, oy + 32, line, THEME_TEXT_DIM, -1, clip);
-    text_clip(ox, oy + 60, "Bochs VBE / 32bpp", THEME_TEXT_FAINT, -1, clip);
+    text_clip(ox, oy + 60,
+              display_backend == GFX_BACKEND_VIRTIO_GPU_2D
+                  ? "VirtIO GPU 2D / 32bpp"
+                  : "Bochs VBE / 32bpp",
+              THEME_TEXT_FAINT, -1, clip);
     copy_text(line, "apps ", sizeof(line));
     append_uint(line, (unsigned int)app_count, sizeof(line));
     text_clip(ox, oy + 88, line, THEME_TEXT_DIM, -1, clip);
@@ -2958,6 +2971,18 @@ static void flush_pending_app_resizes(void) {
     }
 }
 
+static void send_app_ticks(void) {
+    uint32_t now = monotonic_ms();
+    if ((uint32_t)(now - last_app_tick_ms) < 500u)
+        return;
+    last_app_tick_ms = now;
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
+        if (app_sessions[slot].used &&
+            app_send_event(slot, GUIAPP_EVT_TICK, 0, 0, 0, 0, 0) < 0)
+            app_sessions[slot].reader_dead = 1;
+    }
+}
+
 static int ime_target_active(void) {
     int slot = app_slot_for_win(focus);
     return slot >= 0 && app_sessions[slot].used;
@@ -3604,9 +3629,11 @@ static void init_desktop(void) {
     if (gfx_info(&info) < 0 || info.width == 0 || info.height == 0) {
         sw = 1024;
         sh = 768;
+        display_backend = GFX_BACKEND_FRAMEBUFFER;
     } else {
         sw = (int)info.width;
         sh = (int)info.height;
+        display_backend = info.backend;
     }
     if (sw > MAX_SW)
         sw = MAX_SW;
@@ -3670,6 +3697,7 @@ int main(int argc, char **argv) {
         forward_key_releases();
         handle_mouse();
         flush_pending_app_resizes();
+        send_app_ticks();
         uint32_t app_dirty = __sync_lock_test_and_set(&app_frame_dirty_mask, 0);
         struct rect damage = {0, 0, 0, 0};
         int have_damage = take_damage(&damage);

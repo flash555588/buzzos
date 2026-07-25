@@ -9,6 +9,12 @@ struct gfx_info {
     uint32_t height;
     uint32_t pitch;
     uint32_t bpp;
+    uint32_t backend;
+};
+
+enum {
+    GFX_BACKEND_FRAMEBUFFER = 0,
+    GFX_BACKEND_VIRTIO_GPU_2D = 1,
 };
 
 void fb_set_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,

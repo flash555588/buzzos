@@ -176,6 +176,11 @@ uint32_t pci_config_read32(const struct pci_device *dev, uint8_t reg) {
     return pci_raw_read32(dev->bus, dev->device, dev->function, reg);
 }
 
+uint8_t pci_config_read8(const struct pci_device *dev, uint8_t reg) {
+    uint32_t value = pci_config_read32(dev, reg);
+    return (uint8_t)(value >> ((reg & 3u) * 8u));
+}
+
 uint16_t pci_config_read16(const struct pci_device *dev, uint8_t reg) {
     uint32_t value = pci_config_read32(dev, reg);
     return (uint16_t)(value >> ((reg & 2u) * 8u));

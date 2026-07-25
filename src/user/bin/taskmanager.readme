@@ -1,0 +1,14 @@
+System Monitor is BuzzOS's graphical process and resource manager.
+
+The Processes view refreshes once per second and shows PID, process name,
+scheduler state, sampled CPU usage, and resident user-memory mappings. Click a
+column heading to sort, use the mouse wheel or arrow keys to navigate, and use
+End Process to terminate the selected process. PID 0 and System Monitor itself
+cannot be terminated from the application.
+
+The Resources view shows 60-sample CPU and memory histories plus system uptime.
+Pause freezes automatic updates; Refresh always takes a new sample.
+
+BuzzOS currently has one immediate process-kill primitive rather than Linux
+signals, priorities, users, cgroups, or per-process I/O counters. End Process
+therefore performs an immediate process-wide termination.

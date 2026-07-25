@@ -23,7 +23,9 @@ Related documentation: [CHANGELOG.md](CHANGELOG.md), [Local Boot Guide](docs/boo
 - **Kernel**: GDT, IDT, exception handling, PIC, PIT, serial port, PS/2 keyboard & mouse, paging, E820/PMM, ELF32 loader.
 - **User mode**: `/bin/sh` shell, `nano`, `basm`, `cat`, `echo`, `gui`.
 - **Desktop**: User-mode multi-window desktop with support for window activation (raise to top), dragging, resizing, minimize, maximize, close, and scrollbars.
-- **GUI apps**: TextEdit, Paint, Calculator as independent user ELF programs, registered via `/fs/apps/*.app` manifests.
+- **GUI apps**: System Monitor, Terminal, TextEdit, Paint, Calculator, Files,
+  Browser, and media/game examples as independent user ELF programs,
+  registered via `/fs/apps/*.app` manifests.
 - **File system**: VFS + initrd/ramfs + devfs + persistent minifs, `/fs` preserved by default across image rebuilds.
 - **Network**: QEMU NE2000, DHCP, DNS, ICMP, UDP, TCP client, and user-mode socket API.
 - **IPC/Synchronization**: pipes, blocking read/write wakeup, futex wait/wake.
@@ -123,6 +125,7 @@ Default user GUI apps:
 
 | App | Description |
 | --- | --- |
+| System Monitor | Live process list with sortable PID, state, CPU, and resident-memory columns; resource-history graphs; pause/refresh controls; and confirmed process termination |
 | TextEdit | Text editor with editing area resizing with window, supports Enter, cursor movement, horizontal/vertical scrollbars, saves to `/fs/textedit.txt` |
 | Paint | Bitmap drawing tool with canvas and toolbar resizing with window, supports pen, eraser, line, rectangle, fill, and continuous strokes |
 | Calculator | Expression calculator supporting parentheses, decimals, and common arithmetic expressions |

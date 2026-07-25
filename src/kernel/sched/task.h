@@ -21,6 +21,7 @@ struct task {
     char     name[16];
     char     cwd[128];
     uint8_t  fpu_state[FPU_STATE_SIZE] __attribute__((aligned(16)));
+    uint32_t cpu_ticks;  /* timer samples spent running on the CPU */
 };
 
 #define TASK_READY   0

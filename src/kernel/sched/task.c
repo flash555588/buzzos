@@ -158,6 +158,7 @@ void sched_init(void) {
     tasks[0].fd_owner = 0;
     tasks[0].proc_id = 0;
     tasks[0].wake_tick = 0;
+    tasks[0].cpu_ticks = 0;
     for (int i = 0; i < 16; i++) tasks[0].name[i] = 0;
     tasks[0].name[0] = 'i'; tasks[0].name[1] = 'd'; tasks[0].name[2] = 'l';
     tasks[0].name[3] = 'e';
@@ -229,6 +230,7 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
     tasks[id].fd_owner = id;
     tasks[id].proc_id = id;
     tasks[id].wake_tick = 0;
+    tasks[id].cpu_ticks = 0;
     int parent = current_task ? task_process_owner(current_task) : 0;
     procs[id].used = 1;
     procs[id].pid = id;
@@ -358,6 +360,8 @@ void task_yield(void) {
 }
 
 void sched_tick(void) {
+    if (current_task && current_task->state == TASK_RUNNING)
+        current_task->cpu_ticks++;
     if (preempt_depth)
         return;
     /* Keep a 4 ms CPU quantum independent of the PIT frequency.  Newly
@@ -574,8 +578,26 @@ static void dump_u32(void (*putc)(char), uint32_t v) {
         putc(buf[--i]);
 }
 
+static uint32_t process_cpu_ticks(int pid) {
+    uint32_t total = 0;
+    for (int i = 0; i < num_tasks; i++) {
+        if (task_process_owner(&tasks[i]) == pid)
+            total += tasks[i].cpu_ticks;
+    }
+    return total;
+}
+
+static uint32_t process_rss_kb(int pid) {
+    for (int i = 0; i < num_tasks; i++) {
+        if (task_process_owner(&tasks[i]) == pid && tasks[i].cr3)
+            return paging_count_user_pages(tasks[i].cr3) *
+                   (PAGE_SIZE / 1024u);
+    }
+    return 0;
+}
+
 void task_dump(void (*putc)(char), int show_dead) {
-    dump_str(putc, "PID  STATE    OUT    CODE  NAME\n");
+    dump_str(putc, "PID  STATE    OUT    CODE  TICKS  RSS_KB  NAME\n");
     for (int pid = 0; pid < MAX_TASKS; pid++) {
         if (!procs[pid].used)
             continue;
@@ -606,6 +628,10 @@ void task_dump(void (*putc)(char), int show_dead) {
             dump_str(putc, "UNKNOWN  ");
         dump_str(putc, procs[pid].console_silent ? "null   " : "tty    ");
         dump_u32(putc, (uint32_t)procs[pid].exit_code);
+        dump_str(putc, "     ");
+        dump_u32(putc, process_cpu_ticks(pid));
+        dump_str(putc, "     ");
+        dump_u32(putc, process_rss_kb(pid));
         dump_str(putc, "     ");
         dump_str(putc, procs[pid].name);
         putc('\n');

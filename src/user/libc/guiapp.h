@@ -23,6 +23,8 @@ enum {
     GUIAPP_EVT_CLOSE = 5,
     GUIAPP_EVT_TEXT = 6,
     GUIAPP_EVT_COMMAND = 7,
+    /* Desktop heartbeat for applications with live status surfaces. */
+    GUIAPP_EVT_TICK = 8,
 };
 
 enum { GUIAPP_CMD_COPY = 1, GUIAPP_CMD_PASTE = 2, GUIAPP_CMD_CUT = 3 };

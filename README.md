@@ -23,7 +23,7 @@ English: [README.en.md](README.en.md)
 - 内核：GDT、IDT、异常处理、PIC、PIT、串口、PS/2 键鼠、分页、E820/PMM、ELF32 loader。
 - 用户态：`/bin/sh` shell、`nano`、`basm`、`cat`、`echo`、`gui`。
 - 桌面：用户态多窗口桌面，支持窗口激活置顶、拖动、缩放、最小化、最大化、关闭和滚动条。
-- GUI app：TextEdit、Paint、Calculator 作为独立用户 ELF 程序，通过 `/fs/apps/*.app` manifest 注册。
+- GUI app：System Monitor、Terminal、TextEdit、Paint、Calculator、Files、Browser 和媒体/游戏示例作为独立用户 ELF 程序，通过 `/fs/apps/*.app` manifest 注册。
 - 文件系统：VFS + initrd/ramfs + devfs + 持久化 minifs，`/fs` 默认随镜像重建保留。
 - 网络：QEMU NE2000、DHCP、DNS、ICMP、UDP、TCP client 和用户态 socket API。
 - IPC/同步：pipe、阻塞读写唤醒、futex wait/wake。
@@ -128,6 +128,7 @@ gui
 
 | App | 说明 |
 | --- | --- |
+| System Monitor | 实时、可排序的进程列表，显示 PID、状态、CPU 和驻留内存；提供资源历史图、暂停/刷新和带确认的结束进程操作 |
 | TextEdit | 文本编辑器，编辑区随窗口大小变化，支持回车、光标移动、水平/垂直滚动条，保存到 `/fs/textedit.txt` |
 | Paint | 位图绘图工具，画布和工具栏随窗口大小变化，支持画笔、橡皮、直线、矩形、填充和连续笔画 |
 | Calculator | 表达式计算器，支持括号、小数和常见四则表达式 |

@@ -62,6 +62,7 @@ KERNEL_SRCS := \
 	src/kernel/drv/surface.c \
 	src/kernel/drv/console.c \
 	src/kernel/drv/fb.c \
+	src/kernel/drv/virtio_gpu.c \
 	src/kernel/drv/reboot.c \
 	src/kernel/drv/pcnet.c \
 	src/kernel/drv/ne2000.c
@@ -94,8 +95,13 @@ QEMU_ACCEL ?= whpx
 QEMU_CPU ?= qemu64
 # SDL+GL is much faster than default GTK under WHPX; clarity is acceptable.
 QEMU_DISPLAY ?= sdl,gl=on
+# Use the virtio-vga compatibility device for GPU experiments.  It exposes a
+# modern virtio-gpu PCI function while retaining a boot-time VBE framebuffer,
+# so older guests can still fall back to the framebuffer backend.  Override
+# with `QEMU_VIDEO="-vga std"` to force the legacy path.
+QEMU_VIDEO ?= -vga none -device virtio-vga,xres=1600,yres=900
 QEMU_BASE := -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 256 \
-	-drive format=raw,file=$(IMAGE) -no-reboot -vga std \
+	-drive format=raw,file=$(IMAGE) -no-reboot $(QEMU_VIDEO) \
 	-display $(QEMU_DISPLAY)
 QEMU_AUDIO_AC97 := -audiodev dsound,id=audio0 \
 	-device AC97,audiodev=audio0
@@ -156,7 +162,7 @@ NETSURF_PORT_OBJ := $(BUILD)/user/netsurf_buzzos_platform.o
 NSHTMLTEST_ELF := $(BUILD)/user/nshtmltest.elf
 NETSURF_ELF := $(BUILD)/user/netsurf.elf
 NSMONKEY_ELF := $(BUILD)/user/nsmonkey.elf
-GUI_APP_NAMES := terminal textedit paint calculator filemanager browser doom music gameboy luaide
+GUI_APP_NAMES := terminal taskmanager textedit paint calculator filemanager browser doom music gameboy luaide
 GUI_APP_ELFS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).elf)
 GUI_APP_SRCS := $(foreach app,$(GUI_APP_NAMES),src/user/bin/$(app).c)
 GUI_APP_OBJS := $(foreach app,$(GUI_APP_NAMES),$(BUILD)/user/$(app).o)

@@ -5,6 +5,7 @@
 #include "io.h"
 #include "irq.h"
 #include "paging.h"
+#include "virtio_gpu.h"
 
 enum {
     FB_FONT_W = KFONT_WIDTH,
@@ -18,6 +19,33 @@ static uint32_t fb_page_offset;
 static int fb_boot_info_valid;
 static int fb_ready;
 static int display_owner_pid;
+
+static int fb_gpu_active(void) {
+    return fb_ready && fb_info.backend == GFX_BACKEND_VIRTIO_GPU_2D &&
+           virtio_gpu_ready();
+}
+
+static volatile uint32_t *fb_row32(int y) {
+    if (fb_gpu_active())
+        return (volatile uint32_t *)virtio_gpu_pixels() +
+               (uint32_t)y * virtio_gpu_stride();
+    return (volatile uint32_t *)(fb_mem + (uint32_t)y * fb_info.pitch);
+}
+
+static int fb_flush_rect(int x, int y, int width, int height) {
+    if (!fb_gpu_active())
+        return 0;
+    if (x < 0) { width += x; x = 0; }
+    if (y < 0) { height += y; y = 0; }
+    if (x >= (int)fb_info.width || y >= (int)fb_info.height ||
+        width <= 0 || height <= 0)
+        return 0;
+    if (width > (int)fb_info.width - x)
+        width = (int)fb_info.width - x;
+    if (height > (int)fb_info.height - y)
+        height = (int)fb_info.height - y;
+    return virtio_gpu_flush(x, y, width, height);
+}
 
 enum {
     VBE_DISPI_INDEX_PORT = 0x01CE,
@@ -120,7 +148,11 @@ static void fb_store_rgb(int x, int y, uint32_t rgb) {
         return;
     volatile uint8_t *p = fb_mem + (uint32_t)y * fb_info.pitch;
     if (fb_info.bpp == 32) {
-        ((volatile uint32_t *)p)[x] = rgb;
+        if (fb_gpu_active())
+            virtio_gpu_pixels()[(uint32_t)y * virtio_gpu_stride() +
+                                (uint32_t)x] = rgb;
+        else
+            ((volatile uint32_t *)p)[x] = rgb;
     } else if (fb_info.bpp == 24) {
         p += (uint32_t)x * 3u;
         p[0] = (uint8_t)(rgb & 0xFFu);
@@ -242,6 +274,7 @@ void fb_set_framebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
     fb_info.height = height;
     fb_info.pitch = pitch;
     fb_info.bpp = bpp;
+    fb_info.backend = GFX_BACKEND_FRAMEBUFFER;
     if (!fb_boot_info_valid) {
         fb_boot_info = fb_info;
         fb_boot_info_valid = 1;
@@ -255,8 +288,14 @@ void fb_init(void) {
         fb_info.height = 1;
         fb_info.pitch = 1;
         fb_info.bpp = 8;
+        fb_info.backend = GFX_BACKEND_FRAMEBUFFER;
     }
     palette_init();
+    if (fb_ready && virtio_gpu_init(fb_info.width, fb_info.height) == 0) {
+        fb_info.pitch = fb_info.width * 4u;
+        fb_info.bpp = 32;
+        fb_info.backend = GFX_BACKEND_VIRTIO_GPU_2D;
+    }
     display_owner_pid = 0;
 }
 
@@ -274,10 +313,22 @@ int fb_set_mode(uint32_t width, uint32_t height) {
         return -1;
     uint64_t bytes = (uint64_t)width * height * 4u;
     if (bytes + fb_page_offset > KERNEL_FB_SIZE || !bochs_vbe_available())
-        return -1;
+        if (!fb_gpu_active())
+            return -1;
     if (fb_info.width == width && fb_info.height == height &&
         fb_info.bpp == 32)
         return 0;
+
+    if (fb_gpu_active()) {
+        if (virtio_gpu_set_mode(width, height) < 0)
+            return -1;
+        fb_info.width = width;
+        fb_info.height = height;
+        fb_info.pitch = width * 4u;
+        fb_info.bpp = 32;
+        fb_info.backend = GFX_BACKEND_VIRTIO_GPU_2D;
+        return 0;
+    }
 
     struct gfx_info previous = fb_info;
     uint32_t flags = irq_save();
@@ -293,6 +344,7 @@ int fb_set_mode(uint32_t width, uint32_t height) {
     fb_info.height = height;
     fb_info.pitch = virtual_width * 4u;
     fb_info.bpp = 32;
+    fb_info.backend = GFX_BACKEND_FRAMEBUFFER;
     irq_restore(flags);
     return 0;
 }
@@ -317,7 +369,7 @@ int fb_putpixel(int x, int y, uint8_t color) {
         x >= (int)fb_info.width || y >= (int)fb_info.height)
         return -1;
     fb_store_rgb(x, y, fb_palette_rgb(color));
-    return 0;
+    return fb_flush_rect(x, y, 1, 1);
 }
 
 int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
@@ -332,8 +384,7 @@ int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
     uint32_t rgb = fb_palette_rgb(color);
     if (fb_info.bpp == 32) {
         for (int yy = 0; yy < h; yy++) {
-            volatile uint32_t *dst = (volatile uint32_t *)(fb_mem +
-                (uint32_t)(y + yy) * fb_info.pitch) + x;
+            volatile uint32_t *dst = fb_row32(y + yy) + x;
             int xx = 0;
             for (; xx + 4 <= w; xx += 4) {
                 dst[xx] = rgb;
@@ -344,12 +395,12 @@ int fb_fill_rect(int x, int y, int w, int h, uint8_t color) {
             for (; xx < w; xx++)
                 dst[xx] = rgb;
         }
-        return 0;
+        return fb_flush_rect(x, y, w, h);
     }
     for (int yy = 0; yy < h; yy++)
         for (int xx = 0; xx < w; xx++)
             fb_store_rgb(x + xx, y + yy, rgb);
-    return 0;
+    return fb_flush_rect(x, y, w, h);
 }
 
 int fb_blit8_stride(int x, int y, int w, int h,
@@ -363,8 +414,7 @@ int fb_blit8_stride(int x, int y, int w, int h,
     if (fb_info.bpp == 32) {
         for (int yy = 0; yy < h; yy++) {
             const uint8_t *src = pixels + yy * stride;
-            volatile uint32_t *dst = (volatile uint32_t *)(fb_mem +
-                (uint32_t)(y + yy) * fb_info.pitch) + x;
+            volatile uint32_t *dst = fb_row32(y + yy) + x;
             int xx = 0;
             for (; xx + 4 <= w; xx += 4) {
                 dst[xx] = palette_lut[src[xx]];
@@ -375,14 +425,14 @@ int fb_blit8_stride(int x, int y, int w, int h,
             for (; xx < w; xx++)
                 dst[xx] = palette_lut[src[xx]];
         }
-        return 0;
+        return fb_flush_rect(x, y, w, h);
     }
     for (int yy = 0; yy < h; yy++) {
         const uint8_t *src = pixels + yy * stride;
         for (int xx = 0; xx < w; xx++)
             fb_store_rgb(x + xx, y + yy, fb_palette_rgb(src[xx]));
     }
-    return 0;
+    return fb_flush_rect(x, y, w, h);
 }
 
 int fb_blit8(int x, int y, int w, int h, const uint8_t *pixels) {
@@ -393,11 +443,17 @@ int fb_text(int x, int y, const char *s, uint8_t fg, int bg) {
     if (!fb_ready || !s)
         return -1;
     int start_x = x;
+    int min_x = x;
+    int max_x = x;
+    int min_y = y;
+    int max_y = y + FB_FONT_H;
     while (*s) {
         uint32_t cp = utf8_next(&s);
         if (cp == '\n') {
             x = start_x;
             y += FB_FONT_H;
+            if (y + FB_FONT_H > max_y)
+                max_y = y + FB_FONT_H;
             continue;
         }
         if (cp < 0x80u) {
@@ -406,8 +462,12 @@ int fb_text(int x, int y, const char *s, uint8_t fg, int bg) {
         } else {
             x += draw_unicode_glyph(x, y, cp, fg, bg);
         }
+        if (x > max_x) max_x = x;
+        if (x < min_x) min_x = x;
+        if (y < min_y) min_y = y;
+        if (y + FB_FONT_H > max_y) max_y = y + FB_FONT_H;
     }
-    return 0;
+    return fb_flush_rect(min_x, min_y, max_x - min_x, max_y - min_y);
 }
 
 int fb_present_rgb32(int x, int y, int width, int height,
@@ -422,9 +482,7 @@ int fb_present_rgb32(int x, int y, int width, int height,
     if (fb_info.bpp == 32) {
         for (int row = 0; row < height; row++) {
             const uint32_t *source = pixels + (uint32_t)row * (uint32_t)stride;
-            volatile uint32_t *destination =
-                (volatile uint32_t *)(fb_mem +
-                    (uint32_t)(y + row) * fb_info.pitch) + x;
+            volatile uint32_t *destination = fb_row32(y + row) + x;
             int col = 0;
             for (; col + 4 <= width; col += 4) {
                 destination[col] = source[col];
@@ -436,7 +494,7 @@ int fb_present_rgb32(int x, int y, int width, int height,
                 destination[col] = source[col];
         }
         __asm__ volatile("sfence" ::: "memory");
-        return 0;
+        return fb_flush_rect(x, y, width, height);
     }
 
     for (int row = 0; row < height; row++) {
@@ -445,7 +503,7 @@ int fb_present_rgb32(int x, int y, int width, int height,
             fb_store_rgb(x + col, y + row, source[col]);
     }
     __asm__ volatile("sfence" ::: "memory");
-    return 0;
+    return fb_flush_rect(x, y, width, height);
 }
 
 int fb_display_acquire(int pid) {

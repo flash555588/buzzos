@@ -28,7 +28,12 @@ filesystem, and a user-space GUI app manager.
 - Filesystem status: `/proc/fs`, text-shell `fsinfo`, desktop-terminal `fsinfo`,
   `fsstat`, smoke coverage, and `make report` expose the live `/fs`/minifs
   counters and host-side check/repair entrypoints.
-- GUI apps: `textedit`, `paint`, and `calculator`.
+- GUI apps: `taskmanager`, `terminal`, `textedit`, `paint`, `calculator`,
+  `filemanager`, `browser`, `doom`, `music`, and `gameboy`.
+- System monitoring: `taskmanager` consumes `/proc/tasks` and
+  `/proc/meminfo` to provide live sortable process CPU/resident-memory
+  columns, CPU and memory histories, pause/refresh controls, and confirmed
+  process-wide termination.
 - User GUI helpers: seeded apps use `src/user/libc/appui.h` for lightweight
   controls and `src/user/libc/guiapp.h` for the desktop-hosted app protocol.
   Live-resize / composition trade-offs (1:1 blit, configure coalesce, SHM

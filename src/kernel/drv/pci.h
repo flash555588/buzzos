@@ -19,6 +19,7 @@ struct pci_device {
 };
 
 void pci_init(void);
+uint8_t pci_config_read8(const struct pci_device *dev, uint8_t reg);
 uint32_t pci_config_read32(const struct pci_device *dev, uint8_t reg);
 uint16_t pci_config_read16(const struct pci_device *dev, uint8_t reg);
 void pci_config_write32(const struct pci_device *dev, uint8_t reg, uint32_t value);

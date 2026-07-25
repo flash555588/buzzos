@@ -91,6 +91,12 @@ struct gfx_info {
     uint32_t height;
     uint32_t pitch;
     uint32_t bpp;
+    uint32_t backend;
+};
+
+enum {
+    GFX_BACKEND_FRAMEBUFFER = 0,
+    GFX_BACKEND_VIRTIO_GPU_2D = 1,
 };
 struct shm_mapping {
     uint32_t token;

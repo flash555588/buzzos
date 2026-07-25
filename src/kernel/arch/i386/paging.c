@@ -278,6 +278,28 @@ int paging_map_user_range(uint32_t va, uint32_t size) {
     return paging_map_user_range_in_space(paging_current_cr3(), va, size);
 }
 
+uint32_t paging_count_user_pages(uint32_t cr3) {
+    uint32_t *pd = space_page_directory(cr3);
+    uint32_t count = 0;
+    if (!pd)
+        return 0;
+    paging_lock();
+    for (uint32_t pde = user_pde_first(); pde <= user_pde_last(); pde++) {
+        uint32_t entry = pd[pde];
+        if (!(entry & PAGE_PRESENT) || !(entry & PAGE_USER) ||
+            (entry & PAGE_LARGE))
+            continue;
+        uint32_t *pt = (uint32_t *)(uintptr_t)(entry & 0xFFFFF000u);
+        for (uint32_t pte = 0; pte < 1024u; pte++) {
+            if ((pt[pte] & (PAGE_PRESENT | PAGE_USER)) ==
+                (PAGE_PRESENT | PAGE_USER))
+                count++;
+        }
+    }
+    paging_unlock();
+    return count;
+}
+
 int paging_user_range_accessible(uint32_t va, uint32_t size, int write) {
     if (size == 0)
         return 1;
