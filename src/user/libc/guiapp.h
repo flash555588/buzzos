@@ -23,6 +23,7 @@ enum {
     GUIAPP_EVT_CLOSE = 5,
     GUIAPP_EVT_TEXT = 6,
     GUIAPP_EVT_COMMAND = 7,
+    GUIAPP_EVT_CARET = 8,
 };
 
 enum { GUIAPP_CMD_COPY = 1, GUIAPP_CMD_PASTE = 2, GUIAPP_CMD_CUT = 3 };
@@ -47,6 +48,8 @@ struct guiapp_event {
     int32_t buttons;
     int32_t wheel;
     char text[GUIAPP_TEXT_MAX];
+    int32_t caret_x;
+    int32_t caret_y;
 };
 
 struct guiapp_frame {
@@ -102,5 +105,6 @@ int guiapp_request_launch(struct guiapp_ctx *ctx, const char *target,
                           const char *argument);
 int guiapp_set_clipboard(struct guiapp_ctx *ctx, const char *text);
 int guiapp_request_exec(struct guiapp_ctx *ctx, const char *path);
+int guiapp_send_caret(struct guiapp_ctx *ctx, int x, int y);
 
 #endif

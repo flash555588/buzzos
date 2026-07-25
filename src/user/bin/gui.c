@@ -191,6 +191,11 @@ static unsigned int tick;
 static unsigned int last_render_tick;
 static volatile int desktop_dirty = 1;
 static volatile uint32_t app_frame_dirty_mask;
+
+static int find_caret_window(void);
+static struct rect get_caret_area(void);
+static void draw_ime(void);
+
 static uint8_t scaled_scanline[APP_SURFACE_MAX_W];
 static struct rect compose_clip = {0, 0, MAX_SW, MAX_SH};
 static struct rect pending_damage;
@@ -329,16 +334,18 @@ static void dock_damage(void) {
 /* Damage the IME badge (top bar) and the candidate panel area. */
 static void ime_damage(void) {
     queue_damage((struct rect){0, 0, sw, TOPBAR_H});
-    /* Follow-mouse panel: cover a generous band around the cursor so the
-     * previous splat is erased and the new position is fully drawn. */
+    /* Follow focused app's content area. */
     if (ime_enabled && ime_length > 0) {
-        int pad = 40;
-        int panel_h = 64;
-        int x = max_i(0, pointer_x - 200 - pad);
-        int y = max_i(0, pointer_y - panel_h - pad);
-        int w = min_i(sw - x, 400 + 2 * pad);
-        int h = min_i(sh - y, panel_h + 2 * pad + 20);
-        queue_damage((struct rect){x, y, w, h});
+        struct rect caret = get_caret_area();
+        if (caret.w > 0 && caret.h > 0) {
+            int pad = 40;
+            int panel_h = 64;
+            int x = max_i(0, caret.x - 200 - pad);
+            int y = max_i(0, caret.y - panel_h - pad);
+            int w = min_i(sw - x, 400 + 2 * pad);
+            int h = min_i(sh - y, panel_h + 2 * pad + 20);
+            queue_damage((struct rect){x, y, w, h});
+        }
     }
 }
 
@@ -770,6 +777,9 @@ static int status_resolution_bottom(void);
 static struct rect launcher_row_paint_rect(int index);
 static int hit_launcher_row_at(int x, int y);
 static int top_window_at(int x, int y);
+static int find_caret_window(void);
+static struct rect get_caret_area(void);
+static void draw_ime(void);
 static void close_window(int id);
 static void clamp_scroll(int id);
 static void activate(int id);
@@ -2255,6 +2265,33 @@ static int ime_candidate_consume(int page_index) {
     return (int)ime_cand_consume[abs];
 }
 
+static int find_caret_window(void) {
+    /* Returns the first topmost window that has real input focus (not launcher/status). */
+    for (int i = 0; i < WIN_COUNT; i++) {
+        int id = z_order[i];
+        if (id < 0 || id >= WIN_COUNT)
+            continue;
+        if (windows[id].visible && !windows[id].minimized) {
+            if (id >= WIN_APP_BASE) {
+                int slot = id - WIN_APP_BASE;
+                if (slot >= 0 && slot < MAX_GUI_APPS && app_sessions[slot].used)
+                    return id;
+            } else if (id == WIN_LAUNCHER) {
+                return id;
+            }
+        }
+    }
+    return -1;
+}
+
+static struct rect get_caret_area(void) {
+    int id = find_caret_window();
+    if (id < 0)
+        return (struct rect){0, 0, 100, 100};
+    struct rect r = windows[id].r;
+    return (struct rect){r.x + 12, r.y + WINDOW_TITLE_H + 12, r.w - 30, r.h - WINDOW_TITLE_H - 44};
+}
+
 static void draw_ime(void) {
     const char *mode = ime_enabled ? "中" : "英";
     struct rect badge = ime_badge_rect();
@@ -2297,9 +2334,10 @@ static void draw_ime(void) {
     int panel_w = min_i(sw - 24, max_i(320, need_w));
     int panel_h = 64;
 
-    /* Follow mouse */
-    int panel_x = max_i(8, pointer_x - panel_w / 2 + 8);
-    int panel_y = max_i(TOPBAR_H + 8, pointer_y - 38);
+    /* Follow the focused app's content area (standard OS behavior). */
+    struct rect caret = get_caret_area();
+    int panel_x = max_i(8, caret.x + caret.w / 2 - panel_w / 2);
+    int panel_y = max_i(TOPBAR_H + 8, caret.y - panel_h - 8);
     if (panel_y + panel_h > sh - 8)
         panel_y = sh - panel_h - 8;
     struct rect panel = {panel_x, panel_y, panel_w, panel_h};

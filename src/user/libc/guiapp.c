@@ -213,3 +213,14 @@ int guiapp_request_exec(struct guiapp_ctx *ctx, const char *path) {
     copy_field(frame.target, path, GUIAPP_PATH_MAX);
     return write_full(ctx->frame_fd, &frame, (int)sizeof(frame));
 }
+
+int guiapp_send_caret(struct guiapp_ctx *ctx, int x, int y) {
+    struct guiapp_event ev;
+    if (!ctx)
+        return -1;
+    ev.magic = GUIAPP_MAGIC;
+    ev.type = GUIAPP_EVT_CARET;
+    ev.caret_x = x;
+    ev.caret_y = y;
+    return write_full(ctx->event_fd, &ev, (int)sizeof(ev));
+}
