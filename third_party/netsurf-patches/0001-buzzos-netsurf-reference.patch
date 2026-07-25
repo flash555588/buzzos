@@ -1,0 +1,97 @@
+diff --git a/content/handlers/html/css.c b/content/handlers/html/css.c
+index 0bc3884..38869f1 100644
+--- a/content/handlers/html/css.c
++++ b/content/handlers/html/css.c
+@@ -478,8 +478,17 @@ bool html_css_process_link(html_content *htmlc, dom_node *node)
+ 
+ 	nsurl_unref(joined);
+ 
+-	if (ns_error != NSERROR_OK)
+-		goto no_memory;
++	if (ns_error != NSERROR_OK) {
++		/* An author stylesheet is optional.  Failure to start its fetch
++		 * (for example, an HTTPS URL on a frontend without TLS support)
++		 * must not turn the parent HTML document into an error page.  Only
++		 * allocation failure is fatal to conversion. */
++		if (ns_error == NSERROR_NOMEM)
++			goto no_memory;
++		NSLOG(netsurf, WARNING, "Skipping unavailable stylesheet: %d",
++		      ns_error);
++		return true;
++	}
+ 
+ 	htmlc->stylesheet_count++;
+ 
+diff --git a/content/llcache.c b/content/llcache.c
+index 2ec39e8..b742a30 100644
+--- a/content/llcache.c
++++ b/content/llcache.c
+@@ -32,6 +32,7 @@
+  */
+ 
+ #include <stdlib.h>
++#include <stdio.h>
+ #include <stdint.h>
+ #include <string.h>
+ #include <strings.h>
+@@ -4050,6 +4051,8 @@ llcache_handle_retrieve(nsurl *url,
+ 
+ 	/* Can we fetch this URL at all? */
+ 	if (fetch_can_fetch(hsts_url) == false) {
++		fprintf(stderr, "[llcache] no-handler url=%s\n",
++			nsurl_access(hsts_url));
+ 		nsurl_unref(hsts_url);
+ 		return NSERROR_NO_FETCH_HANDLER;
+ 	}
+diff --git a/desktop/browser_window.c b/desktop/browser_window.c
+index 226741b..ab081b4 100644
+--- a/desktop/browser_window.c
++++ b/desktop/browser_window.c
+@@ -27,6 +27,7 @@
+ #include "utils/config.h"
+ 
+ #include <stdlib.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <math.h>
+ #include <nsutils/time.h>
+@@ -1391,6 +1392,23 @@ browser_window__handle_error(struct browser_window *bw,
+ 		message = messages_get(message);
+ 	}
+ 
++	NSLOG(netsurf, ERROR,
++	      "[netsurf-error] code=%d message=%s url=%s mime=%s status=%d",
++	      code,
++	      message != NULL ? message : "(null)",
++	      url != NULL ? nsurl_access(url) : "(null)",
++	      content_get_mime_type(c) != NULL ?
++		      lwc_string_data(content_get_mime_type(c)) : "(null)",
++	      content_get_status(c));
++	fprintf(stderr,
++		"[netsurf-error] code=%d message=%s url=%s mime=%s status=%d\n",
++		code,
++		message != NULL ? message : "(null)",
++		url != NULL ? nsurl_access(url) : "(null)",
++		content_get_mime_type(c) != NULL ?
++			lwc_string_data(content_get_mime_type(c)) : "(null)",
++		content_get_status(c));
++
+ 	if (c == bw->loading_content) {
+ 		bw->loading_content = NULL;
+ 	} else if (c == bw->current_content) {
+diff --git a/frontends/monkey/schedule.c b/frontends/monkey/schedule.c
+index 9d3ab7a..bd0ee3a 100644
+--- a/frontends/monkey/schedule.c
++++ b/frontends/monkey/schedule.c
+@@ -150,7 +150,10 @@ int monkey_schedule_run(void)
+ 	gettimeofday(&tv, NULL);
+ 
+ 	while (cur_nscb != NULL) {
+-		if (timercmp(&tv, &cur_nscb->tv, >)) {
++		/* A zero-delay callback is due immediately.  Using a strict '>'
++		 * comparison forces frontends with a coarse clock (BuzzOS ticks at
++		 * 100 Hz) to wait a full tick between every parser/layout callback. */
++		if (timercmp(&tv, &cur_nscb->tv, >=)) {
+ 			/* scheduled time */
+ 
+ 			/* remove callback */

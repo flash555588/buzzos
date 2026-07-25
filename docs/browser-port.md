@@ -9,10 +9,13 @@ and regression target until the native engine reaches feature parity.
 - Project: NetSurf
 - Revision: a471a0d44274ec57fee5e5f30ae59fbd2ad02656
 - Fetch: powershell -File tools/fetch-netsurf.ps1
+- BuzzOS patches: third_party/netsurf-patches/
 - License: GPL-2.0 with the upstream OpenSSL exception
 
-The reference checkout is deliberately ignored by Git. Ported files and changes
-must be added explicitly, with their upstream copyright and license retained.
+The reference checkout is deliberately ignored by Git (see `.gitignore`).
+`tools/fetch-netsurf.ps1` pins the upstream revision, then applies the tracked
+patch series under `third_party/netsurf-patches/`. Ported frontend code lives
+under `src/user/ports/netsurf/`, with upstream copyright and license retained.
 
 NetSurf was selected because its framebuffer frontend has no mandatory desktop
 GUI toolkit, and its engine is already split into HTML5 parsing (Hubbub), DOM

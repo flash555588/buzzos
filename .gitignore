@@ -4,6 +4,12 @@ build_*/
 build-*/
 __pycache__/
 
+# Upstream NetSurf trees are fetched and patched by tools/fetch-netsurf.ps1.
+# Tracked pins live in that script; BuzzOS-only edits live in
+# third_party/netsurf-patches/. Do not commit the checkouts as gitlinks.
+/third_party/netsurf-reference/
+/third_party/netsurf-workspace/
+
 # User-supplied game ROMs and emulator save data are installed into MiniFS,
 # not redistributed from the source repository.
 /*.gb

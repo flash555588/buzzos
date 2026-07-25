@@ -5,24 +5,70 @@ param(
 $ErrorActionPreference = "Stop"
 $revision = "a471a0d44274ec57fee5e5f30ae59fbd2ad02656"
 $repository = "git://git.netsurf-browser.org/netsurf.git"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$patchDir = Join-Path $repoRoot "third_party/netsurf-patches"
 
-if (Test-Path -LiteralPath $Destination) {
-    $current = (& git -C $Destination rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $current -ne $revision) {
-        throw "$Destination exists but is not the pinned NetSurf revision $revision"
+function Ensure-GitCheckout {
+    param(
+        [string]$Path,
+        [string]$Repository,
+        [string]$Revision,
+        [string]$Label
+    )
+
+    if (Test-Path -LiteralPath $Path) {
+        $current = (& git -C $Path rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            throw "$Label at $Path is not a git checkout"
+        }
+        if ($current -ne $Revision) {
+            Write-Host "Updating $Label from $current to $Revision"
+            & git -C $Path fetch --all
+            if ($LASTEXITCODE -ne 0) { throw "Could not fetch $Label" }
+            & git -C $Path checkout --detach $Revision
+            if ($LASTEXITCODE -ne 0) { throw "Could not check out $Label revision $Revision" }
+        }
+    } else {
+        & git clone --no-checkout $Repository $Path
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not clone $Label"
+        }
+        & git -C $Path checkout --detach $Revision
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not check out $Label revision $Revision"
+        }
     }
-    Write-Host "NetSurf reference already present at $revision"
-} else {
-    & git clone --no-checkout $repository $Destination
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not clone NetSurf"
-    }
-    & git -C $Destination checkout --detach $revision
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not check out pinned NetSurf revision"
-    }
-    Write-Host "NetSurf reference ready at $revision"
+
+    # Drop local edits/line-ending noise so the pin + patch series is reproducible.
+    & git -C $Path reset --hard $Revision
+    if ($LASTEXITCODE -ne 0) { throw "Could not reset $Label to $Revision" }
+    & git -C $Path clean -fd
+    if ($LASTEXITCODE -ne 0) { throw "Could not clean $Label" }
 }
+
+function Apply-NetSurfPatches {
+    param([string]$Path)
+
+    if (!(Test-Path -LiteralPath $patchDir)) {
+        Write-Host "No NetSurf patches directory at $patchDir"
+        return
+    }
+
+    $patches = Get-ChildItem -LiteralPath $patchDir -Filter "*.patch" |
+        Sort-Object Name
+    foreach ($patch in $patches) {
+        Write-Host "Applying $($patch.Name)"
+        & git -C $Path apply --whitespace=nowarn -- $patch.FullName
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not apply NetSurf patch $($patch.Name)"
+        }
+    }
+}
+
+Ensure-GitCheckout -Path $Destination -Repository $repository `
+    -Revision $revision -Label "NetSurf reference"
+Apply-NetSurfPatches -Path $Destination
+Write-Host "NetSurf reference ready at $revision (with BuzzOS patches)"
 
 $workspace = "third_party/netsurf-workspace"
 $libraries = [ordered]@{
@@ -38,28 +84,14 @@ $libraries = [ordered]@{
 New-Item -ItemType Directory -Force $workspace | Out-Null
 foreach ($name in $libraries.Keys) {
     $path = Join-Path $workspace $name
-    if (!(Test-Path -LiteralPath $path)) {
-        & git clone --no-checkout "git://git.netsurf-browser.org/$name.git" $path
-        if ($LASTEXITCODE -ne 0) { throw "Could not clone $name" }
-        & git -C $path checkout --detach $libraries[$name]
-        if ($LASTEXITCODE -ne 0) { throw "Could not check out $name" }
-    }
-    $current = (& git -C $path rev-parse HEAD).Trim()
-    if ($current -ne $libraries[$name]) {
-        throw "$name is at $current, expected $($libraries[$name])"
-    }
+    Ensure-GitCheckout -Path $path `
+        -Repository "git://git.netsurf-browser.org/$name.git" `
+        -Revision $libraries[$name] -Label $name
 }
 
 $zlibPath = Join-Path $workspace "zlib"
 $zlibRevision = "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
-if (!(Test-Path -LiteralPath $zlibPath)) {
-    & git clone --no-checkout https://github.com/madler/zlib.git $zlibPath
-    if ($LASTEXITCODE -ne 0) { throw "Could not clone zlib" }
-    & git -C $zlibPath checkout --detach $zlibRevision
-    if ($LASTEXITCODE -ne 0) { throw "Could not check out zlib" }
-}
-$zlibCurrent = (& git -C $zlibPath rev-parse HEAD).Trim()
-if ($zlibCurrent -ne $zlibRevision) {
-    throw "zlib is at $zlibCurrent, expected $zlibRevision"
-}
+Ensure-GitCheckout -Path $zlibPath `
+    -Repository "https://github.com/madler/zlib.git" `
+    -Revision $zlibRevision -Label "zlib"
 Write-Host "NetSurf core libraries ready"
