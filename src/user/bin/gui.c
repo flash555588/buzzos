@@ -329,8 +329,17 @@ static void dock_damage(void) {
 /* Damage the IME badge (top bar) and the candidate panel area. */
 static void ime_damage(void) {
     queue_damage((struct rect){0, 0, sw, TOPBAR_H});
-    /* Taller panel: composition line + candidate page. */
-    queue_damage((struct rect){0, sh - 170, sw, 170});
+    /* Follow-mouse panel: cover a generous band around the cursor so the
+     * previous splat is erased and the new position is fully drawn. */
+    if (ime_enabled && ime_length > 0) {
+        int pad = 40;
+        int panel_h = 64;
+        int x = max_i(0, pointer_x - 200 - pad);
+        int y = max_i(0, pointer_y - panel_h - pad);
+        int w = min_i(sw - x, 400 + 2 * pad);
+        int h = min_i(sh - y, panel_h + 2 * pad + 20);
+        queue_damage((struct rect){x, y, w, h});
+    }
 }
 
 static void topbar_damage(void) {
@@ -2287,7 +2296,13 @@ static void draw_ime(void) {
     int need_w = max_i(gui_text_width(comp), gui_text_width(cands)) + 28;
     int panel_w = min_i(sw - 24, max_i(320, need_w));
     int panel_h = 64;
-    struct rect panel = {(sw - panel_w) / 2, sh - 150, panel_w, panel_h};
+
+    /* Follow mouse */
+    int panel_x = max_i(8, pointer_x - panel_w / 2 + 8);
+    int panel_y = max_i(TOPBAR_H + 8, pointer_y - 38);
+    if (panel_y + panel_h > sh - 8)
+        panel_y = sh - panel_h - 8;
+    struct rect panel = {panel_x, panel_y, panel_w, panel_h};
     fill_round(panel, THEME_FIELD_BORDER);
     fill_round((struct rect){panel.x + 1, panel.y + 1,
                              panel.w - 2, panel.h - 2}, THEME_PANEL_RAISED);
