@@ -8,6 +8,7 @@ static volatile uint8_t buf[BUF_SIZE];
 static volatile int     head, tail;
 static volatile int     shift_down;
 static volatile int     ctrl_down;
+static volatile int     alt_down;
 static volatile int     extended_prefix;
 static volatile uint16_t event_buf[BUF_SIZE];
 static volatile int event_head, event_tail;
@@ -57,6 +58,7 @@ void keyboard_init(void) {
     head = tail = 0;
     shift_down = 0;
     ctrl_down = 0;
+    alt_down = 0;
     extended_prefix = 0;
     event_head = event_tail = 0;
 }
@@ -78,6 +80,10 @@ void keyboard_handler(uint8_t scancode) {
     }
     if (code == 0x1D) {
         ctrl_down = !released;
+        return;
+    }
+    if (code == 0x38) {
+        alt_down = !released;
         return;
     }
     if (extended) {
@@ -110,6 +116,11 @@ void keyboard_handler(uint8_t scancode) {
     if (released) return;
     char c = shift_down ? scancode_ascii_shift[scancode] : scancode_ascii[scancode];
     if (c == 0) return;
+    if (alt_down) {
+        if (scancode_ascii[scancode] == '\t')
+            enqueue_char(0x1E); /* desktop Alt+Tab task switch */
+        return;
+    }
     if (ctrl_down) {
         char base = scancode_ascii[scancode];
         if (base == ' ') {

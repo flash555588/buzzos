@@ -58,6 +58,12 @@ The desktop supports click-to-focus and raise, title-bar dragging, edge and
 corner resizing, minimize, maximize, close, mouse wheel scrolling, draggable
 scrollbars, and app resize events.
 
+Double-click a title bar to maximize or restore its window. Dragging a
+maximized title bar down restores the saved window size under the pointer so it
+can be repositioned in one gesture. Alt+Tab cycles visible windows; plain Tab
+is delivered to the focused application for fields, indentation, and other
+app-local navigation.
+
 Right-click an application content area to open the desktop-owned `Copy`,
 `Paste`, and `Cut` menu. The clipboard stores UTF-8 text and is shared across
 applications. TextEdit supports mouse drag selection and highlights the exact

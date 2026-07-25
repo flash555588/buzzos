@@ -7,6 +7,7 @@
 enum {
     KEY_ESC = 0x1B,
     KEY_BACKSPACE = 0x08,
+    KEY_WINDOW_CYCLE = 0x1E,
     KEY_UP = 256,
     KEY_DOWN,
     KEY_RIGHT,
@@ -171,6 +172,10 @@ static int app_count;
 static int app_selected;
 static int app_last_click = -1;
 static unsigned int app_last_click_tick;
+static int title_last_click = -1;
+static unsigned int title_last_click_tick;
+static int title_last_click_x;
+static int title_last_click_y;
 static char launcher_query[LAUNCHER_QUERY_CAP];
 static int launcher_query_length;
 static int dock_hover = -1;
@@ -212,6 +217,7 @@ static int pointer_drawn_x;
 static int pointer_drawn_y;
 static int pointer_drawn_valid;
 static int keyevent_fd = -1;
+static int suppress_tab_release;
 static unsigned int tick;
 static unsigned int last_render_tick;
 static uint32_t last_app_tick_ms;
@@ -265,6 +271,7 @@ static const uint8_t corner_inner[4] = {2, 1, 1, 0};
 
 static int min_i(int a, int b) { return a < b ? a : b; }
 static int max_i(int a, int b) { return a > b ? a : b; }
+static int abs_i(int value) { return value < 0 ? -value : value; }
 static int clamp_i(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
@@ -3535,7 +3542,8 @@ static void handle_key(int k) {
         running = 0;
         return;
     }
-    if (k == '\t') {
+    if (k == KEY_WINDOW_CYCLE) {
+        suppress_tab_release = 1;
         activate_next_visible();
         desktop_dirty = 1;
         return;
@@ -3626,6 +3634,10 @@ static void forward_key_releases(void) {
     while (read(keyevent_fd, &event, sizeof(event)) == (int)sizeof(event)) {
         if (event & 0x8000u)
             continue;
+        if ((event & 0x7FFFu) == '\t' && suppress_tab_release) {
+            suppress_tab_release = 0;
+            continue;
+        }
         int slot = app_slot_for_win(focus);
         if (slot >= 0 && app_sessions[slot].used &&
             app_send_event(slot, GUIAPP_EVT_KEY, 0, 0,
@@ -3947,6 +3959,20 @@ static void handle_mouse(void) {
             }
             int t = hit_window_title(pointer_x, pointer_y);
             if (t >= 0) {
+                if (t == title_last_click &&
+                    tick - title_last_click_tick <= 25u &&
+                    abs_i(pointer_x - title_last_click_x) <= 4 &&
+                    abs_i(pointer_y - title_last_click_y) <= 4) {
+                    title_last_click = -1;
+                    drag_win = -1;
+                    toggle_maximize(t);
+                    prev_buttons = ms.buttons;
+                    return;
+                }
+                title_last_click = t;
+                title_last_click_tick = tick;
+                title_last_click_x = pointer_x;
+                title_last_click_y = pointer_y;
                 drag_win = t;
                 drag_dx = pointer_x - windows[t].r.x;
                 drag_dy = pointer_y - windows[t].r.y;
@@ -4021,8 +4047,18 @@ static void handle_mouse(void) {
         struct rect *r = &windows[drag_win].r;
         struct rect old = *r;
         if (windows[drag_win].maximized) {
+            struct rect restore = windows[drag_win].restore;
+            drag_dx = clamp_i(drag_dx * restore.w / max_i(1, r->w),
+                              0, max_i(0, restore.w - 1));
+            drag_dy = clamp_i(drag_dy, 0, WINDOW_TITLE_H - 1);
+            *r = restore;
             windows[drag_win].maximized = 0;
-            windows[drag_win].restore = *r;
+            int slot = app_slot_for_win(drag_win);
+            if (slot >= 0 && app_sessions[slot].used) {
+                app_sessions[slot].resize_dirty = 1;
+                publish_app_configure(slot);
+            }
+            desktop_dirty = 1;
         }
         r->x = pointer_x - drag_dx;
         r->y = pointer_y - drag_dy;

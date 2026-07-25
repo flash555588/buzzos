@@ -377,13 +377,30 @@ try {
     Start-Sleep -Milliseconds 600
     $tooltipPpm = (Join-Path $OutDir "taskbar-tooltip.ppm")
     $screens += Capture-Screen "taskbar-tooltip" $tooltipPpm (Join-Path $OutDir "taskbar-tooltip.png")
-    # TextEdit opens at 80,74 with its maximize control centered near 629,91.
+    Send-Key "alt-tab"
+    Start-Sleep -Milliseconds 350
+    $switcherPpm = (Join-Path $OutDir "alt-tab-launcher.ppm")
+    $screens += Capture-Screen "alt-tab-launcher" $switcherPpm (Join-Path $OutDir "alt-tab-launcher.png")
+    Send-Key "alt-tab"
+    Start-Sleep -Milliseconds 250
+    # Double-clicking the TextEdit title bar maximizes it.
     Move-MouseRelative -2000 -2000
-    Move-MouseRelative 629 91
+    Move-MouseRelative 280 91
     Click-Left
-    Start-Sleep -Milliseconds 900
+    Click-Left
+    Start-Sleep -Milliseconds 1250
     $texteditMaxPpm = (Join-Path $OutDir "textedit-maximized.ppm")
     $screens += Capture-Screen "textedit-maximized" $texteditMaxPpm (Join-Path $OutDir "textedit-maximized.png")
+    # Dragging a maximized title bar restores the saved window size under the
+    # pointer instead of overwriting the restore geometry.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative 300 55
+    Send-Hmp "mouse_button 1"
+    Move-MouseRelative 140 110
+    Send-Hmp "mouse_button 0"
+    Start-Sleep -Milliseconds 1250
+    $dragRestorePpm = (Join-Path $OutDir "textedit-drag-restored.ppm")
+    $screens += Capture-Screen "textedit-drag-restored" $dragRestorePpm (Join-Path $OutDir "textedit-drag-restored.png")
     Send-Key "esc"
     Wait-ForLog "\[gui\] exited" 10
 
@@ -484,7 +501,9 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "tab"
+    Type-Text "terminal"
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 900
     Type-Text "about"
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
