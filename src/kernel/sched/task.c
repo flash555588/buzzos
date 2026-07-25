@@ -39,6 +39,8 @@ struct process {
     int state;
     int exit_code;
     int console_silent;
+    /* Tasks blocked in waitpid on this process (as parent). */
+    uint32_t wait_waiters;
     char name[16];
     char cwd[128];
 };
@@ -170,6 +172,7 @@ void sched_init(void) {
     procs[0].state = PROC_RUNNING;
     procs[0].exit_code = 0;
     procs[0].console_silent = 0;
+    procs[0].wait_waiters = 0;
     copy_cstr(procs[0].name, sizeof(procs[0].name), "idle");
     copy_cstr(procs[0].cwd, sizeof(procs[0].cwd), "/");
     num_tasks = 1;
@@ -238,6 +241,7 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
     procs[id].state = PROC_RUNNING;
     procs[id].exit_code = 0;
     procs[id].console_silent = console_silent ? 1 : 0;
+    procs[id].wait_waiters = 0;
     copy_cstr(procs[id].name, sizeof(procs[id].name), name);
     if (current_task) {
         copy_cstr(procs[id].cwd, sizeof(procs[id].cwd), procs[parent].cwd[0] ? procs[parent].cwd : "/");
@@ -462,11 +466,33 @@ static int process_matches_wait(int proc, int parent, int pid) {
     return pid == -1 || pid == proc;
 }
 
-static int process_waitable_child(int parent, int pid) {
+/* Prefer a zombie so waitpid(-1) reaps finished children first. */
+static int process_find_zombie_child(int parent, int pid) {
     for (int i = 1; i < MAX_TASKS; i++)
-        if (process_matches_wait(i, parent, pid))
+        if (process_matches_wait(i, parent, pid) && procs[i].state == PROC_ZOMBIE)
             return i;
     return -1;
+}
+
+static int process_has_child(int parent, int pid) {
+    for (int i = 1; i < MAX_TASKS; i++)
+        if (process_matches_wait(i, parent, pid))
+            return 1;
+    return 0;
+}
+
+/* Wake tasks blocked in waitpid on this parent. Caller holds IRQs off. */
+static void process_wake_waiters(int parent) {
+    if (parent <= 0 || parent >= MAX_TASKS || !procs[parent].used)
+        return;
+    uint32_t waiters = procs[parent].wait_waiters;
+    if (!waiters)
+        return;
+    procs[parent].wait_waiters = 0;
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (waiters & (1u << (uint32_t)i))
+            task_wake(i);
+    }
 }
 
 static void process_forget(int pid) {
@@ -484,8 +510,15 @@ static void process_forget(int pid) {
     procs[pid].used = 0;
     procs[pid].state = PROC_UNUSED;
     procs[pid].exit_code = 0;
+    procs[pid].wait_waiters = 0;
 }
 
+/*
+ * Block until a matching child is zombie. Same IRQ discipline as
+ * task_sleep_until: mark BLOCKED under CLI, schedule(), restore only after
+ * this task is resumed. Enabling IRQs while still BLOCKED-on-CPU (then
+ * yield) was wrong and could stall the guest after shell launched gui.
+ */
 int task_wait_pid(int pid, int *status, int options) {
     int parent = current_task ? task_process_owner(current_task) : 0;
     if (pid == 0)
@@ -494,19 +527,49 @@ int task_wait_pid(int pid, int *status, int options) {
         return -1;
 
     for (;;) {
-        int child = process_waitable_child(parent, pid);
-        if (child < 0)
-            return -1;
-        if (procs[child].state == PROC_ZOMBIE) {
+        int child = process_find_zombie_child(parent, pid);
+        if (child >= 0) {
             int code = procs[child].exit_code;
             if (status)
                 *status = code;
             process_forget(child);
             return child;
         }
+        if (!process_has_child(parent, pid))
+            return -1;
         if (options & 1)
             return 0;
-        task_yield();
+
+        if (!current_task || current_task->id <= 0) {
+            task_yield();
+            continue;
+        }
+
+        uint32_t bit = 1u << (uint32_t)current_task->id;
+        uint32_t irq_flags = irq_save();
+
+        procs[parent].wait_waiters |= bit;
+        child = process_find_zombie_child(parent, pid);
+        if (child >= 0 || !process_has_child(parent, pid)) {
+            procs[parent].wait_waiters &= ~bit;
+            irq_restore(irq_flags);
+            continue;
+        }
+
+        current_task->wake_tick = 0;
+        current_task->state = TASK_BLOCKED;
+        /* Child may have exited after the recheck; wake is safe once BLOCKED. */
+        child = process_find_zombie_child(parent, pid);
+        if (child >= 0 || !process_has_child(parent, pid)) {
+            procs[parent].wait_waiters &= ~bit;
+            current_task->state = TASK_RUNNING;
+            irq_restore(irq_flags);
+            continue;
+        }
+
+        schedule();
+        procs[parent].wait_waiters &= ~bit;
+        irq_restore(irq_flags);
     }
 }
 
@@ -553,6 +616,7 @@ int task_kill(int id) {
     if (owner > 0 && owner < MAX_TASKS && procs[owner].used) {
         procs[owner].state = PROC_ZOMBIE;
         procs[owner].exit_code = -1;
+        process_wake_waiters(procs[owner].parent);
         syscall_process_exited(owner);
     }
 
@@ -725,6 +789,7 @@ void task_exit_code(int code) {
         !process_has_live_tasks(owner)) {
         procs[owner].state = PROC_ZOMBIE;
         procs[owner].exit_code = code;
+        process_wake_waiters(procs[owner].parent);
         syscall_process_exited(owner);
     }
     schedule();
@@ -749,6 +814,7 @@ void task_exit_process_code(int code) {
     if (owner > 0 && owner < MAX_TASKS && procs[owner].used) {
         procs[owner].state = PROC_ZOMBIE;
         procs[owner].exit_code = code;
+        process_wake_waiters(procs[owner].parent);
         syscall_process_exited(owner);
     }
     schedule();
