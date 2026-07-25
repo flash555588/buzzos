@@ -206,6 +206,14 @@ The desktop starts with Applications as its single visual focal point. System
 remains pinned and ready in the taskbar instead of opening a second competing
 window at startup.
 
+Applications has a persistent search field above its scrollable results. With
+the launcher focused, typing filters app names, summaries, and executable
+names; Up/Down moves within the filtered set and Enter launches the selection.
+Backspace edits the query, while Escape clears a non-empty query before it can
+exit the desktop. The header and search field stay visible while results
+scroll, and an explicit empty state explains how to clear a search with no
+matches.
+
 ## Run It
 
 From the host, open the desktop directly:

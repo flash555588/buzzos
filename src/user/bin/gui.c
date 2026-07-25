@@ -37,9 +37,10 @@ enum {
     TOPBAR_H = 36,
     WINDOW_TITLE_H = 34,
     DOCK_RESERVED_H = 82,
-    LAUNCHER_HEADER_H = 44,
+    LAUNCHER_HEADER_H = 86,
     LAUNCHER_ROW_STEP = 62,
     LAUNCHER_ROW_H = 58,
+    LAUNCHER_QUERY_CAP = 32,
     DOCK_SYSTEM_STEP = 54,
     DOCK_SYSTEM_W = 46,
     DOCK_TASK_STEP = 54,
@@ -170,6 +171,8 @@ static int app_count;
 static int app_selected;
 static int app_last_click = -1;
 static unsigned int app_last_click_tick;
+static char launcher_query[LAUNCHER_QUERY_CAP];
+static int launcher_query_length;
 static int dock_hover = -1;
 static int dock_expanded;
 static unsigned int dock_hover_since;
@@ -942,6 +945,79 @@ static void scan_apps(void) {
         app_selected = app_count > 0 ? app_count - 1 : 0;
 }
 
+static int launcher_ascii_lower(int c) {
+    if (c >= 'A' && c <= 'Z')
+        return c + ('a' - 'A');
+    return c;
+}
+
+static int launcher_contains_case(const char *text_value,
+                                  const char *query) {
+    if (!query || !query[0])
+        return 1;
+    if (!text_value)
+        return 0;
+    for (int start = 0; text_value[start]; start++) {
+        int qi = 0;
+        while (query[qi] && text_value[start + qi] &&
+               launcher_ascii_lower((unsigned char)text_value[start + qi]) ==
+               launcher_ascii_lower((unsigned char)query[qi]))
+            qi++;
+        if (!query[qi])
+            return 1;
+    }
+    return 0;
+}
+
+static int launcher_app_matches(int index) {
+    if (index < 0 || index >= app_count)
+        return 0;
+    return launcher_contains_case(apps[index].name, launcher_query) ||
+           launcher_contains_case(apps[index].summary, launcher_query) ||
+           launcher_contains_case(apps[index].file, launcher_query);
+}
+
+static int launcher_result_count(void) {
+    int count = 0;
+    for (int i = 0; i < app_count; i++)
+        if (launcher_app_matches(i))
+            count++;
+    return count;
+}
+
+static int launcher_app_at_result(int result_index) {
+    int result = 0;
+    for (int i = 0; i < app_count; i++) {
+        if (!launcher_app_matches(i))
+            continue;
+        if (result == result_index)
+            return i;
+        result++;
+    }
+    return -1;
+}
+
+static int launcher_result_for_app(int app_index) {
+    int result = 0;
+    for (int i = 0; i < app_count; i++) {
+        if (!launcher_app_matches(i))
+            continue;
+        if (i == app_index)
+            return result;
+        result++;
+    }
+    return -1;
+}
+
+static void launcher_select_first_result(void) {
+    int first = launcher_app_at_result(0);
+    app_selected = first >= 0 ? first : 0;
+    app_last_click = -1;
+    scroll_x[WIN_LAUNCHER] = 0;
+    scroll_y[WIN_LAUNCHER] = 0;
+    hover_launcher_row = -1;
+}
+
 static int app_slot_for_win(int id) {
     int slot = id - WIN_APP_BASE;
     return slot >= 0 && slot < MAX_GUI_APPS ? slot : -1;
@@ -1309,6 +1385,15 @@ static void run_app_with_arg(const char *path, const char *argument) {
 
 static void run_app(const char *path) {
     run_app_with_arg(path, 0);
+}
+
+static void launcher_run_app(int index) {
+    if (index < 0 || index >= app_count)
+        return;
+    launcher_query_length = 0;
+    launcher_query[0] = 0;
+    launcher_select_first_result();
+    run_app(apps[index].path);
 }
 
 static void activate(int id) {
@@ -1708,7 +1793,8 @@ static int content_width(int id) {
         /* Keep primary labels revealable in narrow windows.  Secondary
          * summaries clip instead of forcing a scrollbar at normal widths. */
         for (int i = 0; i < app_count; i++)
-            width = max_i(width, 86 + gui_text_width(apps[i].name));
+            if (launcher_app_matches(i))
+                width = max_i(width, 86 + gui_text_width(apps[i].name));
         return max_i(c.w, width);
     }
     if (id == WIN_STATUS)
@@ -1722,7 +1808,7 @@ static int content_height(int id) {
         return content_rect(id).h;
     if (id == WIN_LAUNCHER)
         return LAUNCHER_HEADER_H +
-               max_i(app_count, 1) * LAUNCHER_ROW_STEP + 12;
+               max_i(launcher_result_count(), 1) * LAUNCHER_ROW_STEP + 12;
     if (id == WIN_STATUS)
         return status_resolution_bottom();
     return 250;
@@ -2043,18 +2129,23 @@ static void draw_launcher(void) {
     /* Same content clip as System: row fills must not paint past the body. */
     struct rect saved_clip = compose_clip_push(c);
     struct rect clip = c;
-    int ox = c.x - scroll_x[WIN_LAUNCHER];
-    int oy = c.y - scroll_y[WIN_LAUNCHER];
-    text_clip(ox, oy + 2, "All apps", THEME_ACCENT, -1, clip);
-    char count_label[24];
+    int result_count = launcher_result_count();
+    const char *heading = launcher_query_length > 0 ? "Results" : "All apps";
+    text_clip(c.x, c.y + 2, heading, THEME_ACCENT, -1, clip);
+    char count_label[32];
     count_label[0] = 0;
-    append_uint(count_label, (unsigned int)app_count, sizeof(count_label));
-    append_text(count_label, app_count == 1 ? " app" : " apps",
-                sizeof(count_label));
+    append_uint(count_label, (unsigned int)result_count, sizeof(count_label));
+    if (launcher_query_length > 0) {
+        append_text(count_label, " of ", sizeof(count_label));
+        append_uint(count_label, (unsigned int)app_count, sizeof(count_label));
+    } else {
+        append_text(count_label, app_count == 1 ? " app" : " apps",
+                    sizeof(count_label));
+    }
     int badge_w = gui_text_width(count_label) + 18;
-    struct rect badge = {c.x + c.w - badge_w - 4, oy - 1,
+    struct rect badge = {c.x + c.w - badge_w - 4, c.y - 1,
                          badge_w, 32};
-    if (ox + gui_text_width("All apps") + 12 <= badge.x) {
+    if (c.x + gui_text_width(heading) + 12 <= badge.x) {
         fill_round(badge, THEME_DIVIDER);
         fill_round((struct rect){badge.x + 1, badge.y + 1,
                                  badge.w - 2, badge.h - 2},
@@ -2062,24 +2153,62 @@ static void draw_launcher(void) {
         text_clip(badge.x + 9, badge.y + 2 + PLT_FONT_Y_SHIFT,
                   count_label, THEME_TEXT_DIM, -1, clip);
     }
-    int y = oy + LAUNCHER_HEADER_H;
+    struct rect search = {c.x, c.y + 36, c.w - 4, 34};
+    fill_round(search, windows[WIN_LAUNCHER].active
+               ? THEME_FOCUS : THEME_FIELD_BORDER);
+    fill_round((struct rect){search.x + 1, search.y + 1,
+                             search.w - 2, search.h - 2},
+               THEME_FIELD_BG);
+    const char *search_text = launcher_query_length > 0
+        ? launcher_query : "Search apps";
+    int search_y = search.y + (search.h - KFONT_HEIGHT) / 2 +
+                   PLT_FONT_Y_SHIFT;
+    text_clip(search.x + 12, search_y, search_text,
+              launcher_query_length > 0 ? THEME_TEXT : THEME_TEXT_FAINT,
+              -1, (struct rect){search.x + 8, search.y + 2,
+                                search.w - 16, search.h - 4});
+    if (windows[WIN_LAUNCHER].active && launcher_query_length > 0) {
+        int caret_x = min_i(search.x + search.w - 10,
+                            search.x + 12 +
+                            gui_text_width(launcher_query));
+        line_v(caret_x, search.y + 8, search.h - 16, THEME_FOCUS);
+    }
+    struct rect list_clip = {
+        c.x, c.y + LAUNCHER_HEADER_H,
+        c.w, max_i(0, c.h - LAUNCHER_HEADER_H)
+    };
+    int y = c.y + LAUNCHER_HEADER_H + 14;
     if (app_count == 0) {
-        text_clip(ox, y, "No apps in /fs/apps", THEME_TEXT_DIM, -1, clip);
+        text_clip(c.x + 10, y, "No apps are installed",
+                  THEME_TEXT_DIM, -1, list_clip);
+        text_clip(c.x + 10, y + 28, "Add manifests under /fs/apps",
+                  THEME_TEXT_FAINT, -1, list_clip);
+        compose_clip_pop(saved_clip);
+        draw_scrollbars(WIN_LAUNCHER);
+        return;
+    }
+    if (result_count == 0) {
+        text_clip(c.x + 10, y, "No applications match",
+                  THEME_TEXT_DIM, -1, list_clip);
+        text_clip(c.x + 10, y + 28, "Backspace or Esc to clear search",
+                  THEME_TEXT_FAINT, -1, list_clip);
         compose_clip_pop(saved_clip);
         draw_scrollbars(WIN_LAUNCHER);
         return;
     }
     int hover_row = hit_launcher_row_at(pointer_x, pointer_y);
-    for (int i = 0; i < app_count; i++) {
-        struct rect row = launcher_row_paint_rect(i);
-        struct rect visible = intersect_rect(row, clip);
+    struct rect saved_list_clip = compose_clip_push(list_clip);
+    for (int result = 0; result < result_count; result++) {
+        int i = launcher_app_at_result(result);
+        struct rect row = launcher_row_paint_rect(result);
+        struct rect visible = intersect_rect(row, list_clip);
         if (visible.w <= 0 || visible.h <= 0)
             continue;
         int selected = i == app_selected;
         int hovered = i == hover_row;
         if (selected) {
             struct rect sel = intersect_rect(
-                (struct rect){row.x, row.y, row.w - 6, row.h}, clip);
+                (struct rect){row.x, row.y, row.w - 6, row.h}, list_clip);
             if (sel.w > 0 && sel.h > 0) {
                 fill_round(sel, THEME_SELECTION_SOFT);
                 fill((struct rect){row.x, row.y + 8, 3, row.h - 16},
@@ -2087,7 +2216,7 @@ static void draw_launcher(void) {
             }
         } else if (hovered) {
             struct rect hover = intersect_rect(
-                (struct rect){row.x, row.y, row.w - 6, row.h}, clip);
+                (struct rect){row.x, row.y, row.w - 6, row.h}, list_clip);
             if (hover.w > 0 && hover.h > 0)
                 fill_round(hover, THEME_PANEL_RAISED);
         }
@@ -2100,15 +2229,20 @@ static void draw_launcher(void) {
         int mono_w = gui_text_width(monogram);
         text_clip(icon.x + (icon.w - mono_w) / 2,
                   icon.y + (icon.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT,
-                  monogram, THEME_TEXT, -1, clip);
+                  monogram, THEME_TEXT, -1, list_clip);
         int tx = row.x + 54;
         text_clip(tx, row.y + 4 + PLT_FONT_Y_SHIFT, apps[i].name,
                   selected || hovered ? THEME_TEXT : THEME_TEXT_DIM, -1,
-                  (struct rect){tx, row.y, max_i(1, row.w - 66), row.h});
+                  intersect_rect(
+                      (struct rect){tx, row.y, max_i(1, row.w - 66), row.h},
+                      list_clip));
         text_clip(tx, row.y + 30 + PLT_FONT_Y_SHIFT, apps[i].summary,
                   selected ? THEME_TEXT_DIM : THEME_TEXT_FAINT, -1,
-                  (struct rect){tx, row.y, max_i(1, row.w - 66), row.h});
+                  intersect_rect(
+                      (struct rect){tx, row.y, max_i(1, row.w - 66), row.h},
+                      list_clip));
     }
+    compose_clip_pop(saved_list_clip);
     compose_clip_pop(saved_clip);
     draw_scrollbars(WIN_LAUNCHER);
 }
@@ -3391,6 +3525,13 @@ static void handle_key(int k) {
     if (ime_handle_key(k))
         return;
     if (k == KEY_ESC) {
+        if (focus == WIN_LAUNCHER && launcher_query_length > 0) {
+            launcher_query_length = 0;
+            launcher_query[0] = 0;
+            launcher_select_first_result();
+            win_damage(WIN_LAUNCHER);
+            return;
+        }
         running = 0;
         return;
     }
@@ -3421,22 +3562,46 @@ static void handle_key(int k) {
     }
     if (focus == WIN_LAUNCHER) {
         int old_selected = app_selected;
-        if (k == KEY_UP && app_selected > 0)
-            app_selected--;
-        else if (k == KEY_DOWN && app_selected + 1 < app_count)
-            app_selected++;
-        else if ((k == '\n' || k == '\r') && app_count > 0) {
-            run_app(apps[app_selected].path);
+        int result_count = launcher_result_count();
+        int selected_result = launcher_result_for_app(app_selected);
+        if (k == KEY_UP && result_count > 0) {
+            if (selected_result < 0)
+                selected_result = 0;
+            else if (selected_result > 0)
+                selected_result--;
+            app_selected = launcher_app_at_result(selected_result);
+        } else if (k == KEY_DOWN && result_count > 0) {
+            if (selected_result < 0)
+                selected_result = 0;
+            else if (selected_result + 1 < result_count)
+                selected_result++;
+            app_selected = launcher_app_at_result(selected_result);
+        } else if ((k == '\n' || k == '\r') && result_count > 0 &&
+                   launcher_app_matches(app_selected)) {
+            launcher_run_app(app_selected);
             return;
-        } else if (k == 'r' || k == 'R') {
-            scan_apps();
-            desktop_dirty = 1;
+        } else if ((k == KEY_BACKSPACE || k == 127) &&
+                   launcher_query_length > 0) {
+            launcher_query[--launcher_query_length] = 0;
+            launcher_select_first_result();
+            win_damage(WIN_LAUNCHER);
+            return;
+        } else if (((k >= 'a' && k <= 'z') ||
+                    (k >= 'A' && k <= 'Z') ||
+                    (k >= '0' && k <= '9') ||
+                    (k == ' ' && launcher_query_length > 0)) &&
+                   launcher_query_length + 1 < LAUNCHER_QUERY_CAP) {
+            launcher_query[launcher_query_length++] = (char)k;
+            launcher_query[launcher_query_length] = 0;
+            launcher_select_first_result();
+            win_damage(WIN_LAUNCHER);
             return;
         }
         if (app_selected != old_selected) {
             struct rect c = content_rect(WIN_LAUNCHER);
+            selected_result = launcher_result_for_app(app_selected);
             int row_top = LAUNCHER_HEADER_H +
-                          app_selected * LAUNCHER_ROW_STEP;
+                          max_i(0, selected_result) * LAUNCHER_ROW_STEP;
             int row_bottom = row_top + LAUNCHER_ROW_H;
             if (row_top < scroll_y[WIN_LAUNCHER])
                 scroll_y[WIN_LAUNCHER] = row_top;
@@ -3536,8 +3701,15 @@ static struct rect launcher_row_paint_rect(int index) {
 }
 
 static struct rect launcher_row_screen_rect(int index) {
-    return intersect_rect(launcher_row_paint_rect(index),
-                          content_rect(WIN_LAUNCHER));
+    struct rect c = content_rect(WIN_LAUNCHER);
+    struct rect list_clip = {
+        c.x, c.y + LAUNCHER_HEADER_H,
+        c.w, max_i(0, c.h - LAUNCHER_HEADER_H)
+    };
+    int result = launcher_result_for_app(index);
+    if (result < 0)
+        return (struct rect){0, 0, 0, 0};
+    return intersect_rect(launcher_row_paint_rect(result), list_clip);
 }
 
 static int hit_launcher_row_at(int x, int y) {
@@ -3551,14 +3723,14 @@ static int hit_launcher_row_at(int x, int y) {
     int rel = y - (c.y + LAUNCHER_HEADER_H) + scroll_y[WIN_LAUNCHER];
     if (rel < 0)
         return -1;
-    int idx = rel / LAUNCHER_ROW_STEP;
-    if (idx < 0 || idx >= app_count)
+    int result = rel / LAUNCHER_ROW_STEP;
+    if (result < 0 || result >= launcher_result_count())
         return -1;
     /* Ignore the inter-row gap (STEP - ROW_H); it is not painted as hover. */
-    int row_top = idx * LAUNCHER_ROW_STEP;
+    int row_top = result * LAUNCHER_ROW_STEP;
     if (rel < row_top || rel >= row_top + LAUNCHER_ROW_H)
         return -1;
-    return idx;
+    return launcher_app_at_result(result);
 }
 
 /* Recompute pointer-driven hover and damage full widget bounds on change. */
@@ -3786,7 +3958,7 @@ static void handle_mouse(void) {
                         tick - app_last_click_tick <= 25u) {
                         app_selected = idx;
                         app_last_click = -1;
-                        run_app(apps[idx].path);
+                        launcher_run_app(idx);
                         prev_buttons = ms.buttons;
                         return;
                     }

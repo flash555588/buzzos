@@ -8,6 +8,12 @@ param(
     [string]$PythonPath = "",
     [ValidateSet("none", "dsound", "sdl", "wav")]
     [string]$AudioDriver = "none",
+    [ValidateSet("std", "virtio")]
+    [string]$Graphics = "std",
+    [int]$DisplayWidth = 1600,
+    [int]$DisplayHeight = 900,
+    [ValidateRange(0, 9)]
+    [int]$DisplayModeKey = 0,
     [int]$TimeoutSeconds = 45
 )
 
@@ -130,6 +136,9 @@ function Type-Command([string]$Text) {
     Type-Text $Text
     Send-Key "ret"
     Start-Sleep -Milliseconds 1000
+    if ($Text -eq "gui" -and $DisplayModeKey -gt 0) {
+        Set-GuiDisplayMode
+    }
 }
 
 function Press-Many([string]$Key, [int]$Count) {
@@ -159,6 +168,30 @@ function Get-PpmDimensions([string]$PpmPath) {
     } finally {
         $reader.Dispose()
     }
+}
+
+function Set-GuiDisplayMode {
+    $probePpm = (Join-Path $OutDir "resolution-probe.ppm")
+    $probe = Capture-Screen "resolution-probe" $probePpm (Join-Path $OutDir "resolution-probe.png")
+    $probeSize = Get-PpmDimensions $probe.Ppm
+    if ($probeSize.Width -eq $DisplayWidth -and
+        $probeSize.Height -eq $DisplayHeight) {
+        return
+    }
+    # With no external apps, System is 26 px right of taskbar center.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative ([int]($probeSize.Width / 2) + 26) ($probeSize.Height - 44)
+    Click-Left
+    Send-Key ([string]$DisplayModeKey)
+    Start-Sleep -Milliseconds 1200
+    # System remains active after the mode switch. Clicking its task tile
+    # minimizes it and returns focus to the launcher at the new size.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative ([int]($DisplayWidth / 2) + 26) ($DisplayHeight - 44)
+    Click-Left
+    Start-Sleep -Milliseconds 500
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative ([int]($DisplayWidth / 2)) ([int]($DisplayHeight / 2))
 }
 
 function Move-MouseRelative([int]$Dx, [int]$Dy) {
@@ -278,12 +311,19 @@ $qemuArgs = @(
     "-display", "none",
     "-monitor", "tcp:127.0.0.1:$monitorPort,server,nowait",
     "-no-reboot",
-    "-vga", "std",
     "-audiodev", "$AudioDriver,id=audio0",
     "-device", "AC97,audiodev=audio0",
     "-netdev", "user,id=n0",
     "-device", "ne2k_isa,netdev=n0,iobase=0x300,irq=10"
 )
+if ($Graphics -eq "virtio") {
+    $qemuArgs += @(
+        "-vga", "none",
+        "-device", "virtio-vga,xres=$DisplayWidth,yres=$DisplayHeight"
+    )
+} else {
+    $qemuArgs += @("-vga", "std")
+}
 
 $script:qemuProcess = Start-Process -FilePath $QemuPath -ArgumentList $qemuArgs -WorkingDirectory (Get-Location) -PassThru -WindowStyle Hidden
 $monitor = $null
@@ -303,7 +343,15 @@ try {
     $appsPpm = (Join-Path $OutDir "app-center.ppm")
     $screens += Capture-Screen "app-center" $appsPpm (Join-Path $OutDir "app-center.png")
 
-    Press-Many "down" 1
+    Type-Text "text"
+    Start-Sleep -Milliseconds 350
+    $searchPpm = (Join-Path $OutDir "launcher-search.ppm")
+    $screens += Capture-Screen "launcher-search" $searchPpm (Join-Path $OutDir "launcher-search.png")
+    Type-Text "zzz"
+    Start-Sleep -Milliseconds 250
+    $noResultsPpm = (Join-Path $OutDir "launcher-no-results.ppm")
+    $screens += Capture-Screen "launcher-no-results" $noResultsPpm (Join-Path $OutDir "launcher-no-results.png")
+    Press-Many "backspace" 3
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $texteditPpm = (Join-Path $OutDir "textedit.ppm")
