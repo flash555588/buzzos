@@ -215,12 +215,11 @@ int guiapp_request_exec(struct guiapp_ctx *ctx, const char *path) {
 }
 
 int guiapp_send_caret(struct guiapp_ctx *ctx, int x, int y) {
-    struct guiapp_event ev;
+    struct guiapp_frame frame;
     if (!ctx)
         return -1;
-    ev.magic = GUIAPP_MAGIC;
-    ev.type = GUIAPP_EVT_CARET;
-    ev.caret_x = x;
-    ev.caret_y = y;
-    return write_full(ctx->event_fd, &ev, (int)sizeof(ev));
+    init_frame(&frame, GUIAPP_FRAME_CARET);
+    frame.x = x;
+    frame.y = y;
+    return write_full(ctx->frame_fd, &frame, (int)sizeof(frame));
 }

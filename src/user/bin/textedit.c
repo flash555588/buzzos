@@ -615,6 +615,16 @@ static void command(struct guiapp_ctx *ctx, int value) {
     }
 }
 
+static void report_caret(struct guiapp_ctx *ctx) {
+    int cx, cy;
+    cursor_xy(&cx, &cy);
+    struct appui_rect clip = text_clip_rect();
+    /* Content-local pixels (same space as mouse events). */
+    int x = clip.x + cx - scroll_x;
+    int y = clip.y + cy - scroll_y;
+    (void)guiapp_send_caret(ctx, x, y);
+}
+
 int main(int argc, char **argv) {
     struct guiapp_ctx ctx;
     struct guiapp_event ev;
@@ -644,6 +654,7 @@ int main(int argc, char **argv) {
         render();
         if (guiapp_send_frame(&ctx, window_title, w, h, pixels) < 0)
             break;
+        report_caret(&ctx);
     }
     return 0;
 }

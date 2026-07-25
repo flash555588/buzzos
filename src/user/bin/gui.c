@@ -132,6 +132,10 @@ struct app_session {
     int dirty_valid;
     struct rect dirty_rect;
     uint32_t last_sequence;
+    /* Content-local caret (app pixels); valid after GUIAPP_FRAME_CARET. */
+    int caret_x;
+    int caret_y;
+    int caret_valid;
     uint16_t xmap[APP_SURFACE_MAX_W];
     uint16_t ymap[APP_SURFACE_MAX_H];
     char title[GUIAPP_TITLE_MAX];
@@ -334,18 +338,16 @@ static void dock_damage(void) {
 /* Damage the IME badge (top bar) and the candidate panel area. */
 static void ime_damage(void) {
     queue_damage((struct rect){0, 0, sw, TOPBAR_H});
-    /* Follow focused app's content area. */
+    /* Cover previous and next caret-adjacent panel positions. */
     if (ime_enabled && ime_length > 0) {
         struct rect caret = get_caret_area();
-        if (caret.w > 0 && caret.h > 0) {
-            int pad = 40;
-            int panel_h = 64;
-            int x = max_i(0, caret.x - 200 - pad);
-            int y = max_i(0, caret.y - panel_h - pad);
-            int w = min_i(sw - x, 400 + 2 * pad);
-            int h = min_i(sh - y, panel_h + 2 * pad + 20);
-            queue_damage((struct rect){x, y, w, h});
-        }
+        int pad = 48;
+        int panel_h = 72;
+        int x = max_i(0, caret.x - pad);
+        int y = max_i(0, caret.y - panel_h - pad);
+        int w = min_i(sw - x, 480 + 2 * pad);
+        int h = min_i(sh - y, panel_h + caret.h + 2 * pad + 24);
+        queue_damage((struct rect){x, y, w, h});
     }
 }
 
@@ -886,6 +888,17 @@ static int app_read_frame(int slot) {
                                            CONTEXT_MENU_W, CONTEXT_MENU_H});
             continue;
         }
+        if (frame.type == GUIAPP_FRAME_CARET) {
+            int old_x = app_sessions[slot].caret_x;
+            int old_y = app_sessions[slot].caret_y;
+            app_sessions[slot].caret_x = frame.x;
+            app_sessions[slot].caret_y = frame.y;
+            app_sessions[slot].caret_valid = 1;
+            if (focus == WIN_APP_BASE + slot && ime_enabled && ime_length > 0 &&
+                (old_x != frame.x || old_y != frame.y))
+                ime_damage();
+            continue;
+        }
         if (frame.type == GUIAPP_FRAME_EXEC) {
             if (exec_target_allowed(frame.target))
                 run_app_with_arg("/fs/apps/terminal", frame.target);
@@ -1117,6 +1130,9 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].dirty_valid = 0;
     app_sessions[slot].dirty_rect = (struct rect){0, 0, 0, 0};
     app_sessions[slot].last_sequence = 0;
+    app_sessions[slot].caret_x = 0;
+    app_sessions[slot].caret_y = 0;
+    app_sessions[slot].caret_valid = 0;
     copy_text(app_sessions[slot].title, "Application", sizeof(app_sessions[slot].title));
 
     app_sessions[slot].reader_tid = spawn(app_reader_functions[slot]);
@@ -2265,31 +2281,33 @@ static int ime_candidate_consume(int page_index) {
     return (int)ime_cand_consume[abs];
 }
 
+/* Focused app that can receive typed text (IME target). */
 static int find_caret_window(void) {
-    /* Returns the first topmost window that has real input focus (not launcher/status). */
-    for (int i = 0; i < WIN_COUNT; i++) {
-        int id = z_order[i];
-        if (id < 0 || id >= WIN_COUNT)
-            continue;
-        if (windows[id].visible && !windows[id].minimized) {
-            if (id >= WIN_APP_BASE) {
-                int slot = id - WIN_APP_BASE;
-                if (slot >= 0 && slot < MAX_GUI_APPS && app_sessions[slot].used)
-                    return id;
-            } else if (id == WIN_LAUNCHER) {
-                return id;
-            }
-        }
-    }
-    return -1;
+    if (focus < WIN_APP_BASE || focus >= WIN_COUNT)
+        return -1;
+    if (!windows[focus].visible || windows[focus].minimized)
+        return -1;
+    int slot = focus - WIN_APP_BASE;
+    if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used)
+        return -1;
+    return focus;
 }
 
+/* Screen-space caret rect for IME placement (OS-style: near text cursor). */
 static struct rect get_caret_area(void) {
     int id = find_caret_window();
     if (id < 0)
-        return (struct rect){0, 0, 100, 100};
-    struct rect r = windows[id].r;
-    return (struct rect){r.x + 12, r.y + WINDOW_TITLE_H + 12, r.w - 30, r.h - WINDOW_TITLE_H - 44};
+        return (struct rect){sw / 2 - 40, sh / 2 - 20, 80, 28};
+    int slot = id - WIN_APP_BASE;
+    struct rect content = content_rect(id);
+    if (app_sessions[slot].caret_valid) {
+        int cx = content.x + app_sessions[slot].caret_x - scroll_x[id];
+        int cy = content.y + app_sessions[slot].caret_y - scroll_y[id];
+        return (struct rect){cx, cy, 2, KFONT_HEIGHT + 4};
+    }
+    /* Fallback before the app reports a caret: bottom of content. */
+    return (struct rect){content.x + 12, content.y + content.h - 28,
+                         80, 24};
 }
 
 static void draw_ime(void) {
@@ -2334,12 +2352,20 @@ static void draw_ime(void) {
     int panel_w = min_i(sw - 24, max_i(320, need_w));
     int panel_h = 64;
 
-    /* Follow the focused app's content area (standard OS behavior). */
+    /* OS-style: float next to the text caret of the focused app. */
     struct rect caret = get_caret_area();
-    int panel_x = max_i(8, caret.x + caret.w / 2 - panel_w / 2);
-    int panel_y = max_i(TOPBAR_H + 8, caret.y - panel_h - 8);
+    int panel_x = caret.x;
+    int panel_y = caret.y + caret.h + 6;
+    if (panel_x + panel_w > sw - 8)
+        panel_x = sw - 8 - panel_w;
+    if (panel_x < 8)
+        panel_x = 8;
     if (panel_y + panel_h > sh - 8)
-        panel_y = sh - panel_h - 8;
+        panel_y = caret.y - panel_h - 6;
+    if (panel_y < TOPBAR_H + 4)
+        panel_y = TOPBAR_H + 4;
+    if (panel_y + panel_h > sh - 8)
+        panel_y = sh - 8 - panel_h;
     struct rect panel = {panel_x, panel_y, panel_w, panel_h};
     fill_round(panel, THEME_FIELD_BORDER);
     fill_round((struct rect){panel.x + 1, panel.y + 1,
