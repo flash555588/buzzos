@@ -116,20 +116,14 @@ qemu-system-i386 --version
 
 如果某个命令提示找不到，先检查 PATH。BuzzOS 的构建本身不依赖 IDE。
 
-当前默认 Limine 路径是：
-
-```powershell
-D:\limine-binary\limine-binary
-```
-
-这个目录至少需要包含：
+Limine 已 vendoring 在仓库内，默认路径：
 
 ```text
-limine-bios.sys
-limine-tool-windows-x86\limine.exe
+third_party/limine/limine-bios.sys
+third_party/limine/limine-tool-windows-x86/limine.exe
 ```
 
-如果你的路径不同，构建时传：
+一般不需要再装外部 Limine 包。若要用自备包：
 
 ```powershell
 make LIMINE_DIR="D:/your/limine-binary"
@@ -778,7 +772,7 @@ limine-bios.sys
 
 你仍然可能遇到镜像构建失败，但常见原因变成：
 
-- `LIMINE_DIR` 路径不对。
+- `third_party/limine/` 不完整，或自定义 `LIMINE_DIR` 路径不对。
 - 缺少 `limine-bios.sys`。
 - 缺少 `limine-tool-windows-x86/limine.exe`。
 - FAT16 boot 分区太小。
@@ -1586,15 +1580,15 @@ PANIC: multiboot2: Failed to open executable with path ...
 
 常见原因：
 
-- `LIMINE_DIR` 指向了错误目录。
+- `third_party/limine/` 不完整，或自定义 `LIMINE_DIR` 指向了错误目录。
 - 缺少 `limine-bios.sys`。
 - 缺少 `limine-tool-windows-x86/limine.exe`。
 - `limine.conf` 里的 `kernel_path` 和 FAT16 boot 分区里的文件不一致。
 
-当前默认路径：
+默认使用仓库内：
 
-```powershell
-D:\limine-binary\limine-binary
+```text
+third_party/limine/
 ```
 
 如果你的 Limine 包在其他位置：

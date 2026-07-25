@@ -42,22 +42,16 @@ Required tools:
 | `python` | Generate initrd, app registry, disk images |
 | `powershell` | Run scripts on Windows |
 | `qemu-system-i386` | Run BuzzOS |
-| Limine binary package | Install BIOS boot stages |
+| Limine (vendored) | In-repo `third_party/limine/` for BIOS boot stages |
 
-Default Limine path:
-
-```sh
-D:/limine-binary/limine-binary
-```
-
-This directory must at least contain:
+Build uses the vendored Limine package (v12.5.2) by default:
 
 ```text
-limine-bios.sys
-limine-tool-windows-x86/limine.exe
+third_party/limine/limine-bios.sys
+third_party/limine/limine-tool-windows-x86/limine.exe
 ```
 
-If the path differs, pass `LIMINE_DIR=...` during build.
+No external download is required. Override with `LIMINE_DIR=...` only if you need a custom package.
 
 Show the recommended local workflow:
 

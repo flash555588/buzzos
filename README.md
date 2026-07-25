@@ -42,22 +42,16 @@ English: [README.en.md](README.en.md)
 | `python` | 生成 initrd、app registry、磁盘镜像 |
 | `powershell` | Windows 下运行脚本 |
 | `qemu-system-i386` | 运行 BuzzOS |
-| Limine binary 包 | 安装 BIOS 启动阶段 |
+| Limine（已 vendoring） | 仓库内 `third_party/limine/`，安装 BIOS 启动阶段 |
 
-默认 Limine 路径是：
-
-```sh
-D:/limine-binary/limine-binary
-```
-
-这个目录至少需要包含：
+默认使用仓库内的 Limine（v12.5.2）：
 
 ```text
-limine-bios.sys
-limine-tool-windows-x86/limine.exe
+third_party/limine/limine-bios.sys
+third_party/limine/limine-tool-windows-x86/limine.exe
 ```
 
-如果路径不同，构建时传 `LIMINE_DIR=...`。
+一般无需额外下载。若要用自备包，构建时传 `LIMINE_DIR=...`。
 
 查看推荐的本地工作流：
 

@@ -105,7 +105,10 @@ QEMU_NET := \
 	-netdev user,id=n0 -device ne2k_isa,netdev=n0,iobase=0x300,irq=10
 QEMU_COMMON := $(QEMU_BASE) $(QEMU_AUDIO_AC97) $(QEMU_NET)
 QEMU_HDA_COMMON := $(QEMU_BASE) $(QEMU_AUDIO_HDA) $(QEMU_NET)
-LIMINE_DIR ?= D:/limine-binary/limine-binary
+# Vendored Limine BIOS stage + Windows host tool (see third_party/limine/).
+LIMINE_DIR ?= third_party/limine
+LIMINE_BIOS_SYS := $(LIMINE_DIR)/limine-bios.sys
+LIMINE_TOOL := $(LIMINE_DIR)/limine-tool-windows-x86/limine.exe
 
 KERNEL_INCLUDES := \
 	-Isrc/kernel \
@@ -267,7 +270,7 @@ $(OBJDIR)/%.o-asm: src/kernel/%.asm | $(OBJDIR)
 $(OBJDIR)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(OBJDIR)
 	$(LD) $(LDFLAGS) -o $@ $(KERNEL_OBJS)
 
-$(IMAGE): $(OBJDIR)/kernel.elf tools/mkbootimg.py
+$(IMAGE): $(OBJDIR)/kernel.elf tools/mkbootimg.py $(LIMINE_BIOS_SYS) $(LIMINE_TOOL)
 	$(PYTHON) tools/mkbootimg.py \
 		--kernel $(OBJDIR)/kernel.elf \
 		--out $(IMAGE) \
@@ -545,7 +548,7 @@ report: $(IMAGE)
 
 verify: check-project smoke fs-check-smoke fs-check-negative fs-check-repair gui-smoke
 
-image-reset-fs: $(OBJDIR)/kernel.elf tools/mkbootimg.py
+image-reset-fs: $(OBJDIR)/kernel.elf tools/mkbootimg.py $(LIMINE_BIOS_SYS) $(LIMINE_TOOL)
 	$(PYTHON) tools/mkbootimg.py \
 		--kernel $(OBJDIR)/kernel.elf \
 		--out $(IMAGE) \

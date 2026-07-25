@@ -191,9 +191,17 @@ def build_fat16(partition_start: int, total_sectors: int, files):
 
 def main():
     ap = argparse.ArgumentParser()
+    repo_root = Path(__file__).resolve().parent.parent
+    default_limine_dir = repo_root / "third_party" / "limine"
+
     ap.add_argument("--kernel", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--limine-dir", required=True)
+    ap.add_argument(
+        "--limine-dir",
+        default=str(default_limine_dir),
+        help="Directory with limine-bios.sys and limine-tool-windows-x86/limine.exe "
+        f"(default: {default_limine_dir})",
+    )
     ap.add_argument("--boot-partition-start", type=int, required=True)
     ap.add_argument("--boot-partition-sectors", type=int, required=True)
     ap.add_argument("--fs-start", type=int, required=True)
@@ -206,6 +214,10 @@ def main():
     limine_dir = Path(args.limine_dir).resolve()
     limine_tool = limine_dir / "limine-tool-windows-x86" / "limine.exe"
     limine_bios_sys = limine_dir / "limine-bios.sys"
+    if not limine_bios_sys.is_file():
+        raise SystemExit(f"missing Limine BIOS stage: {limine_bios_sys}")
+    if not limine_tool.is_file():
+        raise SystemExit(f"missing Limine host tool: {limine_tool}")
 
     files = [
         {
