@@ -9,5 +9,6 @@
 
 int rand(void);
 void srand(unsigned int seed);
+int system(const char *command);
 
 #endif

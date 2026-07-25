@@ -176,13 +176,30 @@ BINJGB_FLAGS := -I$(BINJGB_DIR) -include stdbool.h -DNDEBUG \
 	-fomit-frame-pointer -flto \
 	-Wno-unused-function -Wno-unused-variable -Wno-unused-parameter
 BINJGB_OBJS := $(BUILD)/user/binjgb_common.o $(BUILD)/user/binjgb_emulator.o
+LUA_DIR := src/user/third_party/lua
+LUA_PORT_H := src/user/ports/lua/buzzos_lua_port.h
+LUA_CORE_SRCS := \
+	lapi.c lcode.c lctype.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c \
+	lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c \
+	lundump.c lvm.c lzio.c
+LUA_LIB_SRCS := \
+	lauxlib.c lbaselib.c lcorolib.c ldblib.c liolib.c lmathlib.c loadlib.c \
+	loslib.c lstrlib.c ltablib.c lutf8lib.c linit.c
+LUA_SRCS := $(LUA_CORE_SRCS) $(LUA_LIB_SRCS) lua.c
+LUA_OBJS := $(foreach src,$(LUA_SRCS),$(BUILD)/user/lua/$(src:.c=.o))
+LUA_ELF := $(BUILD)/user/lua.elf
+SETJMP_OBJ := $(BUILD)/user/setjmp.o
+LUA_FLAGS := -I$(LUA_DIR) -include $(LUA_PORT_H) \
+	-Wno-unused-parameter -Wno-unused-function -Wno-sign-compare \
+	-Wno-empty-body
+LUA_EXAMPLE := examples/hello.lua
 DEMO_WAV := $(BUILD)/assets/buzzos-demo.wav
 DEMO_MP3 := $(BUILD)/assets/buzzos-demo.mp3
 DEMO_MP3_SRC := assets/buzzos-demo.mp3
-USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(NETSTRESS_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(GUI_APP_ELFS)
+USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(NETSTRESS_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(LUA_ELF) $(GUI_APP_ELFS)
 USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/netstress.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
-USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c
-USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/palette.h src/user/libc/appui.h src/kernel/drv/font_builtin.h
+USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c src/user/libc/setjmp.asm
+USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/palette.h src/user/libc/appui.h src/user/libc/setjmp.h src/kernel/drv/font_builtin.h
 INITRD_H := $(GENERATED_DIR)/initrd.h
 APP_REGISTRY_H := $(GENERATED_DIR)/app_registry.h
 BASM_EXAMPLE := examples/basm-full.asm
@@ -201,7 +218,8 @@ GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).ap
 	$(BUILD)/user/faulttest.o $(BUILD)/user/socketleak.o $(BUILD)/user/heaptest.o \
 	$(BUILD)/user/audiotest.o \
 	$(BUILD)/user/nsporttest.o $(NETSURF_PORT_OBJ) \
-	$(LODEPNG_OBJ) $(MINIMP3_OBJ) $(BINJGB_OBJS) $(BUILD)/user/netstress.o
+	$(LODEPNG_OBJ) $(MINIMP3_OBJ) $(BINJGB_OBJS) $(LUA_OBJS) $(SETJMP_OBJ) \
+	$(BUILD)/user/netstress.o
 
 all: $(IMAGE)
 
@@ -409,6 +427,21 @@ $(BUILD)/user/gameboy.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/us
 		$(BUILD)/user/gameboy.o $(BINJGB_OBJS)
 	$(OBJCOPY) --strip-sections $@
 
+$(SETJMP_OBJ): src/user/libc/setjmp.asm | $(BUILD)/user
+	$(NASM) -f elf32 $< -o $@
+
+$(BUILD)/user/lua:
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)/user/lua' | Out-Null"
+
+$(BUILD)/user/lua/%.o: $(LUA_DIR)/%.c $(LUA_PORT_H) $(USER_HEADERS) | $(BUILD)/user/lua
+	$(CC) $(UCFLAGS) $(LUA_FLAGS) -c $< -o $@
+
+$(LUA_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(SETJMP_OBJ) \
+		$(LUA_OBJS) $(BUILD)/user/user.ld | $(BUILD)/user
+	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(SETJMP_OBJ) $(LUA_OBJS)
+	$(OBJCOPY) --strip-sections $@
+
 $(NSPORTTEST_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		$(BUILD)/user/nsporttest.o $(NETSURF_PORT_OBJ) $(BUILD)/user/user.ld | $(BUILD)/user
 	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
@@ -467,7 +500,7 @@ $(INITRD_H): Makefile $(USER_ELFS) $(DEMO_WAV) $(DEMO_MP3) tools/mkinitrd.py
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
 	$(PYTHON) tools/mkinitrd.py /hello $(USER_ELF) /bin/sh $(SHELL_ELF) \
 		/bin/nano $(NANO_ELF) /bin/basm $(BASM_ELF) /bin/gui $(GUI_ELF) \
-		/bin/bcc $(BCC_ELF) \
+		/bin/bcc $(BCC_ELF) /bin/lua $(LUA_ELF) \
 		/bin/futexhold $(FUTEXHOLD_ELF) /bin/cat $(CAT_ELF) /bin/echo $(ECHO_ELF) \
 		/bin/faulttest $(FAULTTEST_ELF) /bin/socketleak $(SOCKETLEAK_ELF) \
 		/bin/heaptest $(HEAPTEST_ELF) /bin/audiotest $(AUDIOTEST_ELF) \
@@ -479,12 +512,13 @@ $(INITRD_H): Makefile $(USER_ELFS) $(DEMO_WAV) $(DEMO_MP3) tools/mkinitrd.py
 		/share/buzzos-demo.mp3 $(DEMO_MP3) \
 		/bin/netstress $(NETSTRESS_ELF) $(foreach app,$(filter-out browser,$(GUI_APP_NAMES)),/bin/$(app) $(BUILD)/user/$(app).elf) > $@
 
-$(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META) $(BASM_EXAMPLE) $(BCC_EXAMPLE) $(UTF8_EXAMPLE)
+$(APP_REGISTRY_H): tools/gen_app_registry.py Makefile $(GUI_APP_META) $(BASM_EXAMPLE) $(BCC_EXAMPLE) $(UTF8_EXAMPLE) $(LUA_EXAMPLE)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(GENERATED_DIR)' | Out-Null"
 	$(PYTHON) tools/gen_app_registry.py --apps "$(GUI_APP_NAMES)" \
 		--seed "/fs/basm-full.asm=$(BASM_EXAMPLE)" \
 		--seed "/fs/hello.c=$(BCC_EXAMPLE)" \
-		--seed "/fs/utf8.txt=$(UTF8_EXAMPLE)" --out $@
+		--seed "/fs/utf8.txt=$(UTF8_EXAMPLE)" \
+		--seed "/fs/hello.lua=$(LUA_EXAMPLE)" --out $@
 
 .PHONY: user
 user: $(INITRD_H)

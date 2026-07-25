@@ -16,6 +16,10 @@ struct tm {
     int tm_isdst;
 };
 
+#define CLOCKS_PER_SEC 1000
+
+typedef int32_t clock_t;
+
 struct tm *gmtime(const time_t *value);
 struct tm *localtime(const time_t *value);
 time_t mktime(struct tm *value);
@@ -23,5 +27,6 @@ size_t strftime(char *buffer, size_t size, const char *format,
                 const struct tm *value);
 char *strptime(const char *text, const char *format, struct tm *value);
 double difftime(time_t end, time_t beginning);
+clock_t clock(void);
 
 #endif

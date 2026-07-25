@@ -377,9 +377,9 @@ static int read_line(char *line, int size) {
 static void cmd_help(const char *topic) {
     topic = skip_spaces(topic);
     if (!topic[0]) {
-        puts("commands: ls cd pwd stat about health interfaces limits fsinfo fsstat fdstat cat mkdir rmdir touch write rm mv nano basm gui apps ping wget tcptwotest dhcp netstat syncstat badptrtest elfbadtest pipetest pipeedgetest pipeblocktest futextest futextimeouttest futexcanceltest futexblocktest threadreusetest threads exec wait kill ps echo sleep reboot help");
-        puts("external: /bin/echo /bin/cat; pipeline: echo hello | cat");
-        puts("topics: help apps | help gui | help files | help proc | help edit | help net | help pipes");
+        puts("commands: ls cd pwd stat about health interfaces limits fsinfo fsstat fdstat cat mkdir rmdir touch write rm mv nano basm lua gui apps ping wget tcptwotest dhcp netstat syncstat badptrtest elfbadtest pipetest pipeedgetest pipeblocktest futextest futextimeouttest futexcanceltest futexblocktest threadreusetest threads exec wait kill ps echo sleep reboot help");
+        puts("external: /bin/echo /bin/cat /bin/lua; pipeline: echo hello | cat");
+        puts("topics: help apps | help gui | help files | help proc | help edit | help net | help pipes | help lua");
         puts("quick start: about; health; fsinfo; gui");
         return;
     }
@@ -420,6 +420,12 @@ static void cmd_help(const char *topic) {
         puts("shell pipelines connect external programs with |");
         puts("redirection: < input, > output, >> append");
         puts("try: echo ok | cat | cat; echo saved > /fs/out; cat < /fs/out");
+        return;
+    }
+    if (strcmp(topic, "lua") == 0) {
+        puts("lua [script] [args...]  -- Lua 5.4 interpreter (/bin/lua)");
+        puts("try: lua; lua /fs/hello.lua; lua -e \"print(1+1)\"");
+        puts("package.path searches ./ /fs /fs/lua /share/lua");
         return;
     }
     puts("help: unknown topic");

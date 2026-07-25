@@ -7,6 +7,16 @@ short log for reviewers and contributors; deeper design notes live under
 
 ## Unreleased
 
+### Lua
+
+- Ported Lua 5.4.7 as `/bin/lua` (vendored under `src/user/third_party/lua/`).
+- Platform overrides in `src/user/ports/lua/buzzos_lua_port.h` (`LUA_USE_C89`,
+  package path under `/fs`, no shell `os.execute`, fixed decimal point).
+- Extended mini libc for the port: `setjmp`/`longjmp`, richer stdio
+  (`freopen`, `ungetc`, `tmpfile`, …), math (`exp`/`log`/`asin`/…), ctype,
+  `localeconv`, and more complete `strftime`.
+- Seeds `/fs/hello.lua`; shell help topic `help lua`.
+
 ### Project Introduction
 
 - Clarified BuzzOS as a small i386 POSIX-like operating system for learning

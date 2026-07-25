@@ -1010,23 +1010,50 @@ int printf(const char *fmt, ...) {
     return length;
 }
 
-static FILE standard_input = { 0, 0, 0 };
-static FILE standard_output = { 1, 0, 0 };
-static FILE standard_error = { 2, 0, 0 };
+static FILE standard_input = { 0, 0, 0, 0, 0 };
+static FILE standard_output = { 1, 0, 0, 0, 0 };
+static FILE standard_error = { 2, 0, 0, 0, 0 };
 FILE *stdin = &standard_input;
 FILE *stdout = &standard_output;
 FILE *stderr = &standard_error;
 
-FILE *fopen(const char *path, const char *mode) {
+static int fopen_flags(const char *mode) {
     int flags = O_RDONLY;
-    if (mode && mode[0] == 'w') flags = O_WRONLY | O_CREAT | O_TRUNC;
-    else if (mode && mode[0] == 'a') flags = O_WRONLY | O_CREAT | O_APPEND;
-    else if (mode && strchr(mode, '+')) flags = O_RDWR | O_CREAT;
-    int fd = open(path, flags, 0666);
+    if (!mode || !mode[0]) return flags;
+    if (mode[0] == 'w') flags = O_WRONLY | O_CREAT | O_TRUNC;
+    else if (mode[0] == 'a') flags = O_WRONLY | O_CREAT | O_APPEND;
+    if (strchr(mode, '+')) {
+        if (mode[0] == 'w') flags = O_RDWR | O_CREAT | O_TRUNC;
+        else if (mode[0] == 'a') flags = O_RDWR | O_CREAT | O_APPEND;
+        else flags = O_RDWR | O_CREAT;
+    }
+    return flags;
+}
+
+FILE *fopen(const char *path, const char *mode) {
+    int fd = open(path, fopen_flags(mode), 0666);
     if (fd < 0) return NULL;
     FILE *stream = malloc(sizeof(*stream));
     if (!stream) { close(fd); return NULL; }
-    stream->fd = fd; stream->eof = 0; stream->error = 0;
+    stream->fd = fd;
+    stream->eof = 0;
+    stream->error = 0;
+    stream->have_unget = 0;
+    stream->unget_char = 0;
+    return stream;
+}
+
+FILE *freopen(const char *path, const char *mode, FILE *stream) {
+    if (!stream || !path) return NULL;
+    int fd = open(path, fopen_flags(mode), 0666);
+    if (fd < 0) return NULL;
+    if (stream->fd >= 0)
+        close(stream->fd);
+    stream->fd = fd;
+    stream->eof = 0;
+    stream->error = 0;
+    stream->have_unget = 0;
+    stream->unget_char = 0;
     return stream;
 }
 
@@ -1040,9 +1067,27 @@ int fclose(FILE *stream) {
 
 size_t fread(void *ptr, size_t size, size_t count, FILE *stream) {
     if (!stream || !size || !count) return 0;
-    int result = read(stream->fd, ptr, size * count);
-    if (result <= 0) { stream->eof = result == 0; stream->error = result < 0; return 0; }
-    return (size_t)result / size;
+    unsigned char *out = (unsigned char *)ptr;
+    size_t total = size * count;
+    size_t done = 0;
+    if (stream->have_unget && total > 0) {
+        out[0] = (unsigned char)stream->unget_char;
+        stream->have_unget = 0;
+        done = 1;
+        out++;
+        total--;
+    }
+    if (total > 0) {
+        int result = read(stream->fd, out, total);
+        if (result < 0) {
+            stream->error = 1;
+            return done / size;
+        }
+        if (result == 0)
+            stream->eof = 1;
+        done += (size_t)result;
+    }
+    return done / size;
 }
 
 size_t fwrite(const void *ptr, size_t size, size_t count, FILE *stream) {
@@ -1055,10 +1100,17 @@ size_t fwrite(const void *ptr, size_t size, size_t count, FILE *stream) {
 int fseek(FILE *stream, long offset, int whence) {
     if (!stream) return -1;
     stream->eof = 0;
+    stream->have_unget = 0;
     return lseek(stream->fd, (int)offset, whence) < 0 ? -1 : 0;
 }
 
-long ftell(FILE *stream) { return stream ? lseek(stream->fd, 0, SEEK_CUR) : -1; }
+long ftell(FILE *stream) {
+    if (!stream) return -1;
+    long pos = lseek(stream->fd, 0, SEEK_CUR);
+    if (pos < 0) return -1;
+    if (stream->have_unget && pos > 0) pos--;
+    return pos;
+}
 int fgetc(FILE *stream) {
     unsigned char byte;
     return fread(&byte, 1, 1, stream) == 1 ? byte : EOF;
@@ -1079,10 +1131,43 @@ char *fgets(char *buffer, int size, FILE *stream) {
     buffer[used] = 0;
     return used ? buffer : NULL;
 }
+int ungetc(int character, FILE *stream) {
+    if (!stream || character == EOF || stream->have_unget) return EOF;
+    stream->unget_char = character;
+    stream->have_unget = 1;
+    stream->eof = 0;
+    return character;
+}
 int feof(FILE *stream) { return stream ? stream->eof : 1; }
 int ferror(FILE *stream) { return stream ? stream->error : 1; }
+void clearerr(FILE *stream) {
+    if (!stream) return;
+    stream->eof = 0;
+    stream->error = 0;
+}
 int fflush(FILE *stream) { (void)stream; return 0; }
 void setbuf(FILE *stream, char *buffer) { (void)stream; (void)buffer; }
+int setvbuf(FILE *stream, char *buffer, int mode, size_t size) {
+    (void)stream; (void)buffer; (void)mode; (void)size;
+    return 0;
+}
+char *tmpnam(char *buffer) {
+    static char local[L_tmpnam];
+    static unsigned int sequence;
+    char *out = buffer ? buffer : local;
+    sequence++;
+    snprintf(out, L_tmpnam, "/fs/lua_tmp_%u", sequence);
+    return out;
+}
+
+FILE *tmpfile(void) {
+    char path[L_tmpnam];
+    tmpnam(path);
+    FILE *stream = fopen(path, "w+");
+    if (stream)
+        unlink(path);
+    return stream;
+}
 int fputs(const char *text, FILE *stream) {
     size_t length = strlen(text);
     return fwrite(text, 1, length, stream) == length ? 0 : EOF;
@@ -1289,6 +1374,68 @@ int isxdigit(int c) {
 
 int isascii(int c) {
     return (unsigned)c < 128u;
+}
+
+int isprint(int c) {
+    return c >= 0x20 && c <= 0x7e;
+}
+
+int isgraph(int c) {
+    return c > 0x20 && c <= 0x7e;
+}
+
+int iscntrl(int c) {
+    return (c >= 0 && c < 0x20) || c == 0x7f;
+}
+
+int ispunct(int c) {
+    return isgraph(c) && !isalnum(c);
+}
+
+int isupper(int c) {
+    return c >= 'A' && c <= 'Z';
+}
+
+int islower(int c) {
+    return c >= 'a' && c <= 'z';
+}
+
+int strcoll(const char *a, const char *b) {
+    return strcmp(a, b);
+}
+
+int system(const char *command) {
+    (void)command;
+    return -1;
+}
+
+clock_t clock(void) {
+    return (clock_t)monotonic_ms();
+}
+
+struct lconv *localeconv(void) {
+    static char decimal_point[] = ".";
+    static char empty[] = "";
+    static struct lconv value;
+    value.decimal_point = decimal_point;
+    value.thousands_sep = empty;
+    value.grouping = empty;
+    value.int_curr_symbol = empty;
+    value.currency_symbol = empty;
+    value.mon_decimal_point = empty;
+    value.mon_thousands_sep = empty;
+    value.mon_grouping = empty;
+    value.positive_sign = empty;
+    value.negative_sign = empty;
+    value.int_frac_digits = 127;
+    value.frac_digits = 127;
+    value.p_cs_precedes = 127;
+    value.p_sep_by_space = 127;
+    value.n_cs_precedes = 127;
+    value.n_sep_by_space = 127;
+    value.p_sign_posn = 127;
+    value.n_sign_posn = 127;
+    return &value;
 }
 
 static unsigned long long udivmod64(unsigned long long numerator,
@@ -1733,12 +1880,61 @@ size_t strftime(char *buffer, size_t size, const char *format,
         switch (*format++) {
         case '%': strcpy(temp, "%"); break;
         case 'a': strcpy(temp, weekdays[value->tm_wday]); break;
+        case 'A': {
+            static const char *full_weekdays[] = {
+                "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
+            };
+            strcpy(temp, full_weekdays[value->tm_wday]);
+            break;
+        }
         case 'b': strcpy(temp, months[value->tm_mon]); break;
+        case 'B': {
+            static const char *full_months[] = {
+                "January","February","March","April","May","June",
+                "July","August","September","October","November","December"
+            };
+            strcpy(temp, full_months[value->tm_mon]);
+            break;
+        }
+        case 'c':
+            snprintf(temp, sizeof(temp), "%s %s %02d %02d:%02d:%02d %04d",
+                     weekdays[value->tm_wday], months[value->tm_mon],
+                     value->tm_mday, value->tm_hour, value->tm_min, value->tm_sec,
+                     value->tm_year + 1900);
+            break;
         case 'd': snprintf(temp, sizeof(temp), "%02d", value->tm_mday); break;
         case 'H': snprintf(temp, sizeof(temp), "%02d", value->tm_hour); break;
+        case 'I': {
+            int hour = value->tm_hour % 12;
+            if (hour == 0) hour = 12;
+            snprintf(temp, sizeof(temp), "%02d", hour);
+            break;
+        }
+        case 'j': snprintf(temp, sizeof(temp), "%03d", value->tm_yday + 1); break;
+        case 'm': snprintf(temp, sizeof(temp), "%02d", value->tm_mon + 1); break;
         case 'M': snprintf(temp, sizeof(temp), "%02d", value->tm_min); break;
+        case 'p': strcpy(temp, value->tm_hour >= 12 ? "PM" : "AM"); break;
         case 'S': snprintf(temp, sizeof(temp), "%02d", value->tm_sec); break;
+        case 'U': snprintf(temp, sizeof(temp), "%02d",
+                           (value->tm_yday + 7 - value->tm_wday) / 7); break;
+        case 'w': snprintf(temp, sizeof(temp), "%d", value->tm_wday); break;
+        case 'W': {
+            int wday = value->tm_wday == 0 ? 6 : value->tm_wday - 1;
+            snprintf(temp, sizeof(temp), "%02d", (value->tm_yday + 7 - wday) / 7);
+            break;
+        }
+        case 'x':
+            snprintf(temp, sizeof(temp), "%02d/%02d/%02d",
+                     value->tm_mon + 1, value->tm_mday, (value->tm_year + 1900) % 100);
+            break;
+        case 'X':
+            snprintf(temp, sizeof(temp), "%02d:%02d:%02d",
+                     value->tm_hour, value->tm_min, value->tm_sec);
+            break;
+        case 'y': snprintf(temp, sizeof(temp), "%02d",
+                           (value->tm_year + 1900) % 100); break;
         case 'Y': snprintf(temp, sizeof(temp), "%04d", value->tm_year + 1900); break;
+        case 'Z': strcpy(temp, "UTC"); break;
         case 's': snprintf(temp, sizeof(temp), "%d", (int)mktime((struct tm *)value)); break;
         default: break;
         }
@@ -1791,6 +1987,120 @@ double tan(double x) {
     return cosine == 0.0 ? 0.0 : sin(x) / cosine;
 }
 
+double atan(double x) {
+    /* Cody-Waite style polynomial for |x| <= 1, reduce otherwise. */
+    int negate = x < 0.0;
+    if (negate) x = -x;
+    int complement = x > 1.0;
+    if (complement) x = 1.0 / x;
+    double x2 = x * x;
+    double result = x * (1.0 + x2 * (-0.3333314528 + x2 * (0.1999355085 +
+        x2 * (-0.1420889944 + x2 * (0.1065626393 + x2 * (-0.0752896400 +
+        x2 * (0.0429096138 + x2 * (-0.0161657367 + x2 * 0.0028662257))))))));
+    if (complement) result = 1.5707963267948966 - result;
+    return negate ? -result : result;
+}
+
+double atan2(double y, double x) {
+    if (x > 0.0) return atan(y / x);
+    if (x < 0.0) {
+        if (y >= 0.0) return atan(y / x) + 3.141592653589793;
+        return atan(y / x) - 3.141592653589793;
+    }
+    if (y > 0.0) return 1.5707963267948966;
+    if (y < 0.0) return -1.5707963267948966;
+    return 0.0;
+}
+
+double asin(double x) {
+    if (x < -1.0 || x > 1.0) return 0.0;
+    if (x == 1.0) return 1.5707963267948966;
+    if (x == -1.0) return -1.5707963267948966;
+    return atan(x / sqrt(1.0 - x * x));
+}
+
+double acos(double x) {
+    return 1.5707963267948966 - asin(x);
+}
+
+double log(double x) {
+    if (x <= 0.0) return 0.0;
+    double result;
+    __asm__ volatile("fldln2; fldl %1; fyl2x; fstpl %0"
+                     : "=m"(result) : "m"(x));
+    return result;
+}
+
+double log2(double x) {
+    if (x <= 0.0) return 0.0;
+    double result;
+    __asm__ volatile("fld1; fldl %1; fyl2x; fstpl %0"
+                     : "=m"(result) : "m"(x));
+    return result;
+}
+
+double log10(double x) {
+    if (x <= 0.0) return 0.0;
+    double result;
+    __asm__ volatile("fldlg2; fldl %1; fyl2x; fstpl %0"
+                     : "=m"(result) : "m"(x));
+    return result;
+}
+
+double exp(double x) {
+    double result;
+    __asm__ volatile(
+        "fldl %1\n\t"
+        "fldl2e\n\t"
+        "fmulp\n\t"
+        "fld %%st(0)\n\t"
+        "frndint\n\t"
+        "fsub %%st,%%st(1)\n\t"
+        "fxch\n\t"
+        "f2xm1\n\t"
+        "fld1\n\t"
+        "faddp\n\t"
+        "fscale\n\t"
+        "fstp %%st(1)\n\t"
+        "fstpl %0"
+        : "=m"(result)
+        : "m"(x)
+        : "st", "st(1)"
+    );
+    return result;
+}
+
+double frexp(double value, int *exponent) {
+    if (!exponent) return value;
+    if (value == 0.0) {
+        *exponent = 0;
+        return 0.0;
+    }
+    int exp2 = 0;
+    int negative = value < 0.0;
+    if (negative) value = -value;
+    while (value >= 1.0) {
+        value *= 0.5;
+        exp2++;
+    }
+    while (value > 0.0 && value < 0.5) {
+        value *= 2.0;
+        exp2--;
+    }
+    *exponent = exp2;
+    return negative ? -value : value;
+}
+
+double ldexp(double value, int exponent) {
+    if (value == 0.0 || exponent == 0) return value;
+    if (exponent > 0) {
+        while (exponent--) value *= 2.0;
+    } else {
+        while (exponent++) value *= 0.5;
+    }
+    return value;
+}
+
 double floor(double x) {
     long value = (long)x;
     if ((double)value > x) value--;
@@ -1811,14 +2121,18 @@ double fmod(double x, double divisor) {
 }
 double pow(double x, double exponent) {
     long whole = (long)exponent;
-    if ((double)whole != exponent) return 0.0;
-    int negative = whole < 0;
-    if (negative) whole = -whole;
-    double result = 1.0;
-    while (whole) {
-        if (whole & 1) result *= x;
-        x *= x;
-        whole >>= 1;
+    if ((double)whole == exponent) {
+        int negative = whole < 0;
+        if (negative) whole = -whole;
+        double result = 1.0;
+        double base = x;
+        while (whole) {
+            if (whole & 1) result *= base;
+            base *= base;
+            whole >>= 1;
+        }
+        return negative && result != 0.0 ? 1.0 / result : result;
     }
-    return negative && result != 0.0 ? 1.0 / result : result;
+    if (x <= 0.0) return 0.0;
+    return exp(exponent * log(x));
 }
