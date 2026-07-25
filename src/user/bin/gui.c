@@ -199,8 +199,20 @@ static int damage_lock;
 static uint32_t last_wheel_seq;
 static int last_wheel_value;
 static int ime_enabled;
-static char ime_buffer[24];
+/* Composition buffer holds pure a-z pinyin (ü as v). */
+enum {
+    IME_BUF_CAP = 32,
+    IME_CAND_CAP = 72,
+    IME_PAGE_SIZE = 9,
+    IME_MATCH_CAP = 96
+};
+static char ime_buffer[IME_BUF_CAP];
 static int ime_length;
+static int ime_page;
+static int ime_cand_count;
+static char ime_cands[IME_CAND_CAP][GUIAPP_TEXT_MAX];
+/* How many leading pinyin letters each candidate consumes on commit. */
+static uint8_t ime_cand_consume[IME_CAND_CAP];
 static char clipboard[GUIAPP_PATH_MAX];
 static int context_open;
 static int context_x;
@@ -317,7 +329,8 @@ static void dock_damage(void) {
 /* Damage the IME badge (top bar) and the candidate panel area. */
 static void ime_damage(void) {
     queue_damage((struct rect){0, 0, sw, TOPBAR_H});
-    queue_damage((struct rect){0, sh - 136, sw, 136});
+    /* Taller panel: composition line + candidate page. */
+    queue_damage((struct rect){0, sh - 170, sw, 170});
 }
 
 static void topbar_damage(void) {
@@ -1750,7 +1763,7 @@ static void draw_status(void) {
     append_uint(line, (unsigned int)app_count, sizeof(line));
     text_clip(ox, oy + 88, line, THEME_TEXT_DIM, -1, clip);
     text_clip(ox, oy + 120, "Controls", THEME_ACCENT, -1, clip);
-    text_clip(ox, oy + 150, "Enter launches app", THEME_TEXT_DIM, -1, clip);
+    text_clip(ox, oy + 150, "Ctrl+Space toggles IME", THEME_TEXT_DIM, -1, clip);
     text_clip(ox, oy + 178, "[ ] cycle resolution", THEME_TEXT_DIM, -1, clip);
     text_clip(ox, oy + 206, "Esc returns to shell", THEME_TEXT_DIM, -1, clip);
     int mode_error = mode_error_until && tick < mode_error_until;
@@ -2042,32 +2055,195 @@ static void draw_dock(void) {
     draw_dock_tooltip();
 }
 
-static const char *ime_candidates(void) {
-    for (int i = 0; i < PINYIN_ENTRY_COUNT; i++)
-        if (strcmp(pinyin_entries[i].key, ime_buffer) == 0)
-            return pinyin_entries[i].items;
+/* ---- Pinyin IME core -------------------------------------------------- */
+
+static int pinyin_key_cmp(const char *key, const char *buf, int n) {
+    for (int i = 0; i < n; i++) {
+        unsigned char a = (unsigned char)key[i];
+        unsigned char b = (unsigned char)buf[i];
+        if (!a) return -1;
+        if (a != b) return (int)a - (int)b;
+    }
     return 0;
 }
 
-static int ime_candidate_at(int wanted, char out[GUIAPP_TEXT_MAX]) {
-    const char *items = ime_candidates();
-    int index = 0;
-    if (!items || wanted < 0)
-        return 0;
-    while (*items) {
-        while (*items == ' ') items++;
-        if (!*items) break;
-        const char *start = items;
-        while (*items && *items != ' ') items++;
-        if (index++ == wanted) {
-            int n = (int)(items - start);
-            if (n >= GUIAPP_TEXT_MAX) n = GUIAPP_TEXT_MAX - 1;
-            for (int i = 0; i < n; i++) out[i] = start[i];
-            out[n] = 0;
-            return 1;
-        }
+/* Lower bound: first entry whose key >= prefix (dictionary order). */
+static int pinyin_lower_bound(const char *prefix, int n) {
+    int lo = 0, hi = PINYIN_ENTRY_COUNT;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = pinyin_key_cmp(pinyin_entries[mid].key, prefix, n);
+        if (c < 0)
+            lo = mid + 1;
+        else
+            hi = mid;
     }
-    return 0;
+    return lo;
+}
+
+static int ime_cand_find(const char *text) {
+    for (int i = 0; i < ime_cand_count; i++)
+        if (strcmp(ime_cands[i], text) == 0)
+            return i;
+    return -1;
+}
+
+static void ime_cand_push(const char *text, int consume, int prefer_front) {
+    if (!text || !text[0] || consume <= 0 || ime_cand_count >= IME_CAND_CAP)
+        return;
+    int n = (int)strlen(text);
+    if (n >= GUIAPP_TEXT_MAX)
+        n = GUIAPP_TEXT_MAX - 1;
+    int existing = ime_cand_find(text);
+    if (existing >= 0) {
+        /* Keep the match that consumes more pinyin (better segmentation). */
+        if (consume > (int)ime_cand_consume[existing])
+            ime_cand_consume[existing] = (uint8_t)consume;
+        return;
+    }
+    int slot = ime_cand_count;
+    if (prefer_front && ime_cand_count > 0) {
+        for (int i = ime_cand_count; i > 0; i--) {
+            copy_text(ime_cands[i], ime_cands[i - 1], GUIAPP_TEXT_MAX);
+            ime_cand_consume[i] = ime_cand_consume[i - 1];
+        }
+        slot = 0;
+        ime_cand_count++;
+    } else {
+        ime_cand_count++;
+    }
+    for (int i = 0; i < n; i++)
+        ime_cands[slot][i] = text[i];
+    ime_cands[slot][n] = 0;
+    ime_cand_consume[slot] = (uint8_t)(consume > 255 ? 255 : consume);
+}
+
+static void ime_push_items(const char *items, int consume, int prefer_front) {
+    if (!items)
+        return;
+    while (*items && ime_cand_count < IME_CAND_CAP) {
+        while (*items == ' ')
+            items++;
+        if (!*items)
+            break;
+        const char *start = items;
+        while (*items && *items != ' ')
+            items++;
+        int n = (int)(items - start);
+        if (n <= 0)
+            continue;
+        char tmp[GUIAPP_TEXT_MAX];
+        if (n >= GUIAPP_TEXT_MAX)
+            n = GUIAPP_TEXT_MAX - 1;
+        for (int i = 0; i < n; i++)
+            tmp[i] = start[i];
+        tmp[n] = 0;
+        ime_cand_push(tmp, consume, prefer_front);
+        prefer_front = 0; /* only the first item of a phrase row is prioritized */
+    }
+}
+
+/*
+ * Build the candidate list for the current composition.
+ *
+ * Matching policy (in priority order when inserting):
+ *  1. Exact key == buffer          (full syllable / full phrase)
+ *  2. Key is a prefix of buffer    (continuous: "nihao" hits "nihao","ni","hao"…)
+ *     Longer keys first so phrases beat single syllables.
+ *  3. Buffer is a prefix of key    (still typing: "zho" → "zhong")
+ */
+static void ime_rebuild_candidates(void) {
+    ime_cand_count = 0;
+    ime_page = 0;
+    if (ime_length <= 0)
+        return;
+
+    struct match {
+        int index;
+        int key_len;
+        int kind; /* 0 exact, 1 key-prefix-of-buf, 2 buf-prefix-of-key */
+    } matches[IME_MATCH_CAP];
+    int match_count = 0;
+
+    int start = pinyin_lower_bound(ime_buffer, 1);
+    for (int i = start; i < PINYIN_ENTRY_COUNT && match_count < IME_MATCH_CAP; i++) {
+        const char *key = pinyin_entries[i].key;
+        if (key[0] != ime_buffer[0])
+            break;
+        int klen = (int)strlen(key);
+        int kind = -1;
+        if (klen == ime_length && memcmp(key, ime_buffer, (size_t)klen) == 0)
+            kind = 0;
+        else if (klen <= ime_length &&
+                 memcmp(key, ime_buffer, (size_t)klen) == 0)
+            kind = 1;
+        else if (klen > ime_length &&
+                 memcmp(key, ime_buffer, (size_t)ime_length) == 0)
+            kind = 2;
+        if (kind < 0)
+            continue;
+        matches[match_count].index = i;
+        matches[match_count].key_len = klen;
+        matches[match_count].kind = kind;
+        match_count++;
+    }
+
+    /* Sort matches: kind asc, then longer keys first for kind 0/1. */
+    for (int a = 1; a < match_count; a++) {
+        struct match v = matches[a];
+        int b = a;
+        while (b > 0) {
+            struct match p = matches[b - 1];
+            int better = 0;
+            if (v.kind < p.kind)
+                better = 1;
+            else if (v.kind == p.kind && v.key_len > p.key_len)
+                better = 1;
+            if (!better)
+                break;
+            matches[b] = p;
+            b--;
+        }
+        matches[b] = v;
+    }
+
+    for (int m = 0; m < match_count; m++) {
+        const struct pinyin_entry *e = &pinyin_entries[matches[m].index];
+        int prefer = matches[m].kind == 0 ||
+                     (matches[m].kind == 1 && matches[m].key_len == ime_length);
+        /* Incomplete syllables (kind 2) replace the whole composition. */
+        int consume = matches[m].kind == 2 ? ime_length : matches[m].key_len;
+        ime_push_items(e->items, consume, prefer && m == 0);
+    }
+}
+
+static int ime_page_count(void) {
+    if (ime_cand_count <= 0)
+        return 1;
+    return (ime_cand_count + IME_PAGE_SIZE - 1) / IME_PAGE_SIZE;
+}
+
+static void ime_clamp_page(void) {
+    int pages = ime_page_count();
+    if (ime_page < 0)
+        ime_page = 0;
+    if (ime_page >= pages)
+        ime_page = pages - 1;
+}
+
+static int ime_candidate_at(int page_index, char out[GUIAPP_TEXT_MAX]) {
+    int abs = ime_page * IME_PAGE_SIZE + page_index;
+    if (abs < 0 || abs >= ime_cand_count)
+        return 0;
+    copy_text(out, ime_cands[abs], GUIAPP_TEXT_MAX);
+    return 1;
+}
+
+static int ime_candidate_consume(int page_index) {
+    int abs = ime_page * IME_PAGE_SIZE + page_index;
+    if (abs < 0 || abs >= ime_cand_count)
+        return ime_length;
+    return (int)ime_cand_consume[abs];
 }
 
 static void draw_ime(void) {
@@ -2082,25 +2258,42 @@ static void draw_ime(void) {
                             badge.w - 4, badge.h - 2});
     if (!ime_enabled || ime_length == 0)
         return;
-    char line[192];
-    copy_text(line, ime_buffer, sizeof(line));
-    append_text(line, "   ", sizeof(line));
-    for (int i = 0; i < 9; i++) {
-        char item[GUIAPP_TEXT_MAX];
-        char number[4] = {(char)('1' + i), '.', 0, 0};
-        if (!ime_candidate_at(i, item)) break;
-        append_text(line, number, sizeof(line));
-        append_text(line, item, sizeof(line));
-        append_text(line, "  ", sizeof(line));
+
+    char comp[96];
+    copy_text(comp, ime_buffer, sizeof(comp));
+    if (ime_cand_count > IME_PAGE_SIZE) {
+        append_text(comp, "  (", sizeof(comp));
+        append_uint(comp, (unsigned int)(ime_page + 1), sizeof(comp));
+        append_text(comp, "/", sizeof(comp));
+        append_uint(comp, (unsigned int)ime_page_count(), sizeof(comp));
+        append_text(comp, ")", sizeof(comp));
     }
-    int panel_w = min_i(sw - 24, max_i(260, gui_text_width(line) + 20));
-    struct rect panel = {(sw - panel_w) / 2, sh - 132, panel_w, 38};
-    fill_round(panel, THEME_ACCENT_DIM);
+
+    char cands[192];
+    cands[0] = 0;
+    for (int i = 0; i < IME_PAGE_SIZE; i++) {
+        char item[GUIAPP_TEXT_MAX];
+        if (!ime_candidate_at(i, item))
+            break;
+        char number[4] = {(char)('1' + i), '.', 0, 0};
+        if (i)
+            append_text(cands, "  ", sizeof(cands));
+        append_text(cands, number, sizeof(cands));
+        append_text(cands, item, sizeof(cands));
+    }
+    if (!cands[0])
+        copy_text(cands, "(no match — Space commits pinyin)", sizeof(cands));
+
+    int need_w = max_i(gui_text_width(comp), gui_text_width(cands)) + 28;
+    int panel_w = min_i(sw - 24, max_i(320, need_w));
+    int panel_h = 64;
+    struct rect panel = {(sw - panel_w) / 2, sh - 150, panel_w, panel_h};
+    fill_round(panel, THEME_FIELD_BORDER);
     fill_round((struct rect){panel.x + 1, panel.y + 1,
-                             panel.w - 2, panel.h - 2}, THEME_WIN_BODY);
-    int line_y = panel.y + (panel.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT;
-    text_clip(panel.x + 10, line_y, line, THEME_TEXT, -1,
-              (struct rect){panel.x + 5, panel.y + 3, panel.w - 10, panel.h - 6});
+                             panel.w - 2, panel.h - 2}, THEME_PANEL_RAISED);
+    struct rect clip = {panel.x + 8, panel.y + 4, panel.w - 16, panel.h - 8};
+    text_clip(panel.x + 12, panel.y + 8, comp, THEME_ACCENT, -1, clip);
+    text_clip(panel.x + 12, panel.y + 34, cands, THEME_TEXT, -1, clip);
 }
 
 static void draw_context_menu(void) {
@@ -2592,22 +2785,55 @@ static void clipboard_command(int command) {
 static void ime_clear(void) {
     ime_length = 0;
     ime_buffer[0] = 0;
+    ime_page = 0;
+    ime_cand_count = 0;
 }
 
-static void ime_commit_candidate(int index) {
+static void ime_consume_prefix(int n) {
+    if (n <= 0)
+        return;
+    if (n >= ime_length) {
+        ime_clear();
+        return;
+    }
+    for (int i = 0; i <= ime_length - n; i++)
+        ime_buffer[i] = ime_buffer[i + n];
+    ime_length -= n;
+    ime_rebuild_candidates();
+}
+
+static void ime_commit_candidate(int page_index) {
     char item[GUIAPP_TEXT_MAX];
-    if (ime_candidate_at(index, item))
+    if (ime_candidate_at(page_index, item)) {
+        int consume = ime_candidate_consume(page_index);
         ime_submit(item);
-    else
+        ime_consume_prefix(consume);
+    } else if (ime_length > 0) {
+        /* No dictionary hit: pass through the raw pinyin so the user is
+         * never stuck with a dead composition. */
         ime_submit(ime_buffer);
-    ime_clear();
+        ime_clear();
+    }
 }
 
 static const char *ime_punctuation(int k) {
+    /* While composing, -/[=] are claimed earlier for candidate paging. */
     switch (k) {
     case ',': return "，"; case '.': return "。"; case '?': return "？";
     case '!': return "！"; case ':': return "："; case ';': return "；";
     case '(': return "（"; case ')': return "）";
+    case '<': return "《"; case '>': return "》";
+    case '[': return "【"; case ']': return "】";
+    case '\'': return "‘";
+    case '"': return "“";
+    case '\\': return "、";
+    case '`': return "·";
+    case '~': return "～";
+    case '$': return "￥";
+    case '^': return "……";
+    case '_': return "——";
+    case '{': return "「"; case '}': return "」";
+    case '|': return "｜";
     default: return 0;
     }
 }
@@ -2623,35 +2849,63 @@ static int ime_handle_key(int k) {
     if (!ime_enabled || !ime_target_active())
         return 0;
     if (k == KEY_ESC && ime_length > 0) {
-        ime_clear(); ime_damage(); return 1;
+        ime_clear();
+        ime_damage();
+        return 1;
     }
     if ((k == KEY_BACKSPACE || k == 127) && ime_length > 0) {
         ime_buffer[--ime_length] = 0;
+        ime_buffer[ime_length] = 0;
+        ime_rebuild_candidates();
         ime_damage();
         return 1;
     }
     if ((k >= 'a' && k <= 'z') || (k >= 'A' && k <= 'Z')) {
-        if (ime_length + 1 < (int)sizeof(ime_buffer)) {
-            if (k >= 'A' && k <= 'Z') k += 'a' - 'A';
+        if (ime_length + 1 < IME_BUF_CAP) {
+            if (k >= 'A' && k <= 'Z')
+                k += 'a' - 'A';
+            /* ü is typed as v (standard mainland IME convention). */
             ime_buffer[ime_length++] = (char)k;
             ime_buffer[ime_length] = 0;
+            ime_rebuild_candidates();
         }
         ime_damage();
         return 1;
     }
     if (ime_length > 0) {
+        /* Page candidates: -/[ previous, =/] next (also +/- on some layouts). */
+        if (k == '-' || k == '[' || k == KEY_LEFT) {
+            if (ime_page > 0)
+                ime_page--;
+            ime_clamp_page();
+            ime_damage();
+            return 1;
+        }
+        if (k == '=' || k == ']' || k == KEY_RIGHT) {
+            if (ime_page + 1 < ime_page_count())
+                ime_page++;
+            ime_clamp_page();
+            ime_damage();
+            return 1;
+        }
         if (k >= '1' && k <= '9') {
-            ime_commit_candidate(k - '1'); ime_damage(); return 1;
+            ime_commit_candidate(k - '1');
+            ime_damage();
+            return 1;
         }
         if (k == ' ' || k == '\r' || k == '\n') {
-            ime_commit_candidate(0); ime_damage(); return 1;
+            ime_commit_candidate(0);
+            ime_damage();
+            return 1;
         }
-        /* Commit the composition before passing punctuation/navigation on. */
+        /* Commit the best candidate (or raw pinyin) before punctuation. */
         ime_commit_candidate(0);
     }
     const char *punct = ime_punctuation(k);
     if (punct) {
-        ime_submit(punct); ime_damage(); return 1;
+        ime_submit(punct);
+        ime_damage();
+        return 1;
     }
     return 0;
 }

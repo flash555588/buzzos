@@ -315,6 +315,8 @@ $(BUILD)/user/basm_engine.o: src/user/bin/basm.c src/user/bin/basm.h src/user/li
 $(BUILD)/user/bcc.o: src/user/bin/bcc.c src/user/bin/basm.h src/user/libc/libc.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -Isrc/user/bin -c src/user/bin/bcc.c -o $@
 
+# Regenerate with: python tools/gen_pinyin_data.py
+# (needs assets/pinyin/pinyin.txt or pypinyin + GB2312)
 $(BUILD)/user/gui.o: src/user/bin/gui.c src/user/bin/pinyin_data.h $(USER_HEADERS) | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/bin/gui.c -o $(BUILD)/user/gui.o
 
