@@ -40,11 +40,12 @@ enum {
     LAUNCHER_HEADER_H = 44,
     LAUNCHER_ROW_STEP = 62,
     LAUNCHER_ROW_H = 58,
-    DOCK_SYSTEM_STEP = 86,
-    DOCK_SYSTEM_W = 80,
-    DOCK_TASK_STEP = 146,
-    DOCK_TASK_W = 140,
-    DOCK_MORE_W = 80,
+    DOCK_SYSTEM_STEP = 54,
+    DOCK_SYSTEM_W = 46,
+    DOCK_TASK_STEP = 54,
+    DOCK_TASK_W = 46,
+    DOCK_MORE_W = 46,
+    DOCK_TOOLTIP_DELAY = 24,
     CONTEXT_MENU_W = 184,
     CONTEXT_ITEM_STEP = 38,
     CONTEXT_ITEM_H = 34,
@@ -171,6 +172,8 @@ static int app_last_click = -1;
 static unsigned int app_last_click_tick;
 static int dock_hover = -1;
 static int dock_expanded;
+static unsigned int dock_hover_since;
+static int dock_tooltip_visible;
 static int pointer_x;
 static int pointer_y;
 static int prev_buttons;
@@ -1370,6 +1373,7 @@ static void layout(void) {
     };
     windows[WIN_STATUS].restore = windows[WIN_STATUS].r;
     windows[WIN_STATUS].visible = 1;
+    windows[WIN_STATUS].minimized = 1;
 
     z_order[0] = WIN_LAUNCHER;
     z_order[1] = WIN_STATUS;
@@ -2294,10 +2298,17 @@ static void dock_geometry(int *x, int *y, int *dock_w, int *task_cap) {
 }
 
 static void draw_dock_tooltip(void) {
-    if (dock_hover < WIN_APP_BASE || dock_hover >= WIN_COUNT ||
-        !windows[dock_hover].visible)
+    if (!dock_tooltip_visible || dock_hover < 0 ||
+        dock_hover > WIN_COUNT)
         return;
-    const char *title = windows[dock_hover].title;
+    const char *title;
+    if (dock_hover == WIN_COUNT) {
+        title = dock_expanded ? "Hide applications" : "More applications";
+    } else {
+        if (!windows[dock_hover].visible)
+            return;
+        title = windows[dock_hover].title;
+    }
     int tw = min_i(sw - 16, gui_text_width(title) + 24);
     int tx = clamp_i(pointer_x - tw / 2, 8, sw - tw - 8);
     int ty = sh - 116;
@@ -2308,6 +2319,37 @@ static void draw_dock_tooltip(void) {
     int text_y = tip.y + (tip.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT;
     text_clip(tip.x + 12, text_y, title, THEME_TEXT, -1,
               (struct rect){tip.x + 5, tip.y + 2, tip.w - 10, tip.h - 4});
+}
+
+static void draw_dock_tile(struct rect b, int id, const char *label,
+                           int icon_color) {
+    int active = id >= 0 && id < WIN_COUNT && windows[id].active &&
+                 !windows[id].minimized;
+    int hovered = dock_hover == id;
+    int pressed = hovered && (prev_buttons & 1);
+    if (active)
+        fill_round(b, pressed ? THEME_WIN_PRESSED : THEME_SELECTION_SOFT);
+    else if (hovered)
+        fill_round(b, pressed ? THEME_WIN_PRESSED : THEME_WIN_HOVER);
+
+    struct rect icon = {b.x + (b.w - 30) / 2, b.y + 4, 30, 30};
+    fill_round(icon, active ? THEME_ACCENT : THEME_FIELD_BORDER);
+    fill_round((struct rect){icon.x + 2, icon.y + 2, icon.w - 4, icon.h - 4},
+               icon_color);
+    char monogram[2] = {
+        label && label[0] ? label[0] : '?',
+        0
+    };
+    int mono_w = gui_text_width(monogram);
+    text_clip(icon.x + (icon.w - mono_w) / 2,
+              icon.y + (icon.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT,
+              monogram, THEME_TEXT, -1, icon);
+
+    if (active)
+        fill_round((struct rect){b.x + 11, b.y + b.h - 3,
+                                 b.w - 22, 3}, THEME_ACCENT);
+    else if (id >= WIN_APP_BASE && id < WIN_COUNT)
+        fill_circle(b.x + b.w / 2, b.y + b.h - 2, 2, THEME_TEXT_FAINT);
 }
 
 static void draw_dock(void) {
@@ -2328,9 +2370,9 @@ static void draw_dock(void) {
     for (int i = 0; i < WIN_APP_BASE; i++) {
         struct rect b = {x + 12 + i * DOCK_SYSTEM_STEP, y + 10,
                          DOCK_SYSTEM_W, 40};
-        const char *label = windows[i].dock_label
-            ? windows[i].dock_label : windows[i].title;
-        button(b, label, windows[i].active);
+        int icon_color = i == WIN_LAUNCHER
+            ? THEME_WIN_BORDER_ACT : THEME_MAX_GREEN;
+        draw_dock_tile(b, i, windows[i].title, icon_color);
     }
 
     int shown = min_i(app_total, task_cap);
@@ -2341,17 +2383,32 @@ static void draw_dock(void) {
         int id = ids[i];
         struct rect b = {task_x + i * DOCK_TASK_STEP, y + 10,
                          DOCK_TASK_W, 40};
-        button(b, windows[id].title, windows[id].active);
-        if (windows[id].active)
-            fill_circle(b.x + b.w / 2, y + 55, 2, THEME_ACCENT);
+        draw_dock_tile(b, id, windows[id].title,
+                       launcher_icon_color(windows[id].title));
     }
     int hidden = app_total - shown;
     if (hidden <= 0)
         dock_expanded = 0;
     if (hidden > 0) {
         int more_x = task_x + shown * DOCK_TASK_STEP;
-        button((struct rect){more_x, y + 10, DOCK_MORE_W, 40},
-               dock_expanded ? "Hide" : "More", dock_expanded);
+        struct rect more = {more_x, y + 10, DOCK_MORE_W, 40};
+        int hovered = dock_hover == WIN_COUNT;
+        if (dock_expanded)
+            fill_round(more, THEME_SELECTION_SOFT);
+        else if (hovered)
+            fill_round(more, (prev_buttons & 1)
+                       ? THEME_WIN_PRESSED : THEME_WIN_HOVER);
+        struct rect more_icon = {more.x + 8, more.y + 4, 30, 30};
+        fill_round(more_icon, THEME_FIELD_BORDER);
+        fill_round((struct rect){more_icon.x + 2, more_icon.y + 2,
+                                 more_icon.w - 4, more_icon.h - 4},
+                   THEME_WIN_CONTROL);
+        const char *mark = dock_expanded ? "-" : "+";
+        int mark_w = gui_text_width(mark);
+        text_clip(more_icon.x + (more_icon.w - mark_w) / 2,
+                  more_icon.y + (more_icon.h - KFONT_HEIGHT) / 2 +
+                      PLT_FONT_Y_SHIFT,
+                  mark, THEME_TEXT, -1, more_icon);
     }
 
     if (dock_expanded && hidden > 0) {
@@ -3562,8 +3619,17 @@ static void handle_mouse(void) {
     int left = ms.buttons & 1;
     int right = ms.buttons & 2;
     dock_hover = hit_dock(pointer_x, pointer_y);
-    if (dock_hover != old_dock_hover)
+    if (dock_hover != old_dock_hover) {
+        int keep_tooltip = old_dock_hover >= 0 && dock_hover >= 0 &&
+                           dock_tooltip_visible;
+        dock_hover_since = tick;
+        dock_tooltip_visible = keep_tooltip;
         dock_damage();
+    } else if (dock_hover >= 0 && !dock_tooltip_visible &&
+               tick - dock_hover_since >= DOCK_TOOLTIP_DELAY) {
+        dock_tooltip_visible = 1;
+        dock_damage();
+    }
 
     if (right && !(prev_buttons & 2)) {
         int target = hit_window(pointer_x, pointer_y);
@@ -3623,7 +3689,11 @@ static void handle_mouse(void) {
             dock_expanded = !dock_expanded;
             desktop_dirty = 1;
         } else if (dock_hover >= 0) {
-            activate(dock_hover);
+            if (windows[dock_hover].active &&
+                !windows[dock_hover].minimized)
+                minimize_window(dock_hover);
+            else
+                activate(dock_hover);
             dock_expanded = 0;
         } else {
             int control = -1;

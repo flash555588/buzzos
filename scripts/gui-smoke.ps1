@@ -138,6 +138,29 @@ function Press-Many([string]$Key, [int]$Count) {
     }
 }
 
+function Get-PpmDimensions([string]$PpmPath) {
+    $reader = [IO.File]::OpenText((Resolve-Path -LiteralPath $PpmPath))
+    try {
+        if ($reader.ReadLine() -ne "P6") {
+            throw "Unexpected PPM format: $PpmPath"
+        }
+        $sizeLine = $reader.ReadLine()
+        while ($sizeLine -and $sizeLine.StartsWith("#")) {
+            $sizeLine = $reader.ReadLine()
+        }
+        $parts = $sizeLine -split "\s+"
+        if ($parts.Count -lt 2) {
+            throw "Missing PPM dimensions: $PpmPath"
+        }
+        return @{
+            Width = [int]$parts[0]
+            Height = [int]$parts[1]
+        }
+    } finally {
+        $reader.Dispose()
+    }
+}
+
 function Move-MouseRelative([int]$Dx, [int]$Dy) {
     while ($Dx -ne 0 -or $Dy -ne 0) {
         $sx = [Math]::Max(-32, [Math]::Min(32, $Dx))
@@ -280,13 +303,35 @@ try {
     $appsPpm = (Join-Path $OutDir "app-center.ppm")
     $screens += Capture-Screen "app-center" $appsPpm (Join-Path $OutDir "app-center.png")
 
+    Press-Many "down" 1
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $texteditPpm = (Join-Path $OutDir "textedit.ppm")
     $screens += Capture-Screen "textedit" $texteditPpm (Join-Path $OutDir "textedit.png")
-    # The pointer starts at 640,400. TextEdit opens at 80,74 with its
-    # maximize control centered near 629,88.
-    Move-MouseRelative -11 -312
+    $desktopSize = Get-PpmDimensions $texteditPpm
+    $taskX = [int]($desktopSize.Width / 2) + 53
+    $dockY = $desktopSize.Height - 44
+    # With one external app, the compact task tile is 53 px right of center.
+    # Its first click minimizes TextEdit and its second restores the same task.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative $taskX $dockY
+    Click-Left
+    Start-Sleep -Milliseconds 500
+    $minimizedPpm = (Join-Path $OutDir "taskbar-minimized.ppm")
+    $screens += Capture-Screen "taskbar-minimized" $minimizedPpm (Join-Path $OutDir "taskbar-minimized.png")
+    Click-Left
+    Start-Sleep -Milliseconds 500
+    $restoredPpm = (Join-Path $OutDir "taskbar-restored.ppm")
+    $screens += Capture-Screen "taskbar-restored" $restoredPpm (Join-Path $OutDir "taskbar-restored.png")
+    # The pinned System tile is one 54 px step to the left. Its tooltip should
+    # appear after the desktop's short initial hover delay.
+    Move-MouseRelative -54 0
+    Start-Sleep -Milliseconds 600
+    $tooltipPpm = (Join-Path $OutDir "taskbar-tooltip.ppm")
+    $screens += Capture-Screen "taskbar-tooltip" $tooltipPpm (Join-Path $OutDir "taskbar-tooltip.png")
+    # TextEdit opens at 80,74 with its maximize control centered near 629,91.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative 629 91
     Click-Left
     Start-Sleep -Milliseconds 900
     $texteditMaxPpm = (Join-Path $OutDir "textedit-maximized.ppm")
@@ -297,7 +342,7 @@ try {
     # Opening a regular /bin ELF through Files must hand it to Terminal
     # without terminating the File Manager GUI protocol session.
     Type-Command "gui"
-    Press-Many "down" 3
+    Press-Many "down" 4
     Send-Key "ret"
     Start-Sleep -Milliseconds 600
     Send-Key "left"
@@ -315,7 +360,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
+    Press-Many "down" 2
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $paintPpm = (Join-Path $OutDir "paint.ppm")
@@ -324,8 +369,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
-    Send-Key "down"
+    Press-Many "down" 3
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $calculatorPpm = (Join-Path $OutDir "calculator.ppm")
@@ -334,10 +378,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
+    Press-Many "down" 5
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $browserPpm = (Join-Path $OutDir "browser.ppm")
@@ -346,9 +387,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
+    Press-Many "down" 4
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $filesPpm = (Join-Path $OutDir "filemanager.ppm")
@@ -375,25 +414,17 @@ try {
     Start-Sleep -Milliseconds 900
     $manyPpm = (Join-Path $OutDir "many-windows.ppm")
     $screens += Capture-Screen "many-windows" $manyPpm (Join-Path $OutDir "many-windows.png")
-    # Normalize the pointer to the top-left, then click the More task button
-    # near the bottom-right of the 1280x800 smoke desktop.
-    Move-MouseRelative -2000 -2000
-    Move-MouseRelative 1086 752
-    Click-Left
-    Start-Sleep -Milliseconds 500
-    $expandedPpm = (Join-Path $OutDir "dock-expanded.ppm")
-    $screens += Capture-Screen "dock-expanded" $expandedPpm (Join-Path $OutDir "dock-expanded.png")
     Send-Key "esc"
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
+    Press-Many "down" 6
     Send-Key "ret"
-    Wait-ForLog "PCM playback started \(AC97 bus master\)" 15
+    if ($AudioDriver -eq "none") {
+        Start-Sleep -Seconds 6
+    } else {
+        Wait-ForLog "PCM playback started \(AC97 bus master\)" 15
+    }
     Start-Sleep -Seconds 2
     $doomPpm = (Join-Path $OutDir "doom.ppm")
     $screens += Capture-Screen "doom" $doomPpm (Join-Path $OutDir "doom.png")

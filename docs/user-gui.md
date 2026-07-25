@@ -193,10 +193,18 @@ the current edit line when no selection exists), Paste inserts the full
 clipboard, and Cut clears the shell edit line through Ctrl+U when no immutable
 output selection is active.
 
-The task Dock displays titles declared by each app frame. It shows several
-tasks inline, exposes all open app windows through More, and displays the full
-title while hovering a task. The desktop supports 10 concurrent external app
-windows; the expandable Dock is independent of that capacity.
+The compact taskbar keeps Applications and System pinned, then represents each
+running app with a stable monogram tile and running indicator. Hovering a tile
+briefly displays the full title declared by the app frame; after one tooltip is
+open, moving between adjacent tiles updates it immediately. Clicking the active
+tile minimizes its window, while clicking a minimized tile restores and raises
+it. If the taskbar is full, the `+` tile opens a complete titled task list.
+The desktop supports 10 concurrent external app windows; taskbar overflow is
+independent of that capacity.
+
+The desktop starts with Applications as its single visual focal point. System
+remains pinned and ready in the taskbar instead of opening a second competing
+window at startup.
 
 ## Run It
 
