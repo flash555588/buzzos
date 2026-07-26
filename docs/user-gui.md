@@ -60,9 +60,18 @@ scrollbars, and app resize events.
 
 Double-click a title bar to maximize or restore its window. Dragging a
 maximized title bar down restores the saved window size under the pointer so it
-can be repositioned in one gesture. Alt+Tab cycles visible windows; plain Tab
-is delivered to the focused application for fields, indentation, and other
-app-local navigation.
+can be repositioned in one gesture. Dragging a title bar to the left or right
+screen edge tiles the window into that half of the work area; dragging to the
+top edge maximizes it. A restrained outline previews the destination while the
+pointer remains in direct control of the window.
+
+Alt+Tab and Shift+Alt+Tab cycle visible windows in both directions. Alt+F4
+closes only the focused window. Super+Left/Right tiles it, Super+Up maximizes
+it, and Super+Down restores an arranged window or minimizes a freeform one.
+Plain Tab is delivered to the focused application for fields, indentation, and
+other app-local navigation. Escape cancels IME composition, clears launcher
+search, dismisses desktop UI, or reaches the focused app; Ctrl+Alt+Esc is the
+explicit console-development shortcut that ends the desktop session.
 
 Right-click an application content area to open the desktop-owned `Copy`,
 `Paste`, and `Cut` menu. The clipboard stores UTF-8 text and is shared across

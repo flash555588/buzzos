@@ -108,18 +108,24 @@ gui
 The desktop opens by default with:
 
 - `Applications`: Application list and manifest details.
-- `Terminal`: Shell window inside the desktop.
-- `System`: System status panel.
+- `System`: System status panel, pinned in the taskbar and initially minimized.
 
 Window features:
 
 - Click to activate and raise to top.
-- Drag title bar to move.
+- Drag title bars to move; drag to the left or right edge to tile, or to the
+  top edge to maximize.
+- Double-click a title bar to maximize or restore. Dragging an arranged window
+  restores its saved freeform size under the pointer.
 - Drag edges or corners to resize.
 - Minimize, maximize, close.
+- `Alt+Tab` / `Shift+Alt+Tab` cycle windows, `Alt+F4` closes the focused
+  window, and `Super+Arrow` tiles, maximizes, restores, or minimizes it.
+- Escape dismisses desktop UI or is delivered to the focused app;
+  `Ctrl+Alt+Esc` returns the desktop session to the text shell.
 - Mouse wheel and scrollbars.
 - Dock tasks use app-declared window titles; More expands the full task list and hover shows the complete title.
-- The desktop supports up to 10 concurrent external GUI app windows in addition to Apps, Terminal, and System.
+- The desktop supports up to 10 concurrent external GUI app windows in addition to Applications and System.
 
 Default user GUI apps:
 

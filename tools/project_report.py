@@ -456,9 +456,17 @@ def collect_ipc_status():
 
 
 def collect_screenshots():
-    names = ["app-center", "textedit", "textedit-maximized", "paint", "calculator",
-             "filemanager", "filemanager-textedit", "terminal-about"]
-    names += ["many-windows", "dock-expanded"]
+    names = [
+        "app-center", "launcher-search", "launcher-no-results", "textedit",
+        "taskbar-minimized", "taskbar-restored", "taskbar-tooltip",
+        "alt-tab-launcher", "textedit-maximized",
+        "textedit-drag-restored", "textedit-snap-preview",
+        "textedit-snapped-left",
+        "textedit-snapped-right", "textedit-drag-maximized",
+        "alt-f4-closed", "filemanager-terminal-exec", "paint",
+        "calculator", "browser", "filemanager", "filemanager-textedit",
+        "many-windows", "doom", "doom-input", "terminal-about",
+    ]
     rows = []
     for name in names:
         path = ROOT / "build" / "gui-smoke" / f"{name}.png"

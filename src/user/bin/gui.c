@@ -8,10 +8,22 @@ enum {
     KEY_ESC = 0x1B,
     KEY_BACKSPACE = 0x08,
     KEY_WINDOW_CYCLE = 0x1E,
+    KEY_WINDOW_CLOSE = 0x80,
+    KEY_WINDOW_CYCLE_REVERSE,
+    KEY_WINDOW_SNAP_LEFT,
+    KEY_WINDOW_SNAP_RIGHT,
+    KEY_WINDOW_MAXIMIZE,
+    KEY_WINDOW_RESTORE,
+    KEY_DESKTOP_EXIT,
     KEY_UP = 256,
     KEY_DOWN,
     KEY_RIGHT,
     KEY_LEFT,
+
+    WINDOW_SNAP_NONE = 0,
+    WINDOW_SNAP_LEFT,
+    WINDOW_SNAP_RIGHT,
+    WINDOW_SNAP_MAXIMIZE,
 
     WIN_LAUNCHER = 0,
     WIN_STATUS = 1,
@@ -101,6 +113,7 @@ struct window {
     int active;
     int minimized;
     int maximized;
+    int snap_mode;
 };
 
 struct app_entry {
@@ -188,6 +201,10 @@ static int prev_buttons;
 static int drag_win = -1;
 static int drag_dx;
 static int drag_dy;
+static int drag_start_x;
+static int drag_start_y;
+static int drag_moved;
+static int snap_preview_mode;
 static int scroll_drag_win = -1;
 static int scroll_drag_axis;
 static int scroll_drag_mouse;
@@ -1349,6 +1366,7 @@ static void run_app_with_arg(const char *path, const char *argument) {
     windows[id].visible = 1;
     windows[id].minimized = 0;
     windows[id].maximized = 0;
+    windows[id].snap_mode = WINDOW_SNAP_NONE;
 
     app_sessions[slot].used = 1;
     app_sessions[slot].pid = pid;
@@ -1454,6 +1472,9 @@ static void layout(void) {
                                             left_w, launcher_h};
     windows[WIN_LAUNCHER].restore = windows[WIN_LAUNCHER].r;
     windows[WIN_LAUNCHER].visible = 1;
+    windows[WIN_LAUNCHER].minimized = 0;
+    windows[WIN_LAUNCHER].maximized = 0;
+    windows[WIN_LAUNCHER].snap_mode = WINDOW_SNAP_NONE;
 
     windows[WIN_STATUS].title = "System";
     windows[WIN_STATUS].dock_label = "Sys";
@@ -1466,6 +1487,8 @@ static void layout(void) {
     windows[WIN_STATUS].restore = windows[WIN_STATUS].r;
     windows[WIN_STATUS].visible = 1;
     windows[WIN_STATUS].minimized = 1;
+    windows[WIN_STATUS].maximized = 0;
+    windows[WIN_STATUS].snap_mode = WINDOW_SNAP_NONE;
 
     z_order[0] = WIN_LAUNCHER;
     z_order[1] = WIN_STATUS;
@@ -1479,6 +1502,7 @@ static void layout(void) {
         windows[id].active = 0;
         windows[id].minimized = 0;
         windows[id].maximized = 0;
+        windows[id].snap_mode = WINDOW_SNAP_NONE;
         z_order[WIN_APP_BASE + i] = id;
     }
     activate(WIN_LAUNCHER);
@@ -1953,6 +1977,30 @@ static struct rect status_group_label_rect(int group_index) {
     return (struct rect){ox, oy + STATUS_RES_BODY_Y, c.w, DISPLAY_GROUP_LABEL_H};
 }
 
+static struct rect desktop_work_area(void) {
+    int dock_x, dock_y, dock_w, task_cap;
+    dock_geometry(&dock_x, &dock_y, &dock_w, &task_cap);
+    (void)dock_x;
+    (void)dock_w;
+    (void)task_cap;
+    return (struct rect){8, TOPBAR_H + 4, sw - 16,
+                         dock_y - TOPBAR_H - 10};
+}
+
+static struct rect snap_rect(int mode) {
+    struct rect work = desktop_work_area();
+    if (mode == WINDOW_SNAP_LEFT || mode == WINDOW_SNAP_RIGHT) {
+        int gap = 6;
+        int left_w = (work.w - gap) / 2;
+        int right_w = work.w - gap - left_w;
+        if (mode == WINDOW_SNAP_LEFT)
+            return (struct rect){work.x, work.y, left_w, work.h};
+        return (struct rect){work.x + left_w + gap, work.y,
+                             right_w, work.h};
+    }
+    return work;
+}
+
 static struct rect fit_window_rect(struct rect r, int old_sw, int old_sh,
                                    int dock_y) {
     if (old_sw > 0) {
@@ -1989,21 +2037,27 @@ static void relayout_after_mode_change(int old_sw, int old_sh) {
     int dock_x, dock_y, dock_w, task_cap;
     dock_geometry(&dock_x, &dock_y, &dock_w, &task_cap);
     (void)dock_x; (void)dock_w; (void)task_cap;
-    struct rect work = {8, TOPBAR_H + 4, sw - 16,
-                        dock_y - TOPBAR_H - 10};
+    struct rect work = desktop_work_area();
 
     windows[WIN_LAUNCHER].restore = launcher;
-    windows[WIN_LAUNCHER].r = windows[WIN_LAUNCHER].maximized ? work : launcher;
+    windows[WIN_LAUNCHER].r = windows[WIN_LAUNCHER].maximized ? work :
+        windows[WIN_LAUNCHER].snap_mode != WINDOW_SNAP_NONE
+            ? snap_rect(windows[WIN_LAUNCHER].snap_mode) : launcher;
     windows[WIN_STATUS].restore = status;
-    windows[WIN_STATUS].r = windows[WIN_STATUS].maximized ? work : status;
+    windows[WIN_STATUS].r = windows[WIN_STATUS].maximized ? work :
+        windows[WIN_STATUS].snap_mode != WINDOW_SNAP_NONE
+            ? snap_rect(windows[WIN_STATUS].snap_mode) : status;
 
     for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
         int id = WIN_APP_BASE + slot;
-        struct rect restore = windows[id].maximized ? windows[id].restore
-                                                     : windows[id].r;
+        int arranged = windows[id].maximized ||
+                       windows[id].snap_mode != WINDOW_SNAP_NONE;
+        struct rect restore = arranged ? windows[id].restore : windows[id].r;
         restore = fit_window_rect(restore, old_sw, old_sh, dock_y);
         windows[id].restore = restore;
-        windows[id].r = windows[id].maximized ? work : restore;
+        windows[id].r = windows[id].maximized ? work :
+            windows[id].snap_mode != WINDOW_SNAP_NONE
+                ? snap_rect(windows[id].snap_mode) : restore;
         if (app_sessions[slot].used) {
             app_sessions[slot].resize_dirty = 1;
             (void)sync_app_size(id, 1);
@@ -2017,6 +2071,8 @@ static void relayout_after_mode_change(int old_sw, int old_sh) {
     context_open = 0;
     dock_expanded = 0;
     drag_win = -1;
+    drag_moved = 0;
+    snap_preview_mode = WINDOW_SNAP_NONE;
     resize_win = -1;
     scroll_drag_win = -1;
     app_mouse_capture = -1;
@@ -2887,6 +2943,18 @@ static void draw_context_menu(void) {
     }
 }
 
+static void draw_snap_preview(void) {
+    if (drag_win < 0 || !drag_moved ||
+        snap_preview_mode == WINDOW_SNAP_NONE)
+        return;
+    struct rect target = snap_rect(snap_preview_mode);
+    border(target, THEME_ACCENT, THEME_ACCENT);
+    if (target.w > 4 && target.h > 4)
+        border((struct rect){target.x + 2, target.y + 2,
+                             target.w - 4, target.h - 4},
+               THEME_ACCENT_DIM, THEME_ACCENT_DIM);
+}
+
 static void draw_pointer(void) {
     static const uint16_t arrow[16] = {
         0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
@@ -2916,6 +2984,7 @@ static void compose_scene(void) {
         else if (id >= WIN_APP_BASE)
             draw_app_window(id);
     }
+    draw_snap_preview();
     draw_dock();
     draw_ime();
     draw_context_menu();
@@ -3211,28 +3280,60 @@ static void reap_dead_apps(void) {
     }
 }
 
-static void toggle_maximize(int id) {
-    if (id < 0 || id >= WIN_COUNT)
-        return;
-    if (windows[id].maximized) {
-        windows[id].r = windows[id].restore;
-        windows[id].maximized = 0;
-    } else {
-        int dock_x, dock_y, dock_w, task_cap;
-        dock_geometry(&dock_x, &dock_y, &dock_w, &task_cap);
-        windows[id].restore = windows[id].r;
-        /* Keep maximized content inside the desktop work area instead of
-         * extending underneath the Deck. */
-        windows[id].r = (struct rect){8, TOPBAR_H + 4, sw - 16,
-                                     dock_y - TOPBAR_H - 10};
-        windows[id].maximized = 1;
-    }
+static void finish_window_geometry(int id) {
     clamp_scroll(id);
     int slot = app_slot_for_win(id);
     if (slot >= 0 && app_sessions[slot].used) {
         app_sessions[slot].resize_dirty = 1;
         (void)sync_app_size(id, 1);
     }
+    desktop_dirty = 1;
+}
+
+static void restore_window(int id) {
+    if (id < 0 || id >= WIN_COUNT)
+        return;
+    if (!windows[id].maximized &&
+        windows[id].snap_mode == WINDOW_SNAP_NONE)
+        return;
+    windows[id].r = windows[id].restore;
+    windows[id].maximized = 0;
+    windows[id].snap_mode = WINDOW_SNAP_NONE;
+    finish_window_geometry(id);
+}
+
+static void maximize_window(int id) {
+    if (id < 0 || id >= WIN_COUNT)
+        return;
+    if (!windows[id].maximized &&
+        windows[id].snap_mode == WINDOW_SNAP_NONE)
+        windows[id].restore = windows[id].r;
+    windows[id].r = snap_rect(WINDOW_SNAP_MAXIMIZE);
+    windows[id].maximized = 1;
+    windows[id].snap_mode = WINDOW_SNAP_NONE;
+    finish_window_geometry(id);
+}
+
+static void snap_window(int id, int mode) {
+    if (id < 0 || id >= WIN_COUNT ||
+        (mode != WINDOW_SNAP_LEFT && mode != WINDOW_SNAP_RIGHT))
+        return;
+    if (!windows[id].maximized &&
+        windows[id].snap_mode == WINDOW_SNAP_NONE)
+        windows[id].restore = windows[id].r;
+    windows[id].r = snap_rect(mode);
+    windows[id].maximized = 0;
+    windows[id].snap_mode = mode;
+    finish_window_geometry(id);
+}
+
+static void toggle_maximize(int id) {
+    if (id < 0 || id >= WIN_COUNT)
+        return;
+    if (windows[id].maximized)
+        restore_window(id);
+    else
+        maximize_window(id);
 }
 
 static int hit_scrollbar(int x, int y, int *axis_out) {
@@ -3528,17 +3629,22 @@ static void activate_next_visible(void) {
     }
 }
 
-static void handle_key(int k) {
-    if (ime_handle_key(k))
+static void activate_previous_visible(void) {
+    for (int step = 1; step <= WIN_COUNT; step++) {
+        int id = focus - step;
+        while (id < 0)
+            id += WIN_COUNT;
+        if (!windows[id].visible || windows[id].minimized)
+            continue;
+        if (id >= WIN_APP_BASE && !app_sessions[id - WIN_APP_BASE].used)
+            continue;
+        activate(id);
         return;
-    if (k == KEY_ESC) {
-        if (focus == WIN_LAUNCHER && launcher_query_length > 0) {
-            launcher_query_length = 0;
-            launcher_query[0] = 0;
-            launcher_select_first_result();
-            win_damage(WIN_LAUNCHER);
-            return;
-        }
+    }
+}
+
+static void handle_key(int k) {
+    if (k == KEY_DESKTOP_EXIT) {
         running = 0;
         return;
     }
@@ -3547,6 +3653,66 @@ static void handle_key(int k) {
         activate_next_visible();
         desktop_dirty = 1;
         return;
+    }
+    if (k == KEY_WINDOW_CYCLE_REVERSE) {
+        suppress_tab_release = 1;
+        activate_previous_visible();
+        desktop_dirty = 1;
+        return;
+    }
+    if (k == KEY_WINDOW_CLOSE) {
+        if (focus >= 0 && focus < WIN_COUNT &&
+            windows[focus].visible && !windows[focus].minimized)
+            close_window(focus);
+        desktop_dirty = 1;
+        return;
+    }
+    if (k == KEY_WINDOW_SNAP_LEFT || k == KEY_WINDOW_SNAP_RIGHT) {
+        if (focus >= 0 && focus < WIN_COUNT &&
+            windows[focus].visible && !windows[focus].minimized)
+            snap_window(focus, k == KEY_WINDOW_SNAP_LEFT
+                                   ? WINDOW_SNAP_LEFT
+                                   : WINDOW_SNAP_RIGHT);
+        return;
+    }
+    if (k == KEY_WINDOW_MAXIMIZE) {
+        if (focus >= 0 && focus < WIN_COUNT &&
+            windows[focus].visible && !windows[focus].minimized)
+            maximize_window(focus);
+        return;
+    }
+    if (k == KEY_WINDOW_RESTORE) {
+        if (focus >= 0 && focus < WIN_COUNT &&
+            windows[focus].visible && !windows[focus].minimized) {
+            if (windows[focus].maximized ||
+                windows[focus].snap_mode != WINDOW_SNAP_NONE)
+                restore_window(focus);
+            else
+                minimize_window(focus);
+            desktop_dirty = 1;
+        }
+        return;
+    }
+    if (ime_handle_key(k))
+        return;
+    if (k == KEY_ESC) {
+        if (context_open) {
+            context_open = 0;
+            desktop_dirty = 1;
+            return;
+        }
+        if (focus == WIN_LAUNCHER && launcher_query_length > 0) {
+            launcher_query_length = 0;
+            launcher_query[0] = 0;
+            launcher_select_first_result();
+            win_damage(WIN_LAUNCHER);
+            return;
+        }
+        if (focus >= 0 && focus < WIN_APP_BASE) {
+            minimize_window(focus);
+            desktop_dirty = 1;
+            return;
+        }
     }
     if (focus == WIN_STATUS) {
         /* Digits pick the first nine listed modes; [ ] cycle all ratios. */
@@ -3777,6 +3943,16 @@ static void refresh_pointer_hover_damage(void) {
     }
 }
 
+static int snap_mode_at_pointer(void) {
+    if (pointer_y <= 8)
+        return WINDOW_SNAP_MAXIMIZE;
+    if (pointer_x <= 8)
+        return WINDOW_SNAP_LEFT;
+    if (pointer_x >= sw - 9)
+        return WINDOW_SNAP_RIGHT;
+    return WINDOW_SNAP_NONE;
+}
+
 static void handle_mouse(void) {
     struct mouse_state ms;
     if (mouse_get(&ms) < 0)
@@ -3929,6 +4105,10 @@ static void handle_mouse(void) {
             int rz = hit_resize(pointer_x, pointer_y, &edges);
             if (rz >= 0) {
                 activate(rz);
+                if (windows[rz].snap_mode != WINDOW_SNAP_NONE) {
+                    windows[rz].snap_mode = WINDOW_SNAP_NONE;
+                    windows[rz].restore = windows[rz].r;
+                }
                 resize_win = rz;
                 resize_edges = edges;
                 resize_start_x = pointer_x;
@@ -3976,6 +4156,10 @@ static void handle_mouse(void) {
                 drag_win = t;
                 drag_dx = pointer_x - windows[t].r.x;
                 drag_dy = pointer_y - windows[t].r.y;
+                drag_start_x = pointer_x;
+                drag_start_y = pointer_y;
+                drag_moved = 0;
+                snap_preview_mode = WINDOW_SNAP_NONE;
             }
             if (focus == WIN_LAUNCHER) {
                 int idx = hit_launcher_row_at(pointer_x, pointer_y);
@@ -4004,11 +4188,25 @@ static void handle_mouse(void) {
     if (!left) {
         if (app_mouse_capture >= 0)
             send_mouse_to_app(app_mouse_capture, ms.buttons, 0);
+        int finished_drag = drag_win;
+        int finished_snap = drag_moved ? snap_preview_mode
+                                       : WINDOW_SNAP_NONE;
         int finished_resize = resize_win;
         app_mouse_capture = -1;
         drag_win = -1;
+        drag_moved = 0;
+        snap_preview_mode = WINDOW_SNAP_NONE;
         scroll_drag_win = -1;
         resize_win = -1;
+        if (finished_drag >= 0 &&
+            finished_snap == WINDOW_SNAP_MAXIMIZE)
+            maximize_window(finished_drag);
+        else if (finished_drag >= 0 &&
+                 (finished_snap == WINDOW_SNAP_LEFT ||
+                  finished_snap == WINDOW_SNAP_RIGHT))
+            snap_window(finished_drag, finished_snap);
+        else if (finished_drag >= WIN_APP_BASE)
+            (void)sync_app_size(finished_drag, 1);
         if (finished_resize >= WIN_APP_BASE)
             (void)sync_app_size(finished_resize, 1);
         update_hover_app(1);
@@ -4046,13 +4244,30 @@ static void handle_mouse(void) {
     if (left && drag_win >= 0) {
         struct rect *r = &windows[drag_win].r;
         struct rect old = *r;
-        if (windows[drag_win].maximized) {
+        if (!drag_moved) {
+            int distance = abs_i(pointer_x - drag_start_x) +
+                           abs_i(pointer_y - drag_start_y);
+            if (distance < 4) {
+                prev_buttons = ms.buttons;
+                return;
+            }
+            drag_moved = 1;
+            title_last_click = -1;
+        }
+        int next_preview = snap_mode_at_pointer();
+        if (next_preview != snap_preview_mode) {
+            snap_preview_mode = next_preview;
+            desktop_dirty = 1;
+        }
+        if (windows[drag_win].maximized ||
+            windows[drag_win].snap_mode != WINDOW_SNAP_NONE) {
             struct rect restore = windows[drag_win].restore;
             drag_dx = clamp_i(drag_dx * restore.w / max_i(1, r->w),
                               0, max_i(0, restore.w - 1));
             drag_dy = clamp_i(drag_dy, 0, WINDOW_TITLE_H - 1);
             *r = restore;
             windows[drag_win].maximized = 0;
+            windows[drag_win].snap_mode = WINDOW_SNAP_NONE;
             int slot = app_slot_for_win(drag_win);
             if (slot >= 0 && app_sessions[slot].used) {
                 app_sessions[slot].resize_dirty = 1;

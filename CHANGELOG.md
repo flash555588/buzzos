@@ -39,6 +39,10 @@ short log for reviewers and contributors; deeper design notes live under
 - Refined the desktop visual system with quieter window chrome, clearer
   launcher metadata, grouped system information, consistent control spacing,
   and semantic primary and destructive actions across GUI apps.
+- Added direct edge tiling with a destination preview, drag-to-maximize,
+  bidirectional Alt+Tab, Alt+F4, and Super+Arrow window controls; Escape now
+  dismisses local UI or reaches the focused app instead of terminating the
+  desktop.
 - Added `/bin/echo` and `/bin/cat`, multi-stage shell pipelines, basic
   redirection, and stdio inheritance for spawned user programs.
 - Added a user-space GUI app center backed by `/fs/apps`.

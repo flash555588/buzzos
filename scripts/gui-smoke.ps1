@@ -401,7 +401,43 @@ try {
     Start-Sleep -Milliseconds 1250
     $dragRestorePpm = (Join-Path $OutDir "textedit-drag-restored.ppm")
     $screens += Capture-Screen "textedit-drag-restored" $dragRestorePpm (Join-Path $OutDir "textedit-drag-restored.png")
-    Send-Key "esc"
+    # Dragging a regular title bar into the left screen edge snaps it to the
+    # left half of the desktop work area.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative 440 168
+    Send-Hmp "mouse_button 1"
+    Move-MouseRelative -2000 0
+    Start-Sleep -Milliseconds 350
+    $snapPreviewPpm = (Join-Path $OutDir "textedit-snap-preview.ppm")
+    $screens += Capture-Screen "textedit-snap-preview" $snapPreviewPpm (Join-Path $OutDir "textedit-snap-preview.png")
+    Send-Hmp "mouse_button 0"
+    Start-Sleep -Milliseconds 900
+    $snapLeftPpm = (Join-Path $OutDir "textedit-snapped-left.ppm")
+    $screens += Capture-Screen "textedit-snapped-left" $snapLeftPpm (Join-Path $OutDir "textedit-snapped-left.png")
+    # Super+Right moves the focused window to the opposite half without an
+    # animation; Super+Down restores its pre-snap geometry.
+    Send-Key "meta_l-right"
+    Start-Sleep -Milliseconds 700
+    $snapRightPpm = (Join-Path $OutDir "textedit-snapped-right.ppm")
+    $screens += Capture-Screen "textedit-snapped-right" $snapRightPpm (Join-Path $OutDir "textedit-snapped-right.png")
+    Send-Key "meta_l-down"
+    Start-Sleep -Milliseconds 550
+    # Dragging to the top edge uses the same direct manipulation path to
+    # maximize, distinct from the title-bar double-click path above.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative 440 168
+    Send-Hmp "mouse_button 1"
+    Move-MouseRelative 0 -2000
+    Send-Hmp "mouse_button 0"
+    Start-Sleep -Milliseconds 900
+    $dragMaxPpm = (Join-Path $OutDir "textedit-drag-maximized.ppm")
+    $screens += Capture-Screen "textedit-drag-maximized" $dragMaxPpm (Join-Path $OutDir "textedit-drag-maximized.png")
+    # Alt+F4 closes only the focused window; it must not terminate the desktop.
+    Send-Key "alt-f4"
+    Start-Sleep -Milliseconds 700
+    $altF4Ppm = (Join-Path $OutDir "alt-f4-closed.ppm")
+    $screens += Capture-Screen "alt-f4-closed" $altF4Ppm (Join-Path $OutDir "alt-f4-closed.png")
+    Send-Key "ctrl-alt-esc"
     Wait-ForLog "\[gui\] exited" 10
 
     # Opening a regular /bin ELF through Files must hand it to Terminal
@@ -421,7 +457,7 @@ try {
     if ((Read-SerialLog) -match "\[gui\] app protocol ended") {
         Fail-WithLog "File Manager protocol ended while opening a terminal ELF."
     }
-    Send-Key "esc"
+    Send-Key "ctrl-alt-esc"
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
@@ -430,7 +466,7 @@ try {
     Start-Sleep -Milliseconds 900
     $paintPpm = (Join-Path $OutDir "paint.ppm")
     $screens += Capture-Screen "paint" $paintPpm (Join-Path $OutDir "paint.png")
-    Send-Key "esc"
+    Send-Key "ctrl-alt-esc"
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
@@ -439,7 +475,7 @@ try {
     Start-Sleep -Milliseconds 900
     $calculatorPpm = (Join-Path $OutDir "calculator.ppm")
     $screens += Capture-Screen "calculator" $calculatorPpm (Join-Path $OutDir "calculator.png")
-    Send-Key "esc"
+    Send-Key "ctrl-alt-esc"
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
@@ -448,7 +484,7 @@ try {
     Start-Sleep -Milliseconds 900
     $browserPpm = (Join-Path $OutDir "browser.ppm")
     $screens += Capture-Screen "browser" $browserPpm (Join-Path $OutDir "browser.png")
-    Send-Key "esc"
+    Send-Key "ctrl-alt-esc"
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
@@ -479,7 +515,7 @@ try {
     Start-Sleep -Milliseconds 900
     $manyPpm = (Join-Path $OutDir "many-windows.ppm")
     $screens += Capture-Screen "many-windows" $manyPpm (Join-Path $OutDir "many-windows.png")
-    Send-Key "esc"
+    Send-Key "ctrl-alt-esc"
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
@@ -497,7 +533,7 @@ try {
     Start-Sleep -Seconds 2
     $doomInputPpm = (Join-Path $OutDir "doom-input.ppm")
     $screens += Capture-Screen "doom-input" $doomInputPpm (Join-Path $OutDir "doom-input.png")
-    Send-Key "esc"
+    Send-Key "ctrl-alt-esc"
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
@@ -509,7 +545,7 @@ try {
     Start-Sleep -Milliseconds 900
     $terminalPpm = (Join-Path $OutDir "terminal-about.ppm")
     $screens += Capture-Screen "terminal-about" $terminalPpm (Join-Path $OutDir "terminal-about.png")
-    Send-Key "esc"
+    Send-Key "ctrl-alt-esc"
     Wait-ForLog "\[gui\] exited" 10
 
     $log = Read-SerialLog

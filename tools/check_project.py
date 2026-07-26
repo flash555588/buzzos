@@ -275,6 +275,7 @@ def check_runtime_lifecycle():
     sys_proc = read_text("src/kernel/syscall/sys_proc.c")
     sys_net = read_text("src/kernel/syscall/sys_net.c")
     gui_c = read_text("src/user/bin/gui.c")
+    keyboard_c = read_text("src/kernel/drv/keyboard.c")
     gui_smoke = read_text("scripts/gui-smoke.ps1")
     smoke = read_text("scripts/smoke.ps1")
 
@@ -327,6 +328,9 @@ def check_runtime_lifecycle():
         if snippet not in smoke:
             fail(f"resource/TCP smoke coverage is missing: {snippet}")
     for snippet in ["textedit-maximized", "textedit-drag-restored",
+                    "textedit-snap-preview", "textedit-snapped-left",
+                    "textedit-snapped-right",
+                    "textedit-drag-maximized", "alt-f4-closed",
                     "alt-tab-launcher", "launcher-search",
                     "launcher-no-results", "filemanager",
                     "filemanager-textedit", "filemanager-terminal-exec",
@@ -336,6 +340,12 @@ def check_runtime_lifecycle():
                     "Move-MouseRelative", "Click-Left"]:
         if snippet not in gui_smoke:
             fail(f"GUI interaction smoke coverage is missing: {snippet}")
+    for snippet in ["snap_window", "snap_mode_at_pointer",
+                    "draw_snap_preview", "activate_previous_visible",
+                    "KEY_WINDOW_CLOSE", "KEY_WINDOW_SNAP_LEFT",
+                    "KEY_DESKTOP_EXIT"]:
+        if snippet not in gui_c + keyboard_c:
+            fail(f"modern window-management interaction is missing: {snippet}")
 
     ok("runtime lifecycle: IRQ state, process exit, thread/socket reuse, GUI shutdown/live resize, and idle redraw are covered")
 

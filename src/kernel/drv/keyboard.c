@@ -3,12 +3,20 @@
 
 #define BUF_SIZE 256
 #define EVENT_DOWN 0x8000u
+#define KEY_WINDOW_CLOSE         0x80u
+#define KEY_WINDOW_CYCLE_REVERSE 0x81u
+#define KEY_WINDOW_SNAP_LEFT     0x82u
+#define KEY_WINDOW_SNAP_RIGHT    0x83u
+#define KEY_WINDOW_MAXIMIZE      0x84u
+#define KEY_WINDOW_RESTORE       0x85u
+#define KEY_DESKTOP_EXIT         0x86u
 
 static volatile uint8_t buf[BUF_SIZE];
 static volatile int     head, tail;
 static volatile int     shift_down;
 static volatile int     ctrl_down;
 static volatile int     alt_down;
+static volatile int     meta_down;
 static volatile int     extended_prefix;
 static volatile uint16_t event_buf[BUF_SIZE];
 static volatile int event_head, event_tail;
@@ -59,6 +67,7 @@ void keyboard_init(void) {
     shift_down = 0;
     ctrl_down = 0;
     alt_down = 0;
+    meta_down = 0;
     extended_prefix = 0;
     event_head = event_tail = 0;
 }
@@ -85,6 +94,31 @@ void keyboard_handler(uint8_t scancode) {
     if (code == 0x38) {
         alt_down = !released;
         return;
+    }
+    if (extended && (code == 0x5B || code == 0x5C)) {
+        meta_down = !released;
+        return;
+    }
+    if (!extended && ctrl_down && alt_down && code == 0x01) {
+        if (!released)
+            enqueue_char((char)KEY_DESKTOP_EXIT);
+        return;
+    }
+    if (!extended && alt_down && code == 0x3E) {
+        if (!released)
+            enqueue_char((char)KEY_WINDOW_CLOSE); /* Alt+F4 */
+        return;
+    }
+    if (extended && meta_down) {
+        if (released)
+            return;
+        switch (code) {
+        case 0x4B: enqueue_char((char)KEY_WINDOW_SNAP_LEFT); return;
+        case 0x4D: enqueue_char((char)KEY_WINDOW_SNAP_RIGHT); return;
+        case 0x48: enqueue_char((char)KEY_WINDOW_MAXIMIZE); return;
+        case 0x50: enqueue_char((char)KEY_WINDOW_RESTORE); return;
+        default: return;
+        }
     }
     if (extended) {
         uint16_t key = 0;
@@ -118,7 +152,9 @@ void keyboard_handler(uint8_t scancode) {
     if (c == 0) return;
     if (alt_down) {
         if (scancode_ascii[scancode] == '\t')
-            enqueue_char(0x1E); /* desktop Alt+Tab task switch */
+            enqueue_char(shift_down
+                ? (char)KEY_WINDOW_CYCLE_REVERSE
+                : 0x1E); /* Alt+Tab / Shift+Alt+Tab task switch */
         return;
     }
     if (ctrl_down) {
