@@ -120,12 +120,18 @@ Window features:
 - Drag edges or corners to resize.
 - Minimize, maximize, close.
 - `Alt+Tab` / `Shift+Alt+Tab` cycle windows, `Alt+F4` closes the focused
-  window, and `Super+Arrow` tiles, maximizes, restores, or minimizes it.
+  window, `Super+Arrow` arranges it, and a tap of `Super` toggles Applications.
 - Escape dismisses desktop UI or is delivered to the focused app;
   `Ctrl+Alt+Esc` returns the desktop session to the text shell.
 - Mouse wheel and scrollbars.
 - Dock tasks use app-declared window titles; More expands the full task list and hover shows the complete title.
 - The desktop supports up to 10 concurrent external GUI app windows in addition to Applications and System.
+
+The top bar keeps the focused app, input mode, and UTC clock visible. Click
+`BuzzOS` to toggle Applications, or click the clock/status cluster to open the
+anchored control center. Its keyboard-accessible actions switch input mode,
+open display settings, and launch System Monitor without searching the app
+list.
 
 Default user GUI apps:
 

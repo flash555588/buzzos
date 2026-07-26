@@ -43,6 +43,9 @@ short log for reviewers and contributors; deeper design notes live under
   bidirectional Alt+Tab, Alt+F4, and Super+Arrow window controls; Escape now
   dismisses local UI or reaches the focused app instead of terminating the
   desktop.
+- Added a persistent UTC clock/input status cluster, an anchored
+  keyboard-accessible control center for input, Settings, and System Monitor,
+  clickable top-bar navigation, and Super-to-toggle Applications.
 - Added `/bin/echo` and `/bin/cat`, multi-stage shell pipelines, basic
   redirection, and stdio inheritance for spawned user programs.
 - Added a user-space GUI app center backed by `/fs/apps`.

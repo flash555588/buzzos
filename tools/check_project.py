@@ -327,7 +327,9 @@ def check_runtime_lifecycle():
     for snippet in ["threadreusetest", "socketleak: opened 8", "3072"]:
         if snippet not in smoke:
             fail(f"resource/TCP smoke coverage is missing: {snippet}")
-    for snippet in ["textedit-maximized", "textedit-drag-restored",
+    for snippet in ["control-center", "control-center-monitor",
+                    "control-center-settings", "launcher-super-hidden",
+                    "textedit-maximized", "textedit-drag-restored",
                     "textedit-snap-preview", "textedit-snapped-left",
                     "textedit-snapped-right",
                     "textedit-drag-maximized", "alt-f4-closed",
@@ -343,11 +345,15 @@ def check_runtime_lifecycle():
     for snippet in ["snap_window", "snap_mode_at_pointer",
                     "draw_snap_preview", "activate_previous_visible",
                     "KEY_WINDOW_CLOSE", "KEY_WINDOW_SNAP_LEFT",
-                    "KEY_DESKTOP_EXIT"]:
+                    "KEY_DESKTOP_EXIT", "KEY_LAUNCHER_TOGGLE",
+                    "meta_chord", "draw_control_center",
+                    "toggle_control_center", "toggle_launcher",
+                    "format_clock", "update_clock_cache",
+                    "clock_cache_tick"]:
         if snippet not in gui_c + keyboard_c:
             fail(f"modern window-management interaction is missing: {snippet}")
 
-    ok("runtime lifecycle: IRQ state, process exit, thread/socket reuse, GUI shutdown/live resize, and idle redraw are covered")
+    ok("runtime lifecycle: IRQ state, process exit, thread/socket reuse, GUI shutdown/live resize, system controls, and idle redraw are covered")
 
 
 def check_elf_loader_hardening():

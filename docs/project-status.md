@@ -34,6 +34,10 @@ filesystem, and a user-space GUI app manager.
   `/proc/meminfo` to provide live sortable process CPU/resident-memory
   columns, CPU and memory histories, pause/refresh controls, and confirmed
   process-wide termination.
+- Desktop shell: the top bar exposes focused-window wayfinding, input mode,
+  UTC time/date, a Super-key Applications toggle, and an anchored,
+  keyboard-accessible control center for input, display Settings, and System
+  Monitor.
 - User GUI helpers: seeded apps use `src/user/libc/appui.h` for lightweight
   controls and `src/user/libc/guiapp.h` for the desktop-hosted app protocol.
   The desktop and apps compose in **RGB32**. With virtio-gpu, the compositor

@@ -342,6 +342,44 @@ try {
     Start-Sleep -Milliseconds 900
     $appsPpm = (Join-Path $OutDir "app-center.ppm")
     $screens += Capture-Screen "app-center" $appsPpm (Join-Path $OutDir "app-center.png")
+    $desktopSize = Get-PpmDimensions $appsPpm
+
+    # The top-right status cluster anchors a keyboard-accessible control
+    # center with time, input state, Settings, and System Monitor shortcuts.
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative ($desktopSize.Width - 96) 18
+    Click-Left
+    Start-Sleep -Milliseconds 450
+    $controlCenterPpm = (Join-Path $OutDir "control-center.ppm")
+    $screens += Capture-Screen "control-center" $controlCenterPpm (Join-Path $OutDir "control-center.png")
+    Send-Key "down"
+    Send-Key "down"
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 1400
+    $monitorQuickPpm = (Join-Path $OutDir "control-center-monitor.ppm")
+    $screens += Capture-Screen "control-center-monitor" $monitorQuickPpm (Join-Path $OutDir "control-center-monitor.png")
+    Send-Key "alt-f4"
+    Start-Sleep -Milliseconds 500
+
+    Move-MouseRelative -2000 -2000
+    Move-MouseRelative ($desktopSize.Width - 96) 18
+    Click-Left
+    Send-Key "down"
+    Send-Key "ret"
+    Start-Sleep -Milliseconds 700
+    $settingsQuickPpm = (Join-Path $OutDir "control-center-settings.ppm")
+    $screens += Capture-Screen "control-center-settings" $settingsQuickPpm (Join-Path $OutDir "control-center-settings.png")
+    Send-Key "esc"
+    Start-Sleep -Milliseconds 350
+
+    # A tap of Super toggles Applications without leaking a character into
+    # the focused app; Super+Arrow remains reserved for window arrangement.
+    Send-Key "meta_l"
+    Start-Sleep -Milliseconds 450
+    $superHiddenPpm = (Join-Path $OutDir "launcher-super-hidden.ppm")
+    $screens += Capture-Screen "launcher-super-hidden" $superHiddenPpm (Join-Path $OutDir "launcher-super-hidden.png")
+    Send-Key "meta_l"
+    Start-Sleep -Milliseconds 450
 
     Type-Text "text"
     Start-Sleep -Milliseconds 350

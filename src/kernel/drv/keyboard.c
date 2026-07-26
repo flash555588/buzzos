@@ -10,6 +10,7 @@
 #define KEY_WINDOW_MAXIMIZE      0x84u
 #define KEY_WINDOW_RESTORE       0x85u
 #define KEY_DESKTOP_EXIT         0x86u
+#define KEY_LAUNCHER_TOGGLE      0x87u
 
 static volatile uint8_t buf[BUF_SIZE];
 static volatile int     head, tail;
@@ -17,6 +18,7 @@ static volatile int     shift_down;
 static volatile int     ctrl_down;
 static volatile int     alt_down;
 static volatile int     meta_down;
+static volatile int     meta_chord;
 static volatile int     extended_prefix;
 static volatile uint16_t event_buf[BUF_SIZE];
 static volatile int event_head, event_tail;
@@ -68,6 +70,7 @@ void keyboard_init(void) {
     ctrl_down = 0;
     alt_down = 0;
     meta_down = 0;
+    meta_chord = 0;
     extended_prefix = 0;
     event_head = event_tail = 0;
 }
@@ -96,7 +99,16 @@ void keyboard_handler(uint8_t scancode) {
         return;
     }
     if (extended && (code == 0x5B || code == 0x5C)) {
-        meta_down = !released;
+        if (released) {
+            int was_tap = meta_down && !meta_chord;
+            meta_down = 0;
+            meta_chord = 0;
+            if (was_tap)
+                enqueue_char((char)KEY_LAUNCHER_TOGGLE);
+        } else {
+            meta_down = 1;
+            meta_chord = 0;
+        }
         return;
     }
     if (!extended && ctrl_down && alt_down && code == 0x01) {
@@ -112,6 +124,7 @@ void keyboard_handler(uint8_t scancode) {
     if (extended && meta_down) {
         if (released)
             return;
+        meta_chord = 1;
         switch (code) {
         case 0x4B: enqueue_char((char)KEY_WINDOW_SNAP_LEFT); return;
         case 0x4D: enqueue_char((char)KEY_WINDOW_SNAP_RIGHT); return;
@@ -119,6 +132,14 @@ void keyboard_handler(uint8_t scancode) {
         case 0x50: enqueue_char((char)KEY_WINDOW_RESTORE); return;
         default: return;
         }
+    }
+    /* Super chords are reserved for the desktop shell.  Swallow unsupported
+     * combinations instead of leaking their character into the focused app;
+     * releasing Super after any chord must not also open Applications. */
+    if (meta_down) {
+        if (!released)
+            meta_chord = 1;
+        return;
     }
     if (extended) {
         uint16_t key = 0;

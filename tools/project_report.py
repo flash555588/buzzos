@@ -457,7 +457,9 @@ def collect_ipc_status():
 
 def collect_screenshots():
     names = [
-        "app-center", "launcher-search", "launcher-no-results", "textedit",
+        "app-center", "control-center", "control-center-monitor",
+        "control-center-settings", "launcher-super-hidden",
+        "launcher-search", "launcher-no-results", "textedit",
         "taskbar-minimized", "taskbar-restored", "taskbar-tooltip",
         "alt-tab-launcher", "textedit-maximized",
         "textedit-drag-restored", "textedit-snap-preview",
