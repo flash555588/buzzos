@@ -8,6 +8,9 @@ enum {
     MAX_ENTRIES = 128,
     PATH_CAP = GUIAPP_PATH_MAX,
     ROW_H = 34,
+    /* appui_list_row insets its icon by 14 and its label by 42; rows are
+     * themselves inset by 2, so column text starts here. */
+    ROW_TEXT_X = 44,
     TOOLBAR_H = 94,
     FOOTER_H = 32,
     LIST_HEADER_H = 34,
@@ -23,6 +26,10 @@ enum {
     MODE_RENAME,
     MODE_DELETE,
     MAX_HISTORY = 16,
+    CRUMB_MAX = 16,
+    CRUMB_LABEL_CAP = 24,
+    CRUMB_SEP_W = 14,
+    SIDEBAR_COUNT = 5,
 };
 
 struct file_entry {
@@ -37,6 +44,9 @@ static struct file_entry entries[MAX_ENTRIES];
 static int entry_count;
 static int selected = -1;
 static int scroll_row;
+static int scroll_dragging;
+static int scroll_drag_mouse;
+static int scroll_drag_start_px;
 static int previous_click = -1;
 static int prev_buttons;
 static int pointer_x = -1;
@@ -437,24 +447,21 @@ static struct appui_rect list_rect(void) {
     return (struct appui_rect){side + 8, c.y, w - side - 16, c.h};
 }
 
-static void draw_icon(int x, int y, int type, int selected_row) {
-    int edge = selected_row ? THEME_ACCENT : appui_gray(8);
-    if (type == DT_DIR) {
-        appui_fill(pixels, w, h, (struct appui_rect){x + 1, y + 3, 8, 4},
-                   appui_rgb6(5, 4, 0));
-        appui_fill(pixels, w, h, (struct appui_rect){x, y + 6, 18, 13},
-                   appui_rgb6(5, 4, 0));
-        appui_border(pixels, w, h, (struct appui_rect){x, y + 6, 18, 13},
-                     edge, appui_gray(2));
-    } else {
-        appui_fill(pixels, w, h, (struct appui_rect){x + 2, y + 1, 14, 18}, THEME_TEXT);
-        appui_border(pixels, w, h, (struct appui_rect){x + 2, y + 1, 14, 18},
-                     edge, appui_gray(3));
-        appui_fill(pixels, w, h, (struct appui_rect){x + 5, y + 6, 8, 1},
-                   appui_gray(6));
-        appui_fill(pixels, w, h, (struct appui_rect){x + 5, y + 10, 8, 1},
-                   appui_gray(6));
-    }
+/* Icon per entry.  Extension only: matching the launcher's own dispatch would
+ * mean an ELF sniff per visible row per frame. */
+static int entry_icon(const struct file_entry *entry) {
+    if (entry->type == DT_DIR)
+        return UI_ICON_FOLDER;
+    if (has_extension(entry->name, ".gb") || has_extension(entry->name, ".gbc"))
+        return UI_ICON_GAMEPAD;
+    if (has_extension(entry->name, ".mp3") || has_extension(entry->name, ".wav"))
+        return UI_ICON_MUSIC;
+    if (has_extension(entry->name, ".lua") || has_extension(entry->name, ".c") ||
+        has_extension(entry->name, ".h") || has_extension(entry->name, ".asm"))
+        return UI_ICON_CODE;
+    if (has_extension(entry->name, ".png") || has_extension(entry->name, ".bmp"))
+        return UI_ICON_IMAGE;
+    return UI_ICON_DOCUMENT;
 }
 
 static void draw_size(char *out, uint32_t size) {
@@ -468,33 +475,116 @@ static void draw_size(char *out, uint32_t size) {
     }
 }
 
-static void draw_text_tail(int x, int y, const char *text, int color,
-                           struct appui_rect clip) {
-    int available = clip.x + clip.w - x;
-    int width = appui_text_width(text);
-    if (available <= 0)
-        return;
-    if (width <= available) {
-        appui_text(pixels, w, h, x, y, text, color, -1, clip);
-        return;
+/* Split a path into its components, recording offsets into `path` rather than
+ * copying, so PATH_CAP-long paths cost nothing here. */
+static int split_path(const char *path, int *starts, int *lens, int cap) {
+    int count = 0;
+    int i = 0;
+    while (path[i] && count < cap) {
+        while (path[i] == '/')
+            i++;
+        if (!path[i])
+            break;
+        starts[count] = i;
+        while (path[i] && path[i] != '/')
+            i++;
+        lens[count] = i - starts[count];
+        count++;
     }
+    return count;
+}
 
-    const char *ellipsis = "...";
-    int ellipsis_width = appui_text_width(ellipsis);
-    const char *tail = text;
-    while (*tail && width + ellipsis_width > available) {
-        const char *next = tail;
-        uint32_t codepoint = appui_utf8_next(&next);
-        width -= appui_codepoint_width(codepoint);
-        tail = next;
+static void crumb_label(char *out, int cap, int start, int len) {
+    int n = 0;
+    while (n < cap - 1 && n < len)
+        out[n] = current_path[start + n], n++;
+    out[n] = 0;
+}
+
+static int crumbs_width(int first, int count, const int *starts,
+                        const int *lens) {
+    char label[CRUMB_LABEL_CAP];
+    int total = first > 0 ? appui_label_width("...", UI_FONT_BODY) + CRUMB_SEP_W
+                          : 0;
+    for (int i = first; i < count; i++) {
+        crumb_label(label, sizeof(label), starts[i], lens[i]);
+        total += appui_label_width(label, UI_FONT_BODY);
+        if (i > first)
+            total += CRUMB_SEP_W;
     }
-    if (ellipsis_width >= available) {
-        appui_text(pixels, w, h, x, y, ellipsis, color, -1, clip);
+    return total;
+}
+
+/* Breadcrumb path bar.  When the path is too long the *leading* segments are
+ * dropped, matching the old tail-ellipsis behaviour: the deepest directory is
+ * the part worth showing. */
+static void draw_breadcrumbs(struct appui_rect field) {
+    int starts[CRUMB_MAX], lens[CRUMB_MAX];
+    char label[CRUMB_LABEL_CAP];
+    int count = split_path(current_path, starts, lens, CRUMB_MAX);
+    int icon_side = 16;
+    int x = field.x + 8;
+    int right = field.x + field.w - 8;
+    int first = 0;
+
+    appui_icon(pixels, w, h, UI_ICON_FOLDER,
+               (struct appui_rect){x, field.y, icon_side, field.h}, icon_side,
+               UI_TEXT_TERTIARY);
+    x += icon_side + 6;
+    if (x >= right)
+        return;
+
+    if (count <= 0) {
+        appui_label(pixels, w, h,
+                    (struct appui_rect){x, field.y, right - x, field.h}, "/",
+                    UI_FONT_BODY, UI_TEXT_PRIMARY, UI_ALIGN_LEFT);
         return;
     }
-    appui_text(pixels, w, h, x, y, ellipsis, color, -1, clip);
-    appui_text(pixels, w, h, x + ellipsis_width, y, tail,
-               color, -1, clip);
+    while (first < count - 1 &&
+           crumbs_width(first, count, starts, lens) > right - x)
+        first++;
+    if (first > 0) {
+        int ellipsis_w = appui_label_width("...", UI_FONT_BODY);
+        appui_label(pixels, w, h,
+                    (struct appui_rect){x, field.y, ellipsis_w, field.h}, "...",
+                    UI_FONT_BODY, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
+        x += ellipsis_w + CRUMB_SEP_W;
+    }
+    for (int i = first; i < count && x < right; i++) {
+        int segment_w;
+        if (i > first) {
+            appui_icon(pixels, w, h, UI_ICON_CHEVRON_RIGHT,
+                       (struct appui_rect){x, field.y, CRUMB_SEP_W, field.h},
+                       10, UI_TEXT_TERTIARY);
+            x += CRUMB_SEP_W;
+        }
+        crumb_label(label, sizeof(label), starts[i], lens[i]);
+        segment_w = appui_label_width(label, UI_FONT_BODY);
+        if (segment_w > right - x)
+            segment_w = right - x;
+        appui_label(pixels, w, h,
+                    (struct appui_rect){x, field.y, segment_w, field.h}, label,
+                    UI_FONT_BODY,
+                    i == count - 1 ? UI_TEXT_PRIMARY : UI_TEXT_SECONDARY,
+                    UI_ALIGN_LEFT);
+        x += segment_w;
+    }
+}
+
+static const char *const sidebar_labels[SIDEBAR_COUNT] = {
+    "Root", "Files", "Apps", "Devices", "System"
+};
+static const char *const sidebar_paths[SIDEBAR_COUNT] = {
+    "/", "/fs", "/fs/apps", "/dev", "/proc"
+};
+static const int sidebar_icons[SIDEBAR_COUNT] = {
+    UI_ICON_FOLDER, UI_ICON_DOCUMENT, UI_ICON_GRID, UI_ICON_NETWORK,
+    UI_ICON_SETTINGS
+};
+
+static struct appui_rect sidebar_row_rect(struct appui_rect content, int i) {
+    return (struct appui_rect){8, content.y + 38 + i * SIDEBAR_ROW_STEP,
+                               sidebar_width() - 16, SIDEBAR_ROW_H};
 }
 
 static void draw_sidebar(struct appui_rect content) {
@@ -502,44 +592,85 @@ static void draw_sidebar(struct appui_rect content) {
     if (!side)
         return;
     appui_fill(pixels, w, h, (struct appui_rect){0, content.y, side, content.h},
-               THEME_PANEL_RAISED);
-    appui_text(pixels, w, h, 12, content.y + 10, "Places", THEME_TEXT_DIM, -1,
-               (struct appui_rect){8, content.y + 4, side - 16, 30});
-    static const char *labels[] = {"Root", "Files", "Apps", "Devices", "System"};
-    static const char *paths[] = {"/", "/fs", "/fs/apps", "/dev", "/proc"};
-    for (int i = 0; i < 5; i++) {
-        struct appui_rect r = {8, content.y + 38 + i * SIDEBAR_ROW_STEP,
-                                side - 16, SIDEBAR_ROW_H};
+               UI_BG_LAYER);
+    appui_separator(pixels, w, h, side - 1, content.y, content.h, 1);
+    appui_label(pixels, w, h,
+                (struct appui_rect){12, content.y + 6, side - 20, 26}, "Places",
+                UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
+    for (int i = 0; i < SIDEBAR_COUNT; i++) {
+        struct appui_rect r = sidebar_row_rect(content, i);
         int state = appui_pointer_state(r, pointer_x, pointer_y, pointer_buttons);
-        if (strcmp(current_path, paths[i]) == 0)
+        if (strcmp(current_path, sidebar_paths[i]) == 0)
             state |= APPUI_STATE_SELECTED;
-        appui_button_ex(pixels, w, h, r, labels[i], APPUI_BTN_GHOST, state);
+        appui_list_row(pixels, w, h, r, sidebar_labels[i], sidebar_icons[i],
+                       state);
     }
+}
+
+/* Row area of the list, below the column header. */
+static struct appui_rect list_body_rect(void) {
+    struct appui_rect list = list_rect();
+    return (struct appui_rect){list.x + 2, list.y + LIST_HEADER_H,
+                               appui_max(1, list.w - 4),
+                               appui_max(1, visible_rows() * ROW_H)};
+}
+
+static int list_content_px(void) {
+    return entry_count * ROW_H;
+}
+
+static int list_viewport_px(void) {
+    return visible_rows() * ROW_H;
+}
+
+static int list_scrollable(void) {
+    return list_content_px() > list_viewport_px();
+}
+
+static struct appui_rect list_scroll_track(void) {
+    struct appui_rect body = list_body_rect();
+    return (struct appui_rect){body.x + body.w - APPUI_SCROLL_W, body.y,
+                               APPUI_SCROLL_W, body.h};
+}
+
+static struct appui_rect list_scroll_thumb(void) {
+    return appui_scroll_thumb(list_scroll_track(), 1, list_content_px(),
+                              list_viewport_px(), scroll_row * ROW_H);
 }
 
 static void draw_list(void) {
     struct appui_rect list = list_rect();
+    struct appui_rect body = list_body_rect();
     int header_h = LIST_HEADER_H;
+    int scroll_w = list_scrollable() ? APPUI_SCROLL_W : 0;
     int show_type = list.w >= 360;
     int show_size = list.w >= 520;
     int size_w = 112;
     int type_w = 104;
-    int size_x = list.x + list.w - 8 - size_w;
-    int type_x = show_size ? size_x - 8 - type_w
-                           : list.x + list.w - 8 - type_w;
-    int name_right = show_type ? type_x - 8 : list.x + list.w - 8;
-    appui_fill(pixels, w, h, list, THEME_LIST_BG);
-    appui_border(pixels, w, h, list, THEME_FIELD_BORDER, THEME_DIVIDER);
-    appui_fill(pixels, w, h, (struct appui_rect){list.x + 1, list.y + 1,
-               list.w - 2, header_h - 1}, THEME_LIST_HEADER);
-    appui_text(pixels, w, h, list.x + 30, list.y + 5, "Name",
-               THEME_LIST_TEXT, -1, list);
+    int right = list.x + list.w - 8 - scroll_w;
+    int size_x = right - size_w;
+    int type_x = show_size ? size_x - 8 - type_w : right - type_w;
+    int name_right = show_type ? type_x - 8 : right;
+
+    appui_fill(pixels, w, h, list, UI_BG_SOLID);
+    appui_stroke_round(pixels, w, h, list, UI_RADIUS_CONTROL,
+                       UI_STROKE_CONTROL);
+    appui_label(pixels, w, h,
+                (struct appui_rect){list.x + ROW_TEXT_X, list.y,
+                                    appui_max(1, name_right -
+                                                 (list.x + ROW_TEXT_X)),
+                                    header_h},
+                "Name", UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
     if (show_type)
-        appui_text(pixels, w, h, type_x, list.y + 5,
-                   "Type", THEME_LIST_TEXT, -1, list);
+        appui_label(pixels, w, h,
+                    (struct appui_rect){type_x, list.y, type_w, header_h},
+                    "Type", UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
     if (show_size)
-        appui_text(pixels, w, h, size_x, list.y + 5,
-                   "Size", THEME_LIST_TEXT, -1, list);
+        appui_label(pixels, w, h,
+                    (struct appui_rect){size_x, list.y, size_w, header_h},
+                    "Size", UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_RIGHT);
+    appui_separator(pixels, w, h, list.x + 1, list.y + header_h - 1,
+                    list.w - 2, 0);
 
     int visible = visible_rows();
     for (int row = 0; row < visible; row++) {
@@ -547,35 +678,48 @@ static void draw_list(void) {
         if (index >= entry_count)
             break;
         int y = list.y + header_h + row * ROW_H;
-        int active = index == selected;
-        if (active)
-            appui_fill(pixels, w, h, (struct appui_rect){list.x + 2, y,
-                       list.w - 4, ROW_H}, THEME_SELECTION_BG);
-        else if (row & 1)
-            appui_fill(pixels, w, h, (struct appui_rect){list.x + 2, y,
-                       list.w - 4, ROW_H}, THEME_LIST_ALT);
-        draw_icon(list.x + 7, y + 7, entries[index].type, active);
-        int fg = active ? THEME_SELECTION_TEXT : THEME_LIST_TEXT;
-        struct appui_rect name_clip = {list.x + 30, y + 4,
-                                      appui_max(1, name_right - (list.x + 30)),
-                                      ROW_H - 4};
-        appui_text(pixels, w, h, name_clip.x, y + 7, entries[index].name,
-                   fg, -1, name_clip);
+        struct appui_rect row_rect = {body.x, y, body.w - scroll_w, ROW_H};
+        struct appui_rect name_rect = {list.x + ROW_TEXT_X, y,
+                                       appui_max(1, name_right -
+                                                    (list.x + ROW_TEXT_X)),
+                                       ROW_H};
+        int state = appui_pointer_state(row_rect, pointer_x, pointer_y,
+                                        pointer_buttons);
+        if (index == selected)
+            state |= APPUI_STATE_SELECTED;
+        /* The row paints its fill, accent bar and icon across the whole width;
+         * the name is drawn separately so it ellipsizes at the Type column
+         * instead of running underneath it. */
+        appui_list_row(pixels, w, h, row_rect, "",
+                       entry_icon(&entries[index]), state);
+        uint32_t fg = (state & APPUI_STATE_SELECTED) ? UI_TEXT_PRIMARY
+                                                     : UI_TEXT_SECONDARY;
+        appui_label(pixels, w, h, name_rect, entries[index].name, UI_FONT_BODY,
+                    fg, UI_ALIGN_LEFT);
         if (show_type)
-            appui_text(pixels, w, h, type_x, y + 7,
-                       entries[index].type == DT_DIR ? "Folder" : "File",
-                       fg, -1, (struct appui_rect){type_x, y, type_w, ROW_H});
+            appui_label(pixels, w, h,
+                        (struct appui_rect){type_x, y, type_w, ROW_H},
+                        entries[index].type == DT_DIR ? "Folder" : "File",
+                        UI_FONT_BODY, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
         if (show_size && entries[index].type != DT_DIR) {
             char size[20];
             draw_size(size, entries[index].size);
-            appui_text(pixels, w, h, size_x, y + 7, size,
-                       fg, -1, (struct appui_rect){size_x, y,
-                                                 size_w, ROW_H});
+            appui_label(pixels, w, h,
+                        (struct appui_rect){size_x, y, size_w, ROW_H}, size,
+                        UI_FONT_BODY, fg, UI_ALIGN_RIGHT);
         }
     }
     if (!entry_count)
-        appui_text(pixels, w, h, list.x + 30, list.y + 52,
-                   "This folder is empty", THEME_TEXT_FAINT, -1, list);
+        appui_label(pixels, w, h,
+                    (struct appui_rect){list.x + ROW_TEXT_X, list.y + header_h,
+                                        appui_max(1, list.w - ROW_TEXT_X - 8),
+                                        ROW_H},
+                    "This folder is empty", UI_FONT_BODY, UI_TEXT_TERTIARY,
+                    UI_ALIGN_LEFT);
+    appui_scrollbar(pixels, w, h, list_scroll_track(), 1, list_content_px(),
+                    list_viewport_px(), scroll_row * ROW_H,
+                    scroll_dragging ||
+                    appui_inside(pointer_x, pointer_y, list_scroll_track()));
 }
 
 static int fitted_button_width(const char *label) {
@@ -614,45 +758,38 @@ static void draw_dialog(void) {
         return;
     struct appui_rect dialog = dialog_rect();
     int dw = dialog.w;
-    appui_fill_blend(pixels, w, h, (struct appui_rect){0, 0, w, h}, 0, 105);
-    appui_fill_round(pixels, w, h, dialog, THEME_FIELD_BORDER);
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){dialog.x + 1, dialog.y + 1,
-                                         dialog.w - 2, dialog.h - 2},
-                     THEME_PANEL_RAISED);
+    appui_scrim(pixels, w, h);
+    appui_card(pixels, w, h, dialog);
     const char *prompt = input_mode == MODE_NEW_DIR ? "New folder name" :
                          input_mode == MODE_NEW_FILE ? "New file name" :
                          input_mode == MODE_RENAME ? "Rename item" :
                          "Delete selected item?";
     struct appui_rect prompt_area = {dialog.x + 14, dialog.y + 8,
                                     dw - 28, 32};
-    int prompt_y = prompt_area.y + (prompt_area.h - KFONT_HEIGHT) / 2 +
-                   PLT_FONT_Y_SHIFT;
-    appui_text(pixels, w, h, prompt_area.x, prompt_y, prompt, THEME_TEXT, -1,
-               prompt_area);
+    appui_label(pixels, w, h, prompt_area, prompt, UI_FONT_BODY_LG,
+                UI_TEXT_PRIMARY, UI_ALIGN_LEFT);
     if (input_mode != MODE_DELETE) {
         struct appui_rect field = {dialog.x + 14,
                                    dialog.y + DIALOG_FIELD_Y,
                                    dw - 28, CONTROL_H};
         appui_field_frame(pixels, w, h, field, 1);
+        /* The field is a text-entry caret grid, so it keeps native-size
+         * appui_text: the caret x below is measured with appui_text_width. */
         int field_y = field.y + (field.h - KFONT_HEIGHT) / 2 +
                       PLT_FONT_Y_SHIFT;
         appui_text(pixels, w, h, field.x + 6, field_y,
-                   input_text, THEME_FIELD_TEXT, -1,
+                   input_text, UI_TEXT_PRIMARY, -1,
                    (struct appui_rect){field.x + 4, field.y + 3,
                                        field.w - 8, field.h - 6});
         int caret_x = field.x + 6 + appui_text_width(input_text);
         appui_fill(pixels, w, h, (struct appui_rect){caret_x, field.y + 3, 2,
-                   field.h - 6}, THEME_FOCUS);
+                   field.h - 6}, UI_ACCENT_FILL);
     } else if (selected >= 0) {
         struct appui_rect name_area = {dialog.x + 14,
                                        dialog.y + DIALOG_FIELD_Y,
                                        dw - 28, CONTROL_H};
-        int name_y = name_area.y + (name_area.h - KFONT_HEIGHT) / 2 +
-                     PLT_FONT_Y_SHIFT;
-        appui_text(pixels, w, h, name_area.x, name_y,
-                   entries[selected].name, THEME_CLOSE_RED, -1,
-                   name_area);
+        appui_label(pixels, w, h, name_area, entries[selected].name,
+                    UI_FONT_BODY, UI_SYS_CRITICAL, UI_ALIGN_LEFT);
     }
     struct appui_rect confirm = dialog_button_rect(0);
     struct appui_rect cancel = dialog_button_rect(1);
@@ -771,9 +908,8 @@ static int action_button_enabled(int index) {
 
 static void render(void) {
     clamp_selection();
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H},
-               THEME_TOOLBAR_BG);
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, UI_BG_SOLID);
+    appui_toolbar(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H});
     for (int i = 0; i < 4; i++) {
         struct appui_rect r = nav_button_rect(i);
         int state = appui_pointer_state(r, pointer_x, pointer_y, pointer_buttons);
@@ -785,13 +921,7 @@ static void render(void) {
     }
     struct appui_rect address = address_rect();
     appui_field_frame(pixels, w, h, address, 0);
-    int address_y = address.y + (address.h - KFONT_HEIGHT) / 2 +
-                    PLT_FONT_Y_SHIFT;
-    draw_text_tail(address.x + 7, address_y, current_path,
-                   THEME_FIELD_TEXT,
-                   (struct appui_rect){address.x + 6, address.y + 3,
-                                       appui_max(1, address.w - 12),
-                                       address.h - 6});
+    draw_breadcrumbs(address);
     for (int i = 0; i < 4; i++) {
         struct appui_rect r = action_button_rect(i);
         int state = appui_pointer_state(r, pointer_x, pointer_y, pointer_buttons);
@@ -805,7 +935,8 @@ static void render(void) {
     draw_sidebar(content);
     draw_list();
     struct appui_rect footer_area = {0, h - FOOTER_H, w, FOOTER_H};
-    appui_fill(pixels, w, h, footer_area, THEME_TOOLBAR_BG);
+    appui_fill(pixels, w, h, footer_area, UI_BG_LAYER);
+    appui_separator(pixels, w, h, 0, footer_area.y, w, 0);
     char footer[96];
     footer[0] = 0;
     appui_append_int(footer, entry_count, sizeof(footer));
@@ -818,11 +949,10 @@ static void render(void) {
         appui_append_text(footer, "  |  ", sizeof(footer));
         appui_append_text(footer, status, sizeof(footer));
     }
-    int footer_y = footer_area.y + (footer_area.h - KFONT_HEIGHT) / 2 +
-                   PLT_FONT_Y_SHIFT;
-    appui_text(pixels, w, h, 10, footer_y, footer, THEME_TEXT_DIM, -1,
-               (struct appui_rect){8, footer_area.y + 2,
-                                   w - 16, footer_area.h - 4});
+    appui_label(pixels, w, h,
+                (struct appui_rect){10, footer_area.y, appui_max(1, w - 20),
+                                    footer_area.h},
+                footer, UI_FONT_BODY, UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
     draw_dialog();
 }
 
@@ -880,21 +1010,19 @@ static void click(struct guiapp_ctx *ctx, int x, int y) {
     int side = sidebar_width();
     struct appui_rect content = content_rect();
     if (side) {
-        static const char *paths[] = {"/", "/fs", "/fs/apps", "/dev", "/proc"};
-        for (int i = 0; i < 5; i++) {
-            if (appui_inside(x, y,
-                (struct appui_rect){8,
-                                    content.y + 38 + i * SIDEBAR_ROW_STEP,
-                                    side - 16, SIDEBAR_ROW_H})) {
-                go_to(paths[i]);
+        for (int i = 0; i < SIDEBAR_COUNT; i++) {
+            if (appui_inside(x, y, sidebar_row_rect(content, i))) {
+                go_to(sidebar_paths[i]);
                 return;
             }
         }
     }
-    struct appui_rect list = list_rect();
-    int rel = y - (list.y + LIST_HEADER_H);
-    if (x >= list.x && x < list.x + list.w &&
-        y < list.y + list.h && rel >= 0) {
+    struct appui_rect body = list_body_rect();
+    if (list_scrollable() && appui_inside(x, y, list_scroll_track()))
+        return;
+    int rel = y - body.y;
+    if (x >= body.x && x < body.x + body.w &&
+        y < body.y + body.h && rel >= 0) {
         int index = scroll_row + rel / ROW_H;
         if (index >= 0 && index < entry_count) {
             if (index == selected && index == previous_click) {
@@ -908,6 +1036,30 @@ static void click(struct guiapp_ctx *ctx, int x, int y) {
     }
 }
 
+/* Scroll offset in pixels, clamped, then converted back to whole rows. */
+static void set_scroll_px(int offset_px) {
+    int max_px = appui_max(0, list_content_px() - list_viewport_px());
+    scroll_row = clamp_int(offset_px, 0, max_px) / ROW_H;
+    clamp_selection();
+}
+
+/* Thumb hit-testing and dragging both go through appui_scroll_thumb, so the
+ * grabbable thumb is exactly the painted one. */
+static void handle_scroll_press(int x, int y) {
+    struct appui_rect track = list_scroll_track();
+    struct appui_rect thumb = list_scroll_thumb();
+    if (!list_scrollable() || !appui_inside(x, y, track))
+        return;
+    if (!appui_inside(x, y, thumb)) {
+        set_scroll_px(appui_scroll_offset_at(track, 1, list_content_px(),
+                                             list_viewport_px(), y));
+        thumb = list_scroll_thumb();
+    }
+    scroll_dragging = 1;
+    scroll_drag_mouse = y;
+    scroll_drag_start_px = scroll_row * ROW_H;
+}
+
 static void handle_mouse(struct guiapp_ctx *ctx, int x, int y, int buttons, int wheel) {
     pointer_x = x;
     pointer_y = y;
@@ -917,8 +1069,22 @@ static void handle_mouse(struct guiapp_ctx *ctx, int x, int y, int buttons, int 
         previous_click = -1;
         clamp_selection();
     }
-    if ((buttons & 1) && !(prev_buttons & 1))
-        click(ctx, x, y);
+    if ((buttons & 1) && !(prev_buttons & 1)) {
+        if (input_mode == MODE_NONE)
+            handle_scroll_press(x, y);
+        if (!scroll_dragging)
+            click(ctx, x, y);
+    }
+    if ((buttons & 1) && scroll_dragging) {
+        struct appui_rect track = list_scroll_track();
+        struct appui_rect thumb = list_scroll_thumb();
+        int span = appui_max(1, track.h - thumb.h);
+        int max_px = appui_max(0, list_content_px() - list_viewport_px());
+        set_scroll_px(scroll_drag_start_px +
+                      (y - scroll_drag_mouse) * max_px / span);
+    }
+    if (!(buttons & 1))
+        scroll_dragging = 0;
     prev_buttons = buttons;
 }
 

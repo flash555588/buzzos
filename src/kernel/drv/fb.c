@@ -625,6 +625,12 @@ int fb_display_release(int pid) {
         result = 0;
     }
     irq_restore(flags);
+    /* GPU resources are owned by whoever owns the display, and their user
+     * mappings live in that process's address space.  Drop them here so a
+     * compositor that exits (or crashes) cannot leak GPU memory or leave the
+     * scanout pointing at a render target nobody is drawing into. */
+    if (result == 0)
+        virtio_gpu_3d_release();
     return result;
 }
 

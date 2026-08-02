@@ -9,7 +9,9 @@ enum {
     TERM_MARGIN_Y = 8,
     TERM_LINE_HEIGHT = KFONT_HEIGHT,
     TERM_SCROLLBAR_SIZE = 14,
-    TERM_SCROLLBAR_MIN_THUMB = 22,
+    TERM_AXIS_NONE = 0,
+    TERM_AXIS_V = 1,
+    TERM_AXIS_H = 2,
 };
 
 static struct guiapp_ctx gui;
@@ -87,7 +89,7 @@ static void reset_terminal_locked(void) {
     selection_anchor_pos = 0;
     selection_focus_line = 0;
     selection_focus_pos = 0;
-    scrollbar_drag_axis = 0;
+    scrollbar_drag_axis = TERM_AXIS_NONE;
 }
 
 static struct appui_rect viewport_locked(void) {
@@ -188,7 +190,7 @@ static int line_width_to_pos_locked(int logical_line, int pos) {
 
 static struct appui_rect scrollbar_track_locked(int axis) {
     struct appui_rect viewport = viewport_locked();
-    if (axis == 1) {
+    if (axis == TERM_AXIS_V) {
         return (struct appui_rect){
             viewport.w, 0, TERM_SCROLLBAR_SIZE, viewport.h
         };
@@ -198,39 +200,39 @@ static struct appui_rect scrollbar_track_locked(int axis) {
     };
 }
 
-static struct appui_rect scrollbar_lane_locked(int axis) {
-    struct appui_rect track = scrollbar_track_locked(axis);
-    return (struct appui_rect){
-        track.x + 2, track.y + 2, track.w - 4, track.h - 4
-    };
+/* Content and viewport extents for one axis, in the order appui_scroll_thumb
+ * and appui_scroll_offset_at want them. */
+struct term_scroll_axis {
+    struct appui_rect track;
+    int vertical;
+    int content;
+    int viewport;
+    int offset;
+};
+
+static struct term_scroll_axis scroll_axis_locked(int axis) {
+    struct appui_rect view = viewport_locked();
+    struct term_scroll_axis a;
+    a.track = scrollbar_track_locked(axis);
+    a.vertical = axis == TERM_AXIS_V;
+    if (a.vertical) {
+        a.content = content_height_locked();
+        a.viewport = view.h;
+        a.offset = scroll_y;
+    } else {
+        a.content = content_width_locked();
+        a.viewport = view.w;
+        a.offset = scroll_x;
+    }
+    return a;
 }
 
+/* The thumb the user can grab.  Identical to what appui_scrollbar paints, by
+ * construction: both call appui_scroll_thumb on the same description. */
 static struct appui_rect scrollbar_thumb_locked(int axis) {
-    struct appui_rect viewport = viewport_locked();
-    struct appui_rect lane = scrollbar_lane_locked(axis);
-    int track_length = axis == 1 ? lane.h : lane.w;
-    int visible = axis == 1 ? viewport.h : viewport.w;
-    int content = axis == 1 ? content_height_locked() : content_width_locked();
-    int maximum = axis == 1 ? max_scroll_y_locked() : max_scroll_x_locked();
-    int scroll = axis == 1 ? scroll_y : scroll_x;
-    int thumb_length = track_length;
-    int thumb_offset = 0;
-    if (content > visible && track_length > 0) {
-        thumb_length = visible * track_length / content;
-        thumb_length = clamp_int(thumb_length, TERM_SCROLLBAR_MIN_THUMB,
-                                 track_length);
-        int span = track_length - thumb_length;
-        if (maximum > 0 && span > 0)
-            thumb_offset = scroll * span / maximum;
-    }
-    if (axis == 1) {
-        return (struct appui_rect){
-            lane.x, lane.y + thumb_offset, lane.w, thumb_length
-        };
-    }
-    return (struct appui_rect){
-        lane.x + thumb_offset, lane.y, thumb_length, lane.h
-    };
+    struct term_scroll_axis a = scroll_axis_locked(axis);
+    return appui_scroll_thumb(a.track, a.vertical, a.content, a.viewport,
+                              a.offset);
 }
 
 static void append_line_locked(void) {
@@ -475,24 +477,11 @@ static void draw_line_locked(int logical_line, int x, int y,
 }
 
 static void draw_scrollbars_locked(void) {
-    int vertical_max = max_scroll_y_locked();
-    int horizontal_max = max_scroll_x_locked();
-    int thumb_color = THEME_WIN_HOVER;
-    int active_color = THEME_ACCENT_DIM;
-
-    if (vertical_max > 0) {
-        struct appui_rect thumb = scrollbar_thumb_locked(1);
-        thumb.x += 4;
-        thumb.w -= 8;
-        appui_fill_round(pixels, view_width, view_height, thumb,
-                         scrollbar_drag_axis == 1 ? active_color : thumb_color);
-    }
-    if (horizontal_max > 0) {
-        struct appui_rect thumb = scrollbar_thumb_locked(2);
-        thumb.y += 4;
-        thumb.h -= 8;
-        appui_fill_round(pixels, view_width, view_height, thumb,
-                         scrollbar_drag_axis == 2 ? active_color : thumb_color);
+    for (int axis = TERM_AXIS_V; axis <= TERM_AXIS_H; axis++) {
+        struct term_scroll_axis a = scroll_axis_locked(axis);
+        appui_scrollbar(pixels, view_width, view_height, a.track, a.vertical,
+                        a.content, a.viewport, a.offset,
+                        scrollbar_drag_axis == axis);
     }
 }
 
@@ -501,10 +490,10 @@ static void render_locked(void) {
         return;
     struct appui_rect full = {0, 0, view_width, view_height};
     struct appui_rect clip = viewport_locked();
-    int background = plt_rgb(14, 18, 26);
-    int foreground = appui_rgb6(3, 5, 4);
-    int selected_foreground = plt_rgb(244, 248, 252);
-    int selection_background = plt_rgb(45, 91, 140);
+    int background = THEME_EDITOR_BG;
+    int foreground = THEME_EDITOR_TEXT;
+    int selected_foreground = UI_TEXT_ON_ACCENT;
+    int selection_background = UI_ACCENT_FILL;
     appui_fill(pixels, view_width, view_height, full, background);
 
     int first_visible = (scroll_y - TERM_MARGIN_Y) / TERM_LINE_HEIGHT;
@@ -609,48 +598,44 @@ static int copy_selection_locked(char *output, int capacity) {
 }
 
 static void begin_scrollbar_drag_locked(int axis, int x, int y) {
+    struct term_scroll_axis a = scroll_axis_locked(axis);
     struct appui_rect thumb = scrollbar_thumb_locked(axis);
-    struct appui_rect lane = scrollbar_lane_locked(axis);
-    int mouse = axis == 1 ? y : x;
-    int inside_thumb = appui_inside(x, y, thumb);
-    int thumb_length = axis == 1 ? thumb.h : thumb.w;
-    int lane_start = axis == 1 ? lane.y : lane.x;
-    int lane_length = axis == 1 ? lane.h : lane.w;
-    int maximum = axis == 1 ? max_scroll_y_locked() : max_scroll_x_locked();
+    int mouse = a.vertical ? y : x;
+    int maximum = a.vertical ? max_scroll_y_locked() : max_scroll_x_locked();
 
-    if (!inside_thumb && maximum > 0) {
-        int span = lane_length - thumb_length;
-        int offset = mouse - lane_start - thumb_length / 2;
-        int value = span > 0 ? offset * maximum / span : 0;
-        if (axis == 1)
+    if (!appui_inside(x, y, thumb) && maximum > 0) {
+        int value = appui_scroll_offset_at(a.track, a.vertical, a.content,
+                                           a.viewport, mouse);
+        if (a.vertical)
             scroll_y = clamp_int(value, 0, maximum);
         else
             scroll_x = clamp_int(value, 0, maximum);
     }
     scrollbar_drag_axis = axis;
     scrollbar_drag_mouse = mouse;
-    scrollbar_drag_scroll = axis == 1 ? scroll_y : scroll_x;
+    scrollbar_drag_scroll = a.vertical ? scroll_y : scroll_x;
 }
 
 static void update_scrollbar_drag_locked(int x, int y) {
     int axis = scrollbar_drag_axis;
+    struct term_scroll_axis a;
+    struct appui_rect thumb;
+    int mouse, span, maximum, value;
     if (!axis)
         return;
-    struct appui_rect thumb = scrollbar_thumb_locked(axis);
-    struct appui_rect lane = scrollbar_lane_locked(axis);
-    int mouse = axis == 1 ? y : x;
-    int thumb_length = axis == 1 ? thumb.h : thumb.w;
-    int lane_length = axis == 1 ? lane.h : lane.w;
-    int maximum = axis == 1 ? max_scroll_y_locked() : max_scroll_x_locked();
-    int span = lane_length - thumb_length;
-    int value = scrollbar_drag_scroll;
+    a = scroll_axis_locked(axis);
+    thumb = scrollbar_thumb_locked(axis);
+    mouse = a.vertical ? y : x;
+    maximum = a.vertical ? max_scroll_y_locked() : max_scroll_x_locked();
+    span = (a.vertical ? a.track.h - thumb.h : a.track.w - thumb.w);
+    value = scrollbar_drag_scroll;
     if (span > 0 && maximum > 0) {
         value += (mouse - scrollbar_drag_mouse) * maximum / span;
         value = clamp_int(value, 0, maximum);
     } else {
         value = 0;
     }
-    if (axis == 1)
+    if (a.vertical)
         scroll_y = value;
     else
         scroll_x = value;
@@ -674,8 +659,8 @@ static void update_selection_drag_locked(int x, int y) {
 
 static void handle_mouse_locked(const struct guiapp_event *event) {
     struct appui_rect viewport = viewport_locked();
-    struct appui_rect vertical = scrollbar_track_locked(1);
-    struct appui_rect horizontal = scrollbar_track_locked(2);
+    struct appui_rect vertical = scrollbar_track_locked(TERM_AXIS_V);
+    struct appui_rect horizontal = scrollbar_track_locked(TERM_AXIS_H);
     int left = (event->buttons & 1) != 0;
     int left_pressed = left && !(previous_buttons & 1);
 
@@ -686,10 +671,10 @@ static void handle_mouse_locked(const struct guiapp_event *event) {
     if (left_pressed) {
         if (appui_inside(event->x, event->y, vertical)) {
             selection_dragging = 0;
-            begin_scrollbar_drag_locked(1, event->x, event->y);
+            begin_scrollbar_drag_locked(TERM_AXIS_V, event->x, event->y);
         } else if (appui_inside(event->x, event->y, horizontal)) {
             selection_dragging = 0;
-            begin_scrollbar_drag_locked(2, event->x, event->y);
+            begin_scrollbar_drag_locked(TERM_AXIS_H, event->x, event->y);
         } else if (appui_inside(event->x, event->y, viewport)) {
             struct term_position position =
                 position_from_mouse_locked(event->x, event->y);
@@ -698,7 +683,7 @@ static void handle_mouse_locked(const struct guiapp_event *event) {
             selection_focus_line = position.line;
             selection_focus_pos = position.pos;
             selection_dragging = 1;
-            scrollbar_drag_axis = 0;
+            scrollbar_drag_axis = TERM_AXIS_NONE;
         }
     } else if (left && scrollbar_drag_axis) {
         update_scrollbar_drag_locked(event->x, event->y);
@@ -709,7 +694,7 @@ static void handle_mouse_locked(const struct guiapp_event *event) {
         if (selection_dragging)
             update_selection_drag_locked(event->x, event->y);
         selection_dragging = 0;
-        scrollbar_drag_axis = 0;
+        scrollbar_drag_axis = TERM_AXIS_NONE;
     }
     previous_buttons = event->buttons;
 }

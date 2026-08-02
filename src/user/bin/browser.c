@@ -584,6 +584,21 @@ static int load_page_images(const char *base_host, int base_port, const char *ba
     return loaded;
 }
 
+/* Chrome geometry.  The toolbar controls are defined once here so the painter
+ * and the click handler cannot drift apart -- they previously each spelled out
+ * the same literal rects. */
+static struct appui_rect back_rect(void) {
+    return (struct appui_rect){8, 11, 32, 28};
+}
+
+static struct appui_rect address_rect(void) {
+    return (struct appui_rect){48, 11, w - 124, 28};
+}
+
+static struct appui_rect go_rect(void) {
+    return (struct appui_rect){w - 68, 11, 58, 28};
+}
+
 static struct appui_rect page_rect(void) {
     return (struct appui_rect){10, 58, w - 20, h - 84};
 }
@@ -638,8 +653,10 @@ static void clamp_scroll(void) {
 static void draw_page(void) {
     struct appui_rect page = page_rect();
     struct appui_rect clip = {page.x + 8, page.y + 8, page.w - 16, page.h - 16};
+    /* Page canvas stays light: real pages assume paper.  Only the frame around
+     * it is chrome, so only the frame takes a themed stroke. */
     appui_fill(pixels, w, h, page, THEME_DOCUMENT_BG);
-    appui_border(pixels, w, h, page, appui_gray(8), appui_gray(1));
+    appui_stroke_round(pixels, w, h, page, 0, UI_STROKE_CONTROL);
     int x = clip.x;
     int y = clip.y - scroll_y;
     int pos = 0;
@@ -693,47 +710,44 @@ static void draw_page(void) {
             break;
     }
     if (max_scroll() > 0) {
-        int track_h = page.h - 4;
-        int thumb_h = appui_max(24, track_h * page.h /
-                                appui_max(page.h, content_height()));
-        int thumb_y = page.y + 2 + scroll_y * (track_h - thumb_h) / max_scroll();
-        appui_fill(pixels, w, h, (struct appui_rect){page.x + page.w - 7, page.y + 2, 5, track_h},
-                   THEME_PANEL_RAISED);
-        appui_fill(pixels, w, h, (struct appui_rect){page.x + page.w - 7, thumb_y, 5, thumb_h},
-                   THEME_WIN_HOVER);
+        struct appui_rect track = {page.x + page.w - APPUI_SCROLL_W - 2,
+                                   page.y + 2, APPUI_SCROLL_W, page.h - 4};
+        appui_scrollbar(pixels, w, h, track, 1, content_height(), page.h,
+                        scroll_y, appui_inside(pointer_x, pointer_y, track));
     }
 }
 
 static void render(void) {
     clamp_scroll();
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, 50}, THEME_TOOLBAR_BG);
-    struct appui_rect back = {8, 10, 58, 28};
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, UI_BG_SOLID);
+    appui_toolbar(pixels, w, h, (struct appui_rect){0, 0, w, 50});
+    struct appui_rect back = back_rect();
     int back_state = appui_pointer_state(back, pointer_x, pointer_y,
                                          pointer_buttons);
     if (history_pos <= 0)
         back_state |= APPUI_STATE_DISABLED;
-    appui_button_ex(pixels, w, h, back, "Back", APPUI_BTN_DEFAULT,
-                    back_state);
-    struct appui_rect address = {74, 10, w - 150, 28};
+    appui_icon_button(pixels, w, h, back, UI_ICON_CHEVRON_LEFT, back_state);
+    struct appui_rect address = address_rect();
     appui_field_frame(pixels, w, h, address, 1);
     int max_chars = appui_max(1, (address.w - 14) / KFONT_WIDTH);
     const char *shown_url = url_len > max_chars ? url + url_len - max_chars : url;
     appui_text(pixels, w, h, address.x + 6, address.y + 7,
-               shown_url, THEME_FIELD_TEXT, -1,
+               shown_url, UI_TEXT_PRIMARY, -1,
                (struct appui_rect){address.x + 5, address.y + 3, address.w - 10, address.h - 6});
     int cursor_x = address.x + 6 + appui_text_width(shown_url);
     if (cursor_x < address.x + address.w - 5)
         appui_fill(pixels, w, h, (struct appui_rect){cursor_x, address.y + 5, 1, 17},
-                   THEME_FOCUS);
-    struct appui_rect go = {w - 68, 10, 58, 28};
+                   UI_ACCENT_FILL);
+    struct appui_rect go = go_rect();
     appui_button_ex(pixels, w, h, go, "Go", APPUI_BTN_PRIMARY,
                     appui_pointer_state(go, pointer_x, pointer_y,
                                         pointer_buttons));
     draw_page();
-    appui_fill(pixels, w, h, (struct appui_rect){0, h - 22, w, 22}, THEME_TOOLBAR_BG);
-    appui_text(pixels, w, h, 10, h - 18, status, THEME_TEXT_DIM, -1,
-               (struct appui_rect){8, h - 21, w - 16, 20});
+    appui_fill(pixels, w, h, (struct appui_rect){0, h - 22, w, 22},
+               UI_BG_LAYER);
+    appui_separator(pixels, w, h, 0, h - 22, w, 0);
+    appui_label(pixels, w, h, (struct appui_rect){10, h - 22, w - 20, 22},
+                status, UI_FONT_CAPTION, UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
 }
 
 static void remember_url(void) {
@@ -847,9 +861,9 @@ static void mouse(int x, int y, int buttons, int wheel) {
     if (wheel)
         scroll_y -= wheel * 44;
     if (pressed) {
-        if (appui_inside(x, y, (struct appui_rect){8, 10, 58, 28}))
+        if (appui_inside(x, y, back_rect()))
             go_back();
-        else if (appui_inside(x, y, (struct appui_rect){w - 68, 10, 58, 28}))
+        else if (appui_inside(x, y, go_rect()))
             load_url(1);
     }
     prev_buttons = buttons;

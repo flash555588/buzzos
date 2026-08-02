@@ -229,9 +229,15 @@ static void fill_canvas(int x, int y, int c) {
     }
 }
 
+/* Tools that have an honest glyph use one; brush and erase have no icon in the
+ * set, and a wrong glyph reads worse than the word, so they keep their label. */
+static const int tool_icon[5] = {
+    -1, -1, UI_ICON_MINUS, UI_ICON_MAXIMIZE, UI_ICON_GRID,
+};
+
 static void render(void) {
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, 70}, THEME_TOOLBAR_BG);
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, UI_BG_SOLID);
+    appui_toolbar(pixels, w, h, (struct appui_rect){0, 0, w, 70});
     const char *tools[] = {"Brush", "Erase", "Line", "Rect", "Fill"};
     const char *tools_short[] = {"B", "E", "Line", "Rect", "Fill"};
     int bw = toolbar_button_w();
@@ -240,9 +246,12 @@ static void render(void) {
         int state = appui_pointer_state(r, pointer_x, pointer_y, pointer_buttons);
         if (tool == i)
             state |= APPUI_STATE_SELECTED;
-        appui_button_ex(pixels, w, h, r,
-                        bw < 54 ? tools_short[i] : tools[i],
-                        APPUI_BTN_DEFAULT, state);
+        if (tool_icon[i] >= 0)
+            appui_icon_button(pixels, w, h, r, tool_icon[i], state);
+        else
+            appui_button_ex(pixels, w, h, r,
+                            bw < 54 ? tools_short[i] : tools[i],
+                            APPUI_BTN_DEFAULT, state);
     }
     struct appui_rect clear = clear_rect();
     appui_button_ex(pixels, w, h, clear, bw < 54 ? "Clr" : "Clear",
@@ -251,15 +260,16 @@ static void render(void) {
                                         pointer_buttons));
     for (int i = 0; i < palette_count(); i++) {
         struct appui_rect r = color_rect(i);
-        int edge = palette[i] == color ? THEME_FOCUS : THEME_FIELD_BORDER;
-        appui_fill(pixels, w, h, r, edge);
-        appui_fill(pixels, w, h,
-                   (struct appui_rect){r.x + 2, r.y + 2, r.w - 4, r.h - 4},
-                   palette[i]);
-        if (i == color)
-            appui_border(pixels, w, h,
-                         (struct appui_rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
-                         THEME_TEXT, THEME_DESKTOP_DEEP);
+        int selected = (i == (int)color);
+        /* Swatch keeps its own color; selection is a ring around it. */
+        appui_fill_round_r(pixels, w, h, r, UI_RADIUS_CONTROL, palette[i]);
+        appui_stroke_round(pixels, w, h, r, UI_RADIUS_CONTROL,
+                           selected ? UI_ACCENT_FILL : UI_STROKE_CONTROL);
+        if (selected)
+            appui_stroke_round(pixels, w, h,
+                               (struct appui_rect){r.x - 2, r.y - 2, r.w + 4,
+                                                   r.h + 4},
+                               UI_RADIUS_CONTROL + 2, UI_ACCENT_FILL);
     }
 
     int view_w = appui_max(1, w - CX * 2);
@@ -268,7 +278,7 @@ static void render(void) {
     if (view_h > CANVAS_MAX_H) view_h = CANVAS_MAX_H;
     appui_fill(pixels, w, h,
                (struct appui_rect){CX - 1, CY - 1, view_w + 2, view_h + 2},
-               THEME_FIELD_BORDER);
+               UI_STROKE_CONTROL);
     for (int y = 0; y < view_h; y++)
         for (int x = 0; x < view_w; x++)
             pixels[(CY + y) * w + CX + x] = canvas[y * canvas_stride + x];
@@ -306,7 +316,7 @@ static void render_canvas_view(void) {
     int view_h = canvas_view_h();
     appui_fill(pixels, w, h,
                (struct appui_rect){CX - 1, CY - 1, view_w + 2, view_h + 2},
-               THEME_FIELD_BORDER);
+               UI_STROKE_CONTROL);
     for (int y = 0; y < view_h; y++)
         for (int x = 0; x < view_w; x++)
             pixels[(CY + y) * w + CX + x] = canvas[y * canvas_stride + x];

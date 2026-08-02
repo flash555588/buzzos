@@ -38,6 +38,7 @@ KERNEL_SRCS := \
 	src/kernel/syscall/sys_shm.c \
 	src/kernel/syscall/sys_audio.c \
 	src/kernel/syscall/sys_gfx.c \
+	src/kernel/syscall/sys_gpu3d.c \
 	src/kernel/fs/vfs.c \
 	src/kernel/fs/ramfs.c \
 	src/kernel/fs/devfs.c \
@@ -63,6 +64,7 @@ KERNEL_SRCS := \
 	src/kernel/drv/console.c \
 	src/kernel/drv/fb.c \
 	src/kernel/drv/virtio_gpu.c \
+	src/kernel/drv/virtio_gpu_3d.c \
 	src/kernel/drv/reboot.c \
 	src/kernel/drv/pcnet.c \
 	src/kernel/drv/ne2000.c
@@ -157,6 +159,7 @@ SOCKETLEAK_ELF := $(BUILD)/user/socketleak.elf
 NETSTRESS_ELF := $(BUILD)/user/netstress.elf
 HEAPTEST_ELF := $(BUILD)/user/heaptest.elf
 AUDIOTEST_ELF := $(BUILD)/user/audiotest.elf
+GPUTEST_ELF := $(BUILD)/user/gputest.elf
 NSPORTTEST_ELF := $(BUILD)/user/nsporttest.elf
 NETSURF_PORT_OBJ := $(BUILD)/user/netsurf_buzzos_platform.o
 NSHTMLTEST_ELF := $(BUILD)/user/nshtmltest.elf
@@ -204,10 +207,10 @@ LUA_EXAMPLE := examples/hello.lua
 DEMO_WAV := $(BUILD)/assets/buzzos-demo.wav
 DEMO_MP3 := $(BUILD)/assets/buzzos-demo.mp3
 DEMO_MP3_SRC := assets/buzzos-demo.mp3
-USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(NETSTRESS_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(LUA_ELF) $(GUI_APP_ELFS)
-USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/netstress.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
+USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(NETSTRESS_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(GPUTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(LUA_ELF) $(GUI_APP_ELFS)
+USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/netstress.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/gputest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
 USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c src/user/libc/setjmp.asm
-USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/palette.h src/user/libc/appui.h src/user/libc/setjmp.h src/kernel/drv/font_builtin.h
+USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/palette.h src/user/libc/appui.h src/user/libc/uikit.h src/user/libc/uikit_text.h src/user/libc/uikit_icon.h src/user/libc/virgl.h src/user/libc/setjmp.h src/kernel/drv/font_builtin.h
 INITRD_H := $(GENERATED_DIR)/initrd.h
 APP_REGISTRY_H := $(GENERATED_DIR)/app_registry.h
 BASM_EXAMPLE := examples/basm-full.asm
@@ -217,7 +220,7 @@ FONT_H := src/kernel/drv/font_builtin.h
 UNICODE_FONT_H := src/kernel/drv/font_unicode_data.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
-.PHONY: all clean help doctor run run-hda run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify image-reset-fs new-app doom-install gameboy-install music-install
+.PHONY: all clean help doctor uikit-test run run-hda run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify image-reset-fs new-app doom-install gameboy-install music-install
 
 # These objects are prerequisites of pattern-built user ELFs, not disposable
 # intermediates. Keeping them makes source timestamp changes rebuild reliably.
@@ -531,7 +534,7 @@ $(INITRD_H): Makefile $(USER_ELFS) $(DEMO_WAV) $(DEMO_MP3) tools/mkinitrd.py
 		/bin/bcc $(BCC_ELF) /bin/lua $(LUA_ELF) \
 		/bin/futexhold $(FUTEXHOLD_ELF) /bin/cat $(CAT_ELF) /bin/echo $(ECHO_ELF) \
 		/bin/faulttest $(FAULTTEST_ELF) /bin/socketleak $(SOCKETLEAK_ELF) \
-		/bin/heaptest $(HEAPTEST_ELF) /bin/audiotest $(AUDIOTEST_ELF) \
+		/bin/heaptest $(HEAPTEST_ELF) /bin/audiotest $(AUDIOTEST_ELF) /bin/gputest $(GPUTEST_ELF) \
 		/bin/nsporttest $(NSPORTTEST_ELF) \
 		/bin/nshtmltest $(NSHTMLTEST_ELF) \
 		/bin/netsurf $(NETSURF_ELF) \
@@ -556,7 +559,7 @@ doctor:
 	$(PYTHON) tools/doctor.py --python "$(PYTHON)" --make "$(MAKE)" --qemu "$(QEMU)"
 
 run: $(IMAGE)
-	$(QEMU) $(QEMU_COMMON) -serial stdio
+	$(QEMU) $(QEMU_COMMON) -serial stdio -device virtio-vga-gl
 
 run-hda: $(IMAGE)
 	$(QEMU) $(QEMU_HDA_COMMON) -serial stdio
@@ -607,10 +610,16 @@ fs-check-repair: fs-check-smoke
 gui-smoke: $(IMAGE)
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)" -PythonPath "$(PYTHON)"
 
+# The uikit rendering kernel is freestanding integer pixel math over a
+# caller-supplied buffer, so it can be checked on the host without booting.
+uikit-test: tests/uikit_test.c $(USER_HEADERS)
+	gcc -std=c11 -O1 -w -Isrc/user/libc -o $(BUILD)/uikit_test tests/uikit_test.c
+	$(BUILD)/uikit_test
+
 report: $(IMAGE)
 	$(PYTHON) tools/project_report.py --out "$(BUILD)/project-report.md" --print --python "$(PYTHON)" --make "$(MAKE)" --qemu "$(QEMU)"
 
-verify: check-project smoke fs-check-smoke fs-check-negative fs-check-repair gui-smoke
+verify: check-project uikit-test smoke fs-check-smoke fs-check-negative fs-check-repair gui-smoke
 
 image-reset-fs: $(OBJDIR)/kernel.elf tools/mkbootimg.py $(LIMINE_BIOS_SYS) $(LIMINE_TOOL)
 	$(PYTHON) tools/mkbootimg.py \

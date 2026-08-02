@@ -161,16 +161,28 @@ static int missing_wad_loop(void) {
         if (appui_pixels_ensure(&pixels, &pixels_cap, w, h,
                                 GUIAPP_MAX_W, GUIAPP_MAX_H) < 0)
             break;
-        appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, appui_gray(2));
-        appui_text(pixels, w, h, 28, 28, "DOOM engine is ready", THEME_TEXT, -1,
-                   (struct appui_rect){20, 20, w - 40, 28});
-        appui_text(pixels, w, h, 28, 72, "Game data was not found:", appui_rgb6(5, 3, 1), -1,
-                   (struct appui_rect){20, 64, w - 40, 28});
-        appui_text(pixels, w, h, 28, 104, DEFAULT_WAD, THEME_TEXT, appui_gray(1),
-                   (struct appui_rect){20, 96, w - 40, 30});
-        appui_text(pixels, w, h, 28, 150,
-                   "Install the shareware doom1.wad, then reopen DOOM.", THEME_TEXT, -1,
-                   (struct appui_rect){20, 142, w - 40, 28});
+        /* Empty state: icon, title, then the detail that tells the
+         * user what to do about it. */
+        appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
+        {
+            int cx = w / 2;
+            int top = h / 2 - 96;
+            appui_icon(pixels, w, h, UI_ICON_GAMEPAD,
+                       (struct appui_rect){cx - 24, top, 48, 48}, 48,
+                       UI_TEXT_TERTIARY);
+            appui_label(pixels, w, h,
+                        (struct appui_rect){20, top + 64, w - 40, 30},
+                        "Game data required", UI_FONT_TITLE,
+                        UI_TEXT_PRIMARY, UI_ALIGN_CENTER);
+            appui_label(pixels, w, h,
+                        (struct appui_rect){20, top + 100, w - 40, 24},
+                        DEFAULT_WAD, UI_FONT_BODY, UI_SYS_CAUTION,
+                        UI_ALIGN_CENTER);
+            appui_label(pixels, w, h,
+                        (struct appui_rect){20, top + 128, w - 40, 24},
+                        "Install the shareware doom1.wad, then reopen DOOM.",
+                        UI_FONT_BODY, UI_TEXT_SECONDARY, UI_ALIGN_CENTER);
+        }
         if (guiapp_send_frame(&gui, "DOOM - WAD required", w, h, pixels) < 0)
             break;
     }

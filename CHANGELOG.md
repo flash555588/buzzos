@@ -7,6 +7,57 @@ short log for reviewers and contributors; deeper design notes live under
 
 ## Unreleased
 
+### Desktop Visual Overhaul (Modern Desktop)
+
+- Added `src/user/libc/uikit.h` (+ `uikit_text.h`, `uikit_icon.h`), a rendering
+  kernel with anti-aliased arbitrary-radius rounded rects, per-corner radii,
+  gradients, soft shadows, acrylic blur, an integer AA line/arc rasteriser, and
+  31 monoline chrome icons drawn from a normalized path table.
+- Reworked `palette.h` into design tokens (`UI_*`): accent ramp around
+  `#0078D4`, mica/layer/acrylic surfaces, control and stroke states, radii,
+  elevation and motion constants. Legacy `THEME_*` macros are retained as
+  aliases so every application tracked the new theme before being migrated.
+- Rebuilt `appui.h` on top of uikit, keeping the whole existing call surface.
+  Added list rows, tabs, checkbox, progress, cards, toolbars, icon buttons,
+  scrim, and a **shared scrollbar** whose thumb geometry is used by both the
+  painter and hit-testing — six applications previously each derived that math
+  twice.
+- Restructured `/bin/gui` to the modern desktop layout: no top bar, full-width 48px
+  acrylic taskbar with centred Start and window buttons, tray with IME badge
+  and clock, Start menu flyout with a pinned app grid, 8px rounded window
+  corners with 46×32 caption buttons, Themed context menu and IME panel, thin
+  scrollbars, and a gradient wallpaper with a separable bloom.
+- Added edge snap: dragging a window into the top maximises, into the left or
+  right halves the work area, with a translucent accent preview during the
+  drag. `work_area()` is now the single source of truth for maximised bounds.
+- Taskbar and Start geometry are produced once and consumed by both the painter
+  and the hit tester, so a layout change cannot desynchronise clicks from
+  pixels.
+- Text is deliberately **not** auto-scaled: `appui_text` still draws on the
+  native KFONT grid because Terminal, TextEdit, LuaIDE and Browser use it for
+  character-cell layout. Scaled UI sizes are reached via `appui_label`.
+- Added `make uikit-test` (`tests/uikit_test.c`), a host-side regression test
+  for corner coverage, clipping, stride handling, glyph metrics, shadow seams
+  and scrollbar round-tripping. Wired into `make verify`.
+- Fixed a shadow seam: `ui_shadow` now attenuates by the **caster** rect's
+  rounded coverage rather than by the offset shadow rect, which previously left
+  the strip directly under each window covered by neither and showed a bright
+  wallpaper edge.
+- Fixed `uikit.h` not being listed in `USER_HEADERS`, so header edits did not
+  trigger a rebuild.
+
+### GPU (virgl 3D bring-up)
+
+- `virtio_gpu.c` previously read only the high feature dword, so
+  `VIRTIO_GPU_F_VIRGL` (low bit 0) was never observed. Feature negotiation now
+  reads both and accepts virgl when offered.
+- Added `virtio_gpu_3d.c` and `virgl_protocol.h`: context creation, 3D resource
+  creation, command-stream submission, and a CLEAR self-test that proved the
+  host GPU path end to end without any guest Mesa or OpenGL stack.
+- Added `SYS_GPU3D_*` syscalls (`sys_gpu3d.c`), a user-space virgl encoder
+  (`src/user/libc/virgl.h`), and `/bin/gputest`, which uploads a texture and
+  draws blended, bilinear-filtered textured quads from user space.
+
 ### Lua
 
 - Ported Lua 5.4.7 as `/bin/lua` (vendored under `src/user/third_party/lua/`).

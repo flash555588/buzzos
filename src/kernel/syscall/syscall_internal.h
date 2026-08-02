@@ -90,4 +90,19 @@ int sys_gfx_map_surface(uint32_t out_arg, uint32_t b, uint32_t c,
 int sys_gfx_present(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                     uint32_t e);
 
+int sys_gpu3d_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d,
+                   uint32_t e);
+int sys_gpu3d_resource_create(uint32_t io_arg, uint32_t b, uint32_t c,
+                              uint32_t d, uint32_t e);
+int sys_gpu3d_resource_destroy(uint32_t id, uint32_t b, uint32_t c,
+                               uint32_t d, uint32_t e);
+int sys_gpu3d_upload(uint32_t id, uint32_t packed_xy, uint32_t packed_wh,
+                     uint32_t d, uint32_t e);
+int sys_gpu3d_submit(uint32_t cmds_arg, uint32_t dwords, uint32_t c,
+                     uint32_t d, uint32_t e);
+int sys_gpu3d_present(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                      uint32_t e);
+int sys_gpu3d_scanout(uint32_t enable, uint32_t b, uint32_t c, uint32_t d,
+                      uint32_t e);
+
 #endif

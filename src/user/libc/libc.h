@@ -192,6 +192,39 @@ int  font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap);
 void gfx_set_origin(int x, int y);
 void gfx_get_origin(int *x_out, int *y_out);
 
+/* --- virgl 3D (host GPU) ---
+ *
+ * Available only to the display owner, and only when the host offers virgl.
+ * Command streams are encoded in user space (see uikit/virgl.h); the kernel
+ * owns the context, resources and their backing.  gpu3d_resource.pixels maps
+ * the resource's own backing store, so a texture upload is: write pixels,
+ * then gpu3d_upload() the damaged box -- no intermediate copy. */
+struct gpu3d_caps {
+    uint32_t available;
+    uint32_t width;
+    uint32_t height;
+    uint32_t scanout_resource;
+    uint32_t max_resources;
+    uint32_t command_capacity; /* bytes accepted by one gpu3d_submit */
+};
+struct gpu3d_resource {
+    uint32_t id;
+    uint32_t *pixels;
+    uint32_t bytes;
+    uint32_t width;
+    uint32_t height;
+};
+int gpu3d_info(struct gpu3d_caps *out);
+/* target: 0 = linear buffer (width = bytes), 2 = 2D texture. */
+int gpu3d_resource_create(uint32_t target, uint32_t format, uint32_t bind,
+                          uint32_t width, uint32_t height,
+                          struct gpu3d_resource *out);
+int gpu3d_resource_destroy(uint32_t id);
+int gpu3d_upload(uint32_t id, int x, int y, int w, int h);
+int gpu3d_submit(const uint32_t *dwords, uint32_t count);
+int gpu3d_present(int x, int y, int w, int h);
+int gpu3d_scanout(int enable);
+
 /* --- Threads --- */
 typedef void (*thread_fn)(void);
 int  spawn(thread_fn func);   /* create thread, returns tid */

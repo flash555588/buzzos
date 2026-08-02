@@ -160,23 +160,23 @@ static struct appui_rect progress_track(void) {
     return (struct appui_rect){m, layout_progress_y(), layout_w - 2 * m, 12};
 }
 
+/* Transport: two square icon buttons flanking a wider primary pill,
+ * centred as a group.  Both the painter and handle_click() read the rects from
+ * here, so the glyphs and their hit boxes cannot drift apart. */
 static void layout_buttons(struct appui_rect *restart, struct appui_rect *play,
                            struct appui_rect *stop) {
     int y = layout_button_y();
     int bh = layout_button_h();
     int m = layout_margin();
     int gap = clamp_int(layout_w / 48, 12, 24);
-    int total = layout_w - 2 * m;
-    int play_w = clamp_int(total / 3, 120, 180);
-    int side_w = (total - play_w - 2 * gap) / 2;
-    if (side_w < 96) {
-        side_w = 96;
-        play_w = total - 2 * side_w - 2 * gap;
-        if (play_w < 100) play_w = 100;
-    }
-    *restart = (struct appui_rect){m, y, side_w, bh};
-    *play = (struct appui_rect){m + side_w + gap, y, play_w, bh};
-    *stop = (struct appui_rect){m + side_w + gap + play_w + gap, y, side_w, bh};
+    int side = bh;
+    int play_w = clamp_int(layout_w / 4, 110, 170);
+    int total = 2 * side + play_w + 2 * gap;
+    int x = (layout_w - total) / 2;
+    if (x < m) x = m;
+    *restart = (struct appui_rect){x, y, side, bh};
+    *play = (struct appui_rect){x + side + gap, y, play_w, bh};
+    *stop = (struct appui_rect){x + side + gap + play_w + gap, y, side, bh};
 }
 
 static struct appui_rect play_button(void) {
@@ -787,54 +787,42 @@ static void gui_event_reader(void) {
     closed = 1;
 }
 
-static void draw_vbar(int w, int h, int x, int y, int bw, int bh, int fill_h, int color) {
+static void draw_vbar(int w, int h, int x, int y, int bw, int bh, int fill_h,
+                      uint32_t color) {
+    struct ui_surface s = appui_surface(pixels, w, h);
     if (fill_h < 1) fill_h = 1;
     if (fill_h > bh) fill_h = bh;
-    appui_fill(pixels, w, h, (struct appui_rect){x, y + bh - fill_h, bw, fill_h}, color);
+    ui_fill_round(&s, ui_rect_make(x, y + bh - fill_h, bw, fill_h),
+                  bw / 2, color);
 }
 
 static void draw_album_art(int w, int h) {
     struct appui_rect art = art_rect();
-    int accent = THEME_ACCENT;
-    int soft = THEME_ACCENT_SOFT;
-    int panel = appui_gray(1);
-    int s = art.w;
+    struct ui_surface s = appui_surface(pixels, w, h);
+    struct ui_rect box = appui_to_ui(art);
+    int s_px = art.w;
     int cx = art.x + art.w / 2;
     int cy = art.y + art.h / 2;
-    int max_r = s / 2 - 10;
+    int max_r = s_px / 2 - 10;
     if (max_r < 16) max_r = 16;
 
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){art.x + 4, art.y + 6, art.w, art.h}, appui_gray(0));
-    appui_fill_round(pixels, w, h, art, soft);
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){art.x + 3, art.y + 3, art.w - 6, art.h - 6}, panel);
+    /* Elevated art card: a real soft shadow rather than an offset dark rect. */
+    ui_shadow(&s, box, UI_RADIUS_OVERLAY, UI_ELEV_CARD_R, UI_ELEV_CARD_A, 2);
+    ui_fill_round(&s, box, UI_RADIUS_OVERLAY, UI_ACCENT_DARK1);
+    ui_fill_round(&s, ui_rect_inset(box, 3), UI_RADIUS_OVERLAY,
+                  UI_BG_MICA_ALT);
 
+    /* Vinyl grooves, accent at the rim easing to a neutral core. */
     for (int r = max_r; r >= 6; r -= 2) {
-        int c = (r > max_r * 2 / 3) ? accent :
-                (r > max_r / 3 ? THEME_ACCENT_DIM : appui_gray(4));
-        for (int dy = -r; dy <= r; dy++) {
-            for (int dx = -r; dx <= r; dx++) {
-                int d2 = dx * dx + dy * dy;
-                if (d2 <= r * r && d2 >= (r - 2) * (r - 2))
-                    appui_pixel(pixels, w, h, cx + dx, cy + dy, c);
-            }
-        }
+        uint32_t c = (r > max_r * 2 / 3) ? UI_ACCENT_FILL :
+                     (r > max_r / 3 ? UI_ACCENT_BASE : UI_STROKE_SURFACE);
+        ui_ring(&s, cx, cy, r, 1, c, 255);
     }
     {
-        int hub = clamp_int(s / 12, 5, 8);
-        int stem_h = clamp_int(s / 4, 18, 32);
-        int note_w = clamp_int(s / 10, 10, 16);
-        appui_fill_round(pixels, w, h,
-                         (struct appui_rect){cx - hub, cy - hub, hub * 2, hub * 2}, accent);
-        appui_fill(pixels, w, h, (struct appui_rect){cx + 2, cy - stem_h + 4, 3, stem_h}, THEME_TEXT);
-        appui_fill(pixels, w, h, (struct appui_rect){cx + 2, cy - stem_h + 4, note_w, 3}, THEME_TEXT);
-        appui_fill(pixels, w, h,
-                   (struct appui_rect){cx + note_w - 1, cy - stem_h + 4, 3, stem_h / 3}, THEME_TEXT);
-        appui_fill_round(pixels, w, h,
-                         (struct appui_rect){cx - note_w / 2, cy + 2, note_w + 2, note_w - 2}, THEME_TEXT);
-        appui_fill_round(pixels, w, h,
-                         (struct appui_rect){cx + note_w - 4, cy - stem_h / 2, note_w, note_w - 4}, THEME_TEXT);
+        int hub = clamp_int(s_px / 12, 5, 8);
+        int glyph = clamp_int(s_px / 3, 20, 48);
+        ui_circle(&s, cx, cy, hub, UI_ACCENT_FILL, 255);
+        ui_icon_in(&s, UI_ICON_MUSIC, box, glyph, UI_TEXT_PRIMARY, 255);
     }
 }
 
@@ -846,6 +834,7 @@ static void draw_waveform(int w, int h, uint32_t pos) {
     int area_h = layout_wave_h();
     int bar_gap, bars, bar_w, play_bar;
     uint32_t tick;
+    struct ui_surface surf = appui_surface(pixels, w, h);
     if (area_w < 40 || area_h < 24)
         return;
 
@@ -859,9 +848,10 @@ static void draw_waveform(int w, int h, uint32_t pos) {
         if (bars > WAVE_BARS) bars = WAVE_BARS;
     }
 
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){base_x - 6, base_y - 6, area_w + 12, area_h + 12},
-                     appui_gray(1));
+    ui_fill_round(&surf,
+                  ui_rect_make(base_x - 6, base_y - 6, area_w + 12,
+                               area_h + 12),
+                  UI_RADIUS_OVERLAY, UI_BG_LAYER);
 
     play_bar = 0;
     if (sample_count)
@@ -872,7 +862,8 @@ static void draw_waveform(int w, int h, uint32_t pos) {
     tick = monotonic_ms();
     for (int i = 0; i < bars; i++) {
         int src = (i * WAVE_BARS) / bars;
-        int peak, bh, x, color;
+        int peak, bh, x;
+        uint32_t color;
         if (src >= WAVE_BARS) src = WAVE_BARS - 1;
         peak = wave_peak[src];
         bh = 6 + (peak * (area_h - 10)) / 128;
@@ -882,65 +873,95 @@ static void draw_waveform(int w, int h, uint32_t pos) {
         }
         x = base_x + i * (bar_w + bar_gap);
         if (!samples)
-            color = appui_gray(4);
+            color = UI_CTRL_DISABLED;
         else if (i < play_bar)
-            color = THEME_ACCENT;
+            color = UI_ACCENT_FILL;
         else if (i == play_bar)
-            color = THEME_TEXT;
+            color = UI_TEXT_PRIMARY;
         else
-            color = appui_gray(5);
+            color = UI_STROKE_SURFACE;
         draw_vbar(w, h, x, base_y, bar_w, area_h, bh, color);
     }
 }
 
-static void draw_label(int w, int h, int x, int y, const char *text, int color, int max_w) {
+/* Chrome label.  Callers still pass the old KFONT text origin, so the box is
+ * derived from it and the glyphs are centred inside -- none of this is
+ * character-cell layout, so the scaled UI sizes are safe here. */
+static void draw_label_sz(int w, int h, int x, int y, const char *text,
+                          uint32_t color, int max_w, int size) {
     if (max_w < 24) max_w = 24;
     if (x + max_w > w - 4)
         max_w = w - 4 - x;
     if (max_w < 8)
         return;
-    appui_text(pixels, w, h, x, y, text, color, -1,
-               (struct appui_rect){x - 2, y - 8, max_w + 4, 32});
+    appui_label(pixels, w, h,
+                (struct appui_rect){x, y - 4, max_w, KFONT_HEIGHT},
+                text, size, color, UI_ALIGN_LEFT);
+}
+
+static void draw_label(int w, int h, int x, int y, const char *text,
+                       uint32_t color, int max_w) {
+    draw_label_sz(w, h, x, y, text, color, max_w, UI_FONT_BODY);
 }
 
 static void draw_progress(int w, int h, uint32_t pos) {
     struct appui_rect track = progress_track();
+    struct ui_surface s = appui_surface(pixels, w, h);
     char cur[16], tot[16];
     int fill_w = 0;
     int thumb_x;
     format_time(cur, sizeof(cur), pos);
     format_time(tot, sizeof(tot), sample_count);
-    draw_label(w, h, track.x, track.y - 28, cur, THEME_TEXT_DIM, 96);
-    {
-        int tw = appui_text_width(tot);
-        draw_label(w, h, track.x + track.w - tw, track.y - 28, tot, THEME_TEXT_DIM, tw + 8);
-    }
-    appui_fill_round(pixels, w, h, track, appui_gray(4));
+    appui_label(pixels, w, h,
+                (struct appui_rect){track.x, track.y - 32, track.w,
+                                    KFONT_HEIGHT},
+                cur, UI_FONT_CAPTION, UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
+    appui_label(pixels, w, h,
+                (struct appui_rect){track.x, track.y - 32, track.w,
+                                    KFONT_HEIGHT},
+                tot, UI_FONT_CAPTION, UI_TEXT_SECONDARY, UI_ALIGN_RIGHT);
+
+    /* Track and elapsed fill.  Same geometry the seek math inverts. */
+    appui_progress(pixels, w, h, track,
+                   sample_count ? (int)scale_u32(pos, (uint32_t)track.w,
+                                                 sample_count)
+                                : 0,
+                   track.w);
     if (sample_count)
         fill_w = (int)scale_u32(pos, (uint32_t)track.w, sample_count);
     if (fill_w > track.w) fill_w = track.w;
-    if (fill_w > 0) {
-        appui_fill_round(pixels, w, h,
-                         (struct appui_rect){track.x, track.y, fill_w, track.h}, THEME_ACCENT);
-        if (fill_w > 4)
-            appui_fill(pixels, w, h,
-                       (struct appui_rect){track.x + 2, track.y + 1, fill_w - 4, 3},
-                       THEME_ACCENT_DIM);
-    }
-    thumb_x = track.x + fill_w - 7;
+
+    /* Slider thumb: an accent disc with a ring of the page colour so it
+     * reads as floating above the track. */
+    thumb_x = track.x + fill_w;
     if (thumb_x < track.x) thumb_x = track.x;
-    if (thumb_x > track.x + track.w - 14) thumb_x = track.x + track.w - 14;
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){thumb_x, track.y - 5, 14, track.h + 10}, THEME_TEXT);
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){thumb_x + 2, track.y - 3, 10, track.h + 6},
-                     THEME_ACCENT);
+    if (thumb_x > track.x + track.w) thumb_x = track.x + track.w;
+    ui_circle(&s, thumb_x, track.y + track.h / 2, 10, UI_BG_SOLID, 255);
+    ui_circle(&s, thumb_x, track.y + track.h / 2, 8, UI_ACCENT_FILL, 255);
+    ui_circle(&s, thumb_x, track.y + track.h / 2, 4, UI_BG_SOLID, 255);
 }
 
-static void draw_icon_button(int w, int h, struct appui_rect r, const char *label, int primary) {
-    int state = appui_pointer_state(r, mouse_x, mouse_y, prev_mouse_buttons);
-    appui_button_ex(pixels, w, h, r, label,
-                    primary ? APPUI_BTN_PRIMARY : APPUI_BTN_DEFAULT, state);
+/* Restart and stop carry glyphs; play/pause keeps a word because the icon set
+ * has no play or pause glyph and a wrong one reads worse than the label. */
+static void draw_transport(int w, int h, int is_playing) {
+    struct appui_rect rb, pb, sb;
+    int state;
+    int enabled = samples != 0;
+
+    layout_buttons(&rb, &pb, &sb);
+
+    state = appui_pointer_state(rb, mouse_x, mouse_y, prev_mouse_buttons);
+    if (!enabled) state |= APPUI_STATE_DISABLED;
+    appui_icon_button(pixels, w, h, rb, UI_ICON_CHEVRON_LEFT, state);
+
+    state = appui_pointer_state(pb, mouse_x, mouse_y, prev_mouse_buttons);
+    if (!enabled) state |= APPUI_STATE_DISABLED;
+    appui_button_ex(pixels, w, h, pb, is_playing ? "Pause" : "Play",
+                    APPUI_BTN_PRIMARY, state);
+
+    state = appui_pointer_state(sb, mouse_x, mouse_y, prev_mouse_buttons);
+    if (!enabled) state |= APPUI_STATE_DISABLED;
+    appui_icon_button(pixels, w, h, sb, UI_ICON_CLOSE, state);
 }
 
 static void render_frame(int *out_w, int *out_h) {
@@ -960,9 +981,10 @@ static void render_frame(int *out_w, int *out_h) {
     int header_h = layout_header_h();
     int text_x, text_w;
 
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, appui_gray(0));
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, header_h}, appui_gray(1));
-    appui_fill(pixels, w, h, (struct appui_rect){0, header_h - 2, w, 2}, appui_gray(3));
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, UI_BG_SOLID);
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, header_h},
+               UI_BG_MICA);
+    appui_separator(pixels, w, h, 0, header_h - 1, w, 0);
 
     draw_album_art(w, h);
 
@@ -971,62 +993,61 @@ static void render_frame(int *out_w, int *out_h) {
     if (text_w < 80) {
         text_x = m;
         text_w = w - 2 * m;
-        draw_label(w, h, text_x, m + art + 8, track_title, THEME_TEXT, text_w);
-        draw_label(w, h, text_x, m + art + 36, track_artist, THEME_TEXT_DIM, text_w);
+        draw_label_sz(w, h, text_x, m + art + 8, track_title, UI_TEXT_PRIMARY,
+                      text_w, UI_FONT_BODY_LG);
+        draw_label(w, h, text_x, m + art + 36, track_artist,
+                   UI_TEXT_SECONDARY, text_w);
     } else {
         int ty = m + 8;
         int line = clamp_int(art / 5, 28, 34);
         const char *status;
-        int status_color;
-        draw_label(w, h, text_x, ty, track_title, THEME_TEXT, text_w);
-        draw_label(w, h, text_x, ty + line, track_artist, THEME_TEXT_DIM, text_w);
+        uint32_t status_color;
+        draw_label_sz(w, h, text_x, ty, track_title, UI_TEXT_PRIMARY, text_w,
+                      UI_FONT_BODY_LG);
+        draw_label(w, h, text_x, ty + line, track_artist, UI_TEXT_SECONDARY,
+                   text_w);
         if (!samples) {
             status = "No audio loaded";
-            status_color = THEME_CLOSE_RED;
+            status_color = UI_SYS_CRITICAL;
         } else if (pos >= sample_count) {
             status = "Finished";
-            status_color = THEME_TEXT_FAINT;
+            status_color = UI_TEXT_TERTIARY;
         } else if (is_playing) {
             status = "Now Playing";
-            status_color = THEME_MAX_GREEN;
+            status_color = UI_SYS_SUCCESS;
         } else {
             status = "Paused";
-            status_color = THEME_MIN_YELLOW;
+            status_color = UI_SYS_CAUTION;
         }
         draw_label(w, h, text_x, ty + line * 2, status, status_color, text_w);
         if (art >= 100)
-            draw_label(w, h, text_x, ty + line * 3, track_format, THEME_TEXT_FAINT, text_w);
+            draw_label_sz(w, h, text_x, ty + line * 3, track_format,
+                          UI_TEXT_TERTIARY, text_w, UI_FONT_CAPTION);
     }
 
     if (text_w < 80) {
         const char *status = !samples ? "No audio" :
                              pos >= sample_count ? "Finished" :
                              is_playing ? "Playing" : "Paused";
-        draw_label(w, h, m, layout_wave_y() - 26, status, THEME_TEXT_DIM, w - 2 * m);
+        draw_label(w, h, m, layout_wave_y() - 26, status, UI_TEXT_SECONDARY,
+                   w - 2 * m);
     }
 
     draw_waveform(w, h, pos);
     draw_progress(w, h, pos);
-
-    {
-        struct appui_rect rb, pb, sb;
-        layout_buttons(&rb, &pb, &sb);
-        draw_icon_button(w, h, rb, "Restart", 0);
-        draw_icon_button(w, h, pb, is_playing ? "Pause" : "Play", 1);
-        draw_icon_button(w, h, sb, "Stop", 0);
-    }
+    draw_transport(w, h, is_playing);
 
     if (w >= 680)
-        draw_label(w, h, m, layout_help_y(),
-                    "Space: play/pause   R: restart   S: stop   Click: seek",
-                    THEME_TEXT_FAINT, w - 2 * m);
+        draw_label_sz(w, h, m, layout_help_y(),
+                      "Space: play/pause   R: restart   S: stop   Click: seek",
+                      UI_TEXT_TERTIARY, w - 2 * m, UI_FONT_CAPTION);
     else if (w >= 420)
-        draw_label(w, h, m, layout_help_y(),
-                    "Space play/pause  R restart  S stop",
-                    THEME_TEXT_FAINT, w - 2 * m);
+        draw_label_sz(w, h, m, layout_help_y(),
+                      "Space play/pause  R restart  S stop",
+                      UI_TEXT_TERTIARY, w - 2 * m, UI_FONT_CAPTION);
     else
-        draw_label(w, h, m, layout_help_y(), "Space play/pause",
-                   THEME_TEXT_FAINT, w - 2 * m);
+        draw_label_sz(w, h, m, layout_help_y(), "Space play/pause",
+                      UI_TEXT_TERTIARY, w - 2 * m, UI_FONT_CAPTION);
 
     if (out_w) *out_w = w;
     if (out_h) *out_h = h;

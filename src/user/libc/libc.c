@@ -75,7 +75,10 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62,
        SYS_AUDIO_QUEUED=63, SYS_AUDIO_FLUSH=64,
        SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66, SYS_GFX_SET_MODE=67,
-       SYS_GFX_MAP_SURFACE=68, SYS_GFX_PRESENT=69 };
+       SYS_GFX_MAP_SURFACE=68, SYS_GFX_PRESENT=69,
+       SYS_GPU3D_INFO=70, SYS_GPU3D_RESOURCE_CREATE=71,
+       SYS_GPU3D_RESOURCE_DESTROY=72, SYS_GPU3D_UPLOAD=73,
+       SYS_GPU3D_SUBMIT=74, SYS_GPU3D_PRESENT=75, SYS_GPU3D_SCANOUT=76 };
 
 static void (*exit_handlers[16])(void);
 static int exit_handler_count;
@@ -345,6 +348,64 @@ int gfx_present(int x, int y, int w, int h) {
 int font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap) {
     return syscall3(SYS_FONT_GLYPH, (int)codepoint,
                     (int)(uintptr_t)bits, (int)cap);
+}
+
+int gpu3d_info(struct gpu3d_caps *out) {
+    if (!out)
+        return -1;
+    return syscall1(SYS_GPU3D_INFO, (int)(uintptr_t)out);
+}
+
+int gpu3d_resource_create(uint32_t target, uint32_t format, uint32_t bind,
+                          uint32_t width, uint32_t height,
+                          struct gpu3d_resource *out) {
+    struct {
+        uint32_t target, format, bind, width, height;
+        uint32_t id, address, bytes;
+    } raw;
+    if (!out)
+        return -1;
+    raw.target = target;
+    raw.format = format;
+    raw.bind = bind;
+    raw.width = width;
+    raw.height = height;
+    raw.id = 0;
+    raw.address = 0;
+    raw.bytes = 0;
+    if (syscall1(SYS_GPU3D_RESOURCE_CREATE, (int)(uintptr_t)&raw) < 0)
+        return -1;
+    out->id = raw.id;
+    out->pixels = (uint32_t *)(uintptr_t)raw.address;
+    out->bytes = raw.bytes;
+    out->width = width;
+    out->height = height;
+    return 0;
+}
+
+int gpu3d_resource_destroy(uint32_t id) {
+    return syscall1(SYS_GPU3D_RESOURCE_DESTROY, (int)id);
+}
+
+int gpu3d_upload(uint32_t id, int x, int y, int w, int h) {
+    uint32_t packed_xy = ((uint32_t)x & 0xFFFFu) |
+                         (((uint32_t)y & 0xFFFFu) << 16);
+    uint32_t packed_wh = ((uint32_t)w & 0xFFFFu) |
+                         (((uint32_t)h & 0xFFFFu) << 16);
+    return syscall3(SYS_GPU3D_UPLOAD, (int)id, (int)packed_xy,
+                    (int)packed_wh);
+}
+
+int gpu3d_submit(const uint32_t *dwords, uint32_t count) {
+    return syscall2(SYS_GPU3D_SUBMIT, (int)(uintptr_t)dwords, (int)count);
+}
+
+int gpu3d_present(int x, int y, int w, int h) {
+    return syscall4(SYS_GPU3D_PRESENT, x, y, w, h);
+}
+
+int gpu3d_scanout(int enable) {
+    return syscall1(SYS_GPU3D_SCANOUT, enable);
 }
 
 void gfx_set_origin(int x, int y) {

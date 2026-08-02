@@ -124,5 +124,12 @@ void syscall_init(void) {
     syscall_table[SYS_GFX_SET_MODE] = sys_gfx_set_mode;
     syscall_table[SYS_GFX_MAP_SURFACE] = sys_gfx_map_surface;
     syscall_table[SYS_GFX_PRESENT] = sys_gfx_present;
+    syscall_table[SYS_GPU3D_INFO] = sys_gpu3d_info;
+    syscall_table[SYS_GPU3D_RESOURCE_CREATE] = sys_gpu3d_resource_create;
+    syscall_table[SYS_GPU3D_RESOURCE_DESTROY] = sys_gpu3d_resource_destroy;
+    syscall_table[SYS_GPU3D_UPLOAD] = sys_gpu3d_upload;
+    syscall_table[SYS_GPU3D_SUBMIT] = sys_gpu3d_submit;
+    syscall_table[SYS_GPU3D_PRESENT] = sys_gpu3d_present;
+    syscall_table[SYS_GPU3D_SCANOUT] = sys_gpu3d_scanout;
     serial_puts("[syscall] VFS-backed syscalls ready\n");
 }

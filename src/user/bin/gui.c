@@ -1,6 +1,8 @@
 #include "libc.h"
 #include "guiapp.h"
 #include "palette.h"
+#include "uikit.h"
+#include "gpucomp.h"
 #include "pinyin_data.h"
 #include "../../kernel/drv/font_builtin.h"
 
@@ -34,17 +36,32 @@ enum {
     /* Content Y of the "Resolution" heading inside the System window. */
     STATUS_RES_HEAD_Y = 236,
     STATUS_RES_BODY_Y = 264,
-    TOPBAR_H = 36,
-    WINDOW_TITLE_H = 34,
-    DOCK_RESERVED_H = 82,
+    /* modern desktop layout: no top bar, so the work area starts at the screen top and
+     * ends at the taskbar.  WORK_TOP is kept as a named zero because window
+     * clamping, damage and maximise all measure from it. */
+    WORK_TOP = 0,
+    WINDOW_TITLE_H = UI_TITLEBAR_H,
+    TASKBAR_H = UI_TASKBAR_H,
     LAUNCHER_HEADER_H = 36,
     LAUNCHER_ROW_STEP = 42,
     LAUNCHER_ROW_H = 36,
-    DOCK_SYSTEM_STEP = 86,
-    DOCK_SYSTEM_W = 80,
-    DOCK_TASK_STEP = 146,
-    DOCK_TASK_W = 140,
-    DOCK_MORE_W = 80,
+    /* Taskbar buttons are icon-only and square-ish, as in the theme; the label
+     * moves to the hover tooltip. */
+    TB_BTN_W = UI_TASKBAR_BTN_W,
+    TB_BTN_H = UI_TASKBAR_BTN_H,
+    TB_ICON = UI_TASKBAR_ICON,
+    TB_GAP = 4,
+    TB_STEP = TB_BTN_W + TB_GAP,
+    TB_TRAY_PAD = 8,
+    TB_CLOCK_W = 92,
+    TB_MAX_ITEMS = WIN_COUNT + 8,
+    /* Start menu flyout. */
+    START_W = 480,
+    START_COLS = 4,
+    START_TILE = 96,
+    START_TILE_GAP = 8,
+    START_PAD = 20,
+    START_FOOTER_H = 56,
     CONTEXT_MENU_W = 150,
     CONTEXT_ITEM_STEP = 40,
     CONTEXT_ITEM_H = 36,
@@ -92,6 +109,9 @@ static const struct display_mode display_modes[DISPLAY_MODE_COUNT] = {
 struct window {
     const char *title;
     const char *dock_label;
+    /* Executable name, used to pick the taskbar/Start glyph.  The title is
+     * app-controlled and can change at runtime, so it is not a stable key. */
+    char app_name[24];
     struct rect r;
     struct rect restore;
     int visible;
@@ -167,8 +187,9 @@ static int app_count;
 static int app_selected;
 static int app_last_click = -1;
 static unsigned int app_last_click_tick;
-static int dock_hover = -1;
-static int dock_expanded;
+static int taskbar_hover = -1;
+static int taskbar_expanded;
+static int start_open;
 static int pointer_x;
 static int pointer_y;
 static int prev_buttons;
@@ -196,6 +217,7 @@ static int hover_status_mode = -1;
 static int hover_chrome_win = -1;
 static int hover_chrome_ctl = -1;
 static int hover_launcher_row = -1;
+static int hover_start_tile = -1;
 /* Last position actually composed into the backbuffer / scanned out.  Any
  * dirty-rect render must re-erase this spot; otherwise a later partial
  * update (common when skimming the app list's per-row hover damage) leaves
@@ -213,7 +235,10 @@ static volatile uint32_t app_frame_dirty_mask;
 static int find_caret_window(void);
 static struct rect get_caret_area(void);
 static void draw_ime(void);
+static void draw_snap_preview(void);
 static int bind_scanout(void);
+static void gpu_present_init(void);
+static void gpu_present_shutdown(void);
 
 static uint32_t scaled_scanline[APP_SURFACE_MAX_W];
 static struct rect compose_clip = {0, 0, MAX_SW, MAX_SH};
@@ -243,17 +268,6 @@ static int context_x;
 static int context_y;
 static int context_target = -1;
 static unsigned int mode_error_until;
-
-static int gray(int n) {
-    if (n < 0) n = 0;
-    if (n > 14) n = 14;
-    return 25 + n;
-}
-
-/* Rounded-corner inset tables: outer ring radius ~4px, inner (1px
- * inset) follows the same arc so a fill_round pair makes a 1px ring. */
-static const uint8_t corner_outer[4] = {3, 2, 1, 1};
-static const uint8_t corner_inner[4] = {2, 1, 1, 0};
 
 static int min_i(int a, int b) { return a < b ? a : b; }
 static int max_i(int a, int b) { return a > b ? a : b; }
@@ -326,33 +340,55 @@ static int take_damage(struct rect *out) {
     return valid;
 }
 
+/* Expand a rect to cover the drop shadow drawn around it.
+ *
+ * The pre-theme shadow was two hard bands extending 6px right and down only,
+ * so damage of (w+6, h+6) covered it.  The themed shadow is a soft blur that
+ * spreads UI_ELEV_FLYOUT_R in *every* direction, offset downward -- damaging
+ * only right and down leaves the left and top fringe unpainted, which is what
+ * smears a shadow trail across the wallpaper during a drag.  Every damage site
+ * that covers a shadow goes through here so the margin cannot drift from the
+ * blur radius again. */
+enum { WIN_SHADOW_PAD = UI_ELEV_FLYOUT_R + 6 };
+
+static struct rect shadow_bounds(struct rect r) {
+    return (struct rect){r.x - WIN_SHADOW_PAD, r.y - WIN_SHADOW_PAD,
+                         r.w + 2 * WIN_SHADOW_PAD,
+                         r.h + 2 * WIN_SHADOW_PAD};
+}
+
 /* Damage a window including its drop shadow. */
 static void win_damage(int id) {
     if (id < 0 || id >= WIN_COUNT)
         return;
-    struct rect r = windows[id].r;
-    queue_damage((struct rect){r.x, r.y, r.w + 6, r.h + 6});
+    queue_damage(shadow_bounds(windows[id].r));
 }
 
-static void dock_geometry(int *x, int *y, int *dock_w, int *task_cap);
-
-/* Damage the dock plus the tooltip/expanded-panel area above it. */
-static void dock_damage(void) {
-    int x, y, dock_w, task_cap;
-    dock_geometry(&x, &y, &dock_w, &task_cap);
-    int top = y - 42;
-    /* App reader threads can call this concurrently.  Use the maximum
-     * possible panel height instead of shared cached geometry. */
-    if (dock_expanded)
-        top = y - (16 + MAX_GUI_APPS * 42) - 8;
-    /* The dock recenters as apps open/close, so damage the complete bottom
-     * band instead of only the new bounds.  This also clears old tooltips. */
-    queue_damage((struct rect){0, top, sw, y + 68 - top});
+/* Region a window may occupy: the screen minus the taskbar.  With the top bar
+ * gone this starts at y=0, and a maximised window fills it edge to edge
+ * rather than sitting inside a margin as it did around the old
+ * floating dock. */
+static struct rect work_area(void) {
+    return (struct rect){0, WORK_TOP, sw, sh - WORK_TOP - TASKBAR_H};
 }
 
-/* Damage the IME badge (top bar) and the candidate panel area. */
+/* Damage the taskbar plus the tooltip and overflow-flyout area above it.
+ *
+ * App reader threads call this concurrently, so it derives its bounds from
+ * constants rather than from shared cached geometry: the taskbar recentres as
+ * apps open and close, and repainting the whole bottom band also clears the
+ * old tooltip and flyout in one step. */
+static void taskbar_damage(void) {
+    int overflow_h = 12 + MAX_GUI_APPS * 40 + 8;
+    int top = sh - TASKBAR_H - overflow_h - UI_ELEV_FLYOUT_R;
+    if (top < 0)
+        top = 0;
+    queue_damage((struct rect){0, top, sw, sh - top});
+}
+
+/* Damage the IME tray badge and the candidate panel area. */
 static void ime_damage(void) {
-    queue_damage((struct rect){0, 0, sw, TOPBAR_H});
+    taskbar_damage();
     /* Cover previous and next caret-adjacent panel positions. */
     if (ime_enabled && ime_length > 0) {
         struct rect caret = get_caret_area();
@@ -364,10 +400,6 @@ static void ime_damage(void) {
         int h = min_i(sh - y, panel_h + caret.h + 2 * pad + 24);
         queue_damage((struct rect){x, y, w, h});
     }
-}
-
-static void topbar_damage(void) {
-    queue_damage((struct rect){0, 0, sw, TOPBAR_H});
 }
 
 static void app_dirty_lock(int slot) {
@@ -522,6 +554,64 @@ static int write_full(int fd, const void *buf, int size) {
     return 0;
 }
 
+/* Bridge to the uikit rendering kernel.
+ *
+ * uikit draws into a surface it clips itself, so handing it compose_clip on
+ * every call keeps the shell's existing damage-driven clipping authoritative:
+ * there is one clip rect, not two that could drift apart.  The scanout may be
+ * wider than the visible width, hence the explicit stride. */
+static struct ui_surface ui_target(void) {
+    struct ui_surface s = ui_surface_stride(fb, sw, sh, fb_stride);
+    s.clip = ui_rect_intersect(s.clip,
+                               ui_rect_make(compose_clip.x, compose_clip.y,
+                                            compose_clip.w, compose_clip.h));
+    return s;
+}
+
+static struct ui_rect ui_of(struct rect r) {
+    return ui_rect_make(r.x, r.y, r.w, r.h);
+}
+
+/* Map an application to a chrome glyph.  Matching on the executable name
+ * keeps this table the only place that knows about specific apps; anything
+ * unrecognised falls back to a generic window tile rather than going blank. */
+static int app_icon_for(const char *name) {
+    static const struct {
+        const char *name;
+        uint8_t icon;
+    } table[] = {
+        {"terminal", UI_ICON_TERMINAL},
+        {"taskmanager", UI_ICON_CHART},
+        {"textedit", UI_ICON_DOCUMENT},
+        {"paint", UI_ICON_IMAGE},
+        {"calculator", UI_ICON_CALCULATOR},
+        {"filemanager", UI_ICON_FOLDER},
+        {"browser", UI_ICON_GLOBE},
+        {"doom", UI_ICON_GAMEPAD},
+        {"gameboy", UI_ICON_GAMEPAD},
+        {"music", UI_ICON_MUSIC},
+        {"luaide", UI_ICON_CODE},
+    };
+    if (!name)
+        return UI_ICON_DOCUMENT;
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        const char *a = table[i].name;
+        const char *b = name;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*a && !*b)
+            return table[i].icon;
+    }
+    return UI_ICON_DOCUMENT;
+}
+
+static int window_icon(int id) {
+    if (id == WIN_LAUNCHER)
+        return UI_ICON_GRID;
+    if (id == WIN_STATUS)
+        return UI_ICON_SETTINGS;
+    return app_icon_for(windows[id].app_name);
+}
+
 static void fill(struct rect r, int color) {
     uint32_t c = (uint32_t)color & 0x00FFFFFFu;
     if (r.x < 0) { r.w += r.x; r.x = 0; }
@@ -542,18 +632,6 @@ static void pixel(int x, int y, int color) {
     if (x >= 0 && y >= 0 && x < sw && y < sh &&
         inside(x, y, compose_clip))
         fb[y * fb_stride + x] = (uint32_t)color & 0x00FFFFFFu;
-}
-
-static void pixel_clip(int x, int y, int color, struct rect clip) {
-    if (inside(x, y, clip))
-        pixel(x, y, color);
-}
-
-static void text_clip(int x, int y, const char *s, int fg, int bg, struct rect clip);
-
-static void text(int x, int y, const char *s, int fg, int bg) {
-    struct rect clip = {0, 0, sw, sh};
-    text_clip(x, y, s, fg, bg, clip);
 }
 
 static uint32_t gui_utf8_next(const char **text) {
@@ -621,164 +699,40 @@ static int gui_text_width(const char *s) {
     return width;
 }
 
-static void text_clip(int x, int y, const char *s, int fg, int bg, struct rect clip) {
-    int line_origin = x;
-    y -= PLT_FONT_Y_SHIFT;
-    while (s && *s) {
-        uint32_t cp = gui_utf8_next(&s);
-        if (cp == '\n') {
-            y += KFONT_HEIGHT;
-            x = line_origin;
-            continue;
-        }
-        if (cp == '\t') {
-            x += gui_tab_advance(x - line_origin);
-            continue;
-        }
-        if (cp == '\r')
-            continue;
-        if (x >= clip.x + clip.w)
-            return;
-        uint8_t bits[FONT_GLYPH_BYTES];
-        const uint8_t *alpha = 0;
-        int glyph_w = KFONT_WIDTH;
-        if (cp >= KFONT_FIRST && cp < KFONT_FIRST + KFONT_COUNT) {
-            alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
-        } else if (cp >= 0x80u) {
-            glyph_w = font_glyph(cp, bits, sizeof(bits));
-            if (glyph_w <= 0) {
-                cp = '?'; glyph_w = KFONT_WIDTH;
-                alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
-            }
-        } else {
-            cp = '?'; alpha = &kfont_alpha[cp - KFONT_FIRST][0][0];
-        }
-        if (x + glyph_w > clip.x && y + KFONT_HEIGHT > clip.y &&
-            x < clip.x + clip.w && y < clip.y + clip.h) {
-        for (int py = 0; py < KFONT_HEIGHT; py++) {
-            for (int px = 0; px < glyph_w; px++) {
-                int coverage = alpha ? alpha[py * KFONT_WIDTH + px] :
-                    (((bits[py * FONT_GLYPH_STRIDE + px / 8] &
-                       (uint8_t)(0x80u >> (px & 7))) != 0) ? 255 : 0);
-                int tx = x + px;
-                int ty = y + py;
-                if (coverage >= 255) {
-                    pixel_clip(tx, ty, fg, clip);
-                } else if (coverage <= 0) {
-                    if (bg >= 0)
-                        pixel_clip(tx, ty, bg, clip);
-                } else if (inside(tx, ty, clip) && tx >= 0 && ty >= 0 &&
-                           tx < sw && ty < sh &&
-                           inside(tx, ty, compose_clip)) {
-                    int under = bg >= 0 ? bg : (int)fb[ty * fb_stride + tx];
-                    pixel(tx, ty, plt_blend(fg, under, coverage));
-                }
-            }
-        }
-        }
-        x += glyph_w;
-    }
-}
-
-static void line_h(int x, int y, int w, int color) {
-    fill((struct rect){x, y, w, 1}, color);
-}
-
-static void line_v(int x, int y, int h, int color) {
-    fill((struct rect){x, y, 1, h}, color);
-}
-
-static void border(struct rect r, int hi, int lo) {
-    line_h(r.x, r.y, r.w, hi);
-    line_v(r.x, r.y, r.h, hi);
-    line_h(r.x, r.y + r.h - 1, r.w, lo);
-    line_v(r.x + r.w - 1, r.y, r.h, lo);
-}
-
-/* Fill a rect with rounded corners; insets picks the corner arc. */
-static void fill_round_t(struct rect r, const uint8_t *insets, int color) {
-    fill((struct rect){r.x + insets[0], r.y, r.w - 2 * insets[0], r.h},
-         color);
-    for (int i = 0; i < 4; i++) {
-        int rw = r.w - 2 * insets[i];
-        fill((struct rect){r.x + insets[i], r.y + i, rw, 1}, color);
-        fill((struct rect){r.x + insets[i], r.y + r.h - 1 - i, rw, 1},
-             color);
-    }
-    fill((struct rect){r.x, r.y + 4, r.w, r.h - 8}, color);
-}
-
-static void fill_round(struct rect r, int color) {
-    fill_round_t(r, corner_outer, color);
-}
-
-/* Only the top corners are rounded (window title bars). */
-static void fill_round_top(struct rect r, const uint8_t *insets, int color) {
-    fill((struct rect){r.x, r.y + 4, r.w, r.h - 4}, color);
-    for (int i = 0; i < 4; i++)
-        fill((struct rect){r.x + insets[i], r.y + i, r.w - 2 * insets[i], 1},
-             color);
-}
-
-/* Blend RGB fg over the current backbuffer contents. */
-static void fill_blend(struct rect r, int fg, int alpha) {
-    if (r.x < 0) { r.w += r.x; r.x = 0; }
-    if (r.y < 0) { r.h += r.y; r.y = 0; }
-    if (r.x + r.w > sw) r.w = sw - r.x;
-    if (r.y + r.h > sh) r.h = sh - r.y;
-    r = intersect_rect(r, compose_clip);
-    if (r.w <= 0 || r.h <= 0)
-        return;
-    for (int yy = 0; yy < r.h; yy++) {
-        uint32_t *row = fb + (r.y + yy) * fb_stride + r.x;
-        for (int xx = 0; xx < r.w; xx++)
-            row[xx] = plt_blend((uint32_t)fg, row[xx], alpha);
-    }
-}
-
-static void fill_circle(int cx, int cy, int rad, int color) {
-    for (int dy = -rad; dy <= rad; dy++) {
-        for (int dx = -rad; dx <= rad; dx++) {
-            if (dx * dx + dy * dy <= rad * rad)
-                pixel(cx + dx, cy + dy, color);
-        }
-    }
-}
-
-/* Soft drop shadow: two blended black layers, 6px max extent (matches
- * the +6 damage margin used by window move/resize code). */
-static void shadow(struct rect r) {
-    fill_blend((struct rect){r.x + 6, r.y + r.h, r.w, 6}, 0, 55);
-    fill_blend((struct rect){r.x + r.w, r.y + 6, 6, r.h}, 0, 55);
-    fill_blend((struct rect){r.x + 3, r.y + r.h, r.w, 3}, 0, 120);
-    fill_blend((struct rect){r.x + r.w, r.y + 3, 3, r.h}, 0, 120);
-}
-
+/* Themed button: a filled rounded rect with a hairline stroke, accent-filled
+ * when it is the default action.  Accent fills use the light end of the ramp
+ * with black text, which is what makes a the theme primary button read as bright
+ * rather than navy. */
 static void button_state(struct rect r, const char *label, int active,
                          int disabled) {
+    struct ui_surface s = ui_target();
+    struct ui_rect box = ui_of(r);
     int hovered = !disabled && inside(pointer_x, pointer_y, r);
     int pressed = hovered && (prev_buttons & 1);
-    int bg = active ? THEME_ACCENT_DIM :
-             hovered ? THEME_WIN_HOVER : THEME_WIN_CONTROL;
-    int edge = active ? THEME_ACCENT :
-               hovered ? THEME_FIELD_BORDER : THEME_WIN_BORDER_INACT;
-    int fg = THEME_TEXT;
-    if (pressed)
-        bg = active ? THEME_ACCENT_SOFT : THEME_WIN_PRESSED;
+    uint32_t bg, edge, fg;
+    struct ui_text_style ts;
+
     if (disabled) {
-        bg = THEME_PANEL_RAISED;
-        edge = THEME_DIVIDER;
-        fg = THEME_TEXT_FAINT;
+        bg = UI_CTRL_DISABLED;
+        edge = UI_STROKE_CONTROL;
+        fg = UI_TEXT_DISABLED;
+    } else if (active) {
+        bg = pressed ? UI_ACCENT_FILL_PRESS
+                     : (hovered ? UI_ACCENT_FILL_HOVER : UI_ACCENT_FILL);
+        edge = UI_ACCENT_DARK1;
+        fg = UI_TEXT_ON_ACCENT;
+    } else {
+        bg = pressed ? UI_CTRL_PRESSED
+                     : (hovered ? UI_CTRL_HOVER : UI_CTRL_REST);
+        edge = UI_STROKE_CONTROL;
+        fg = pressed ? UI_TEXT_SECONDARY : UI_TEXT_PRIMARY;
     }
-    fill_round_t(r, corner_outer, edge);
-    fill_round_t((struct rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
-                 corner_inner, bg);
-    int label_w = gui_text_width(label);
-    int label_x = label_w <= r.w - 8 ? r.x + (r.w - label_w) / 2 : r.x + 8;
-    int label_y = r.y + (r.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT +
-                  (pressed ? 1 : 0);
-    text_clip(label_x, label_y, label, fg, -1,
-              (struct rect){r.x + 4, r.y + 2, r.w - 8, r.h - 4});
+
+    ui_fill_round(&s, box, UI_RADIUS_CONTROL, bg);
+    ui_stroke_round(&s, box, UI_RADIUS_CONTROL, 1, edge, 255);
+    ts = ui_style(UI_FONT_BODY, fg);
+    ts.align = UI_ALIGN_CENTER;
+    ui_text_in(&s, ui_rect_inset(box, 6), label, ts);
 }
 
 static void button(struct rect r, const char *label, int active) {
@@ -1014,7 +968,7 @@ static int app_read_frame(int slot) {
     windows[WIN_APP_BASE + slot].title = app_sessions[slot].title[0]
         ? app_sessions[slot].title : "Application";
     if (title_changed && focus == WIN_APP_BASE + slot)
-        topbar_damage();
+        taskbar_damage();
     clamp_scroll(WIN_APP_BASE + slot);
     {
         int tw;
@@ -1029,7 +983,7 @@ static int app_read_frame(int slot) {
          * window's edge, the mouse path already damages the chrome — only
          * mark the content dirty so we do not fight a second full redraw. */
         if (title_changed)
-            dock_damage();
+            taskbar_damage();
         if (resize_win == WIN_APP_BASE + slot)
             app_note_dirty(slot, (struct rect){0, 0, source_w, source_h});
         else
@@ -1051,7 +1005,7 @@ static void app_reader_loop(int slot) {
     if (!app_sessions[slot].closing) {
         app_sessions[slot].reader_dead = 1;
         win_damage(WIN_APP_BASE + slot);
-        dock_damage();
+        taskbar_damage();
     }
 }
 
@@ -1196,6 +1150,15 @@ static void run_app_with_arg(const char *path, const char *argument) {
         default_h = 590;
     }
     windows[id].title = app_sessions[slot].title;
+    /* Remember the executable name so the taskbar can pick a glyph; the
+     * title belongs to the app and may change at any time. */
+    {
+        const char *base = path;
+        for (const char *p = path; *p; p++)
+            if (*p == '/')
+                base = p + 1;
+        copy_text(windows[id].app_name, base, sizeof(windows[id].app_name));
+    }
     windows[id].r = (struct rect){
         80 + slot * 36, 74 + slot * 34,
         min_i(default_w, sw - 120),
@@ -1273,10 +1236,10 @@ static void activate(int id) {
     }
     focus = id;
     if (old_focus != id) {
-        topbar_damage();
+        taskbar_damage();
         win_damage(old_focus);
         win_damage(id);
-        dock_damage();
+        taskbar_damage();
     }
     /* Focus can change without a pointer move (keyboard navigation, launch,
      * minimize/close).  Reconcile application hover state immediately so a
@@ -1287,8 +1250,8 @@ static void activate(int id) {
 
 static void layout(void) {
     int margin = max_i(18, sw / 48);
-    int top = TOPBAR_H;
-    int dock = DOCK_RESERVED_H;
+    int top = WORK_TOP;
+    int dock = TASKBAR_H;
     int content_h = sh - top - dock - margin * 2;
     int left_w = min_i(max_i(360, sw / 3), 620);
     int right_w = min_i(max_i(400, sw / 3), 620);
@@ -1330,99 +1293,129 @@ static void layout(void) {
     activate(WIN_LAUNCHER);
 }
 
+/* Desktop wallpaper: a blue bloom over near-black, a calm desktop backdrop.
+ *
+ * The glow is separable -- a horizontal falloff times a vertical one -- which
+ * makes it an axis-aligned elliptical gradient computable from two 1-D terms
+ * per pixel.  A true radial bloom would need a square root per pixel, and the
+ * background is repainted on every window drag, so the cost would be paid
+ * continuously for a difference nobody can see through a blur this soft. */
+static int wall_falloff(int pos, int centre, int spread) {
+    int d = pos - centre;
+    int t;
+    if (d < 0)
+        d = -d;
+    if (spread <= 0 || d >= spread)
+        return 0;
+    /* Smoothstep, so the bloom has no visible edge where it fades out. */
+    t = 255 - d * 255 / spread;
+    return t * t / 255;
+}
+
 static void draw_background(void) {
-    fill((struct rect){0, 0, sw, sh}, THEME_DESKTOP_BASE);
+    struct ui_surface s = ui_target();
+    struct ui_rect c = ui_clipped(&s, ui_rect_make(0, 0, sw, sh));
+    int cx = sw / 2;
+    int cy = sh / 3;
+    int spread_x = sw * 3 / 4;
+    int spread_y = sh * 2 / 3;
+
+    if (ui_rect_empty(c))
+        return;
+    for (int y = c.y; y < c.y + c.h; y++) {
+        int vy = wall_falloff(y, cy, spread_y);
+        uint32_t base = ui_lerp(UI_WALL_BASE, UI_WALL_MID,
+                                sh > 1 ? y * 255 / (sh - 1) : 0);
+        uint32_t *row = s.px + (size_t)y * s.stride;
+        for (int x = c.x; x < c.x + c.w; x++) {
+            int glow = wall_falloff(x, cx, spread_x) * vy / 255;
+            row[x] = glow > 0 ? ui_blend(UI_WALL_GLOW, base, (uint32_t)glow)
+                              : base;
+        }
+    }
 }
 
-static struct rect ime_badge_rect(void) {
-    return (struct rect){sw - 54, 4, 42, 28};
-}
-
-static void draw_topbar(void) {
-    fill((struct rect){0, 0, sw, TOPBAR_H}, THEME_TOPBAR);
-    fill((struct rect){0, TOPBAR_H - 1, sw, 1}, THEME_TOPBAR_BORDER);
-    int text_y = (TOPBAR_H - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT;
-    text(14, text_y, "BuzzOS", THEME_ACCENT, -1);
-    const char *title = (focus >= 0 && focus < WIN_COUNT &&
-                         windows[focus].visible &&
-                         !windows[focus].minimized && windows[focus].title)
-        ? windows[focus].title : "Desktop";
-    const char *display = sw >= 640 ? "VBE 32bpp" : "32bpp";
-    struct rect badge = ime_badge_rect();
-    int display_x = badge.x - gui_text_width(display) - 12;
-    if (display_x > 176)
-        text(display_x, text_y, display, THEME_TEXT_FAINT, -1);
-    int title_right = display_x > 176 ? display_x : badge.x - 8;
-    text_clip(120, text_y, title, THEME_TEXT_DIM, -1,
-              (struct rect){120, 3, max_i(1, title_right - 128),
-                            TOPBAR_H - 6});
-}
-
-static struct rect close_rect(int id);
-static struct rect max_rect(int id);
-static struct rect min_rect(int id);
+static struct rect caption_rect(int id, int control);
 static struct rect control_hit_rect(int id, int control);
 static int control_hovered(int id, int control);
 static int top_window_at(int x, int y);
 
+/* One caption button: subtle fill on hover, red on close, and the outer
+ * corner rounded so it sits flush inside the window frame. */
+static void draw_caption_button(struct ui_surface *s, int id, int control) {
+    struct rect b = caption_rect(id, control);
+    struct ui_rect box = ui_of(b);
+    int hovered = control_hovered(id, control);
+    int pressed = hovered && (prev_buttons & 1);
+    int is_close = control == 2;
+    int corners = is_close ? UI_CORNER_TR : 0;
+    uint32_t glyph = windows[id].active ? UI_TEXT_PRIMARY : UI_TEXT_TERTIARY;
+    int icon;
+
+    if (hovered) {
+        uint32_t fill = is_close
+            ? (pressed ? UI_CAPTION_CLOSE_PRESS : UI_CAPTION_CLOSE)
+            : (pressed ? UI_SUBTLE_PRESSED : UI_SUBTLE_HOVER);
+        ui_fill_round_mask(s, box, UI_RADIUS_WINDOW, corners, fill, 255);
+        glyph = UI_TEXT_PRIMARY;
+    }
+    if (control == 0)
+        icon = UI_ICON_MINIMIZE;
+    else if (control == 1)
+        icon = windows[id].maximized ? UI_ICON_RESTORE : UI_ICON_MAXIMIZE;
+    else
+        icon = UI_ICON_CLOSE;
+    ui_icon_in(s, icon, box, 10, glyph, 255);
+}
+
 static void draw_window_frame(int id) {
     struct window *w = &windows[id];
+    struct ui_surface s;
+    struct ui_rect frame, title;
+    struct ui_text_style ts;
+    int radius;
+
     if (!w->visible || w->minimized)
         return;
-    struct rect r = w->r;
-    shadow(r);
-    fill_round_t(r, corner_outer,
-                 w->active ? THEME_WIN_BORDER_ACT : THEME_WIN_BORDER_INACT);
-    fill_round_t((struct rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
-                 corner_inner, THEME_WIN_BODY);
-    fill_round_top((struct rect){r.x + 1, r.y + 1, r.w - 2,
-                                 WINDOW_TITLE_H - 1},
-                   corner_inner,
-                   w->active ? THEME_TITLE_ACT : THEME_TITLE_INACT);
-    line_h(r.x + 1, r.y + WINDOW_TITLE_H - 1, r.w - 2,
-           w->active ? THEME_ACCENT_SOFT : THEME_WIN_BORDER_INACT);
-    int title_y = r.y + (WINDOW_TITLE_H - KFONT_HEIGHT) / 2 +
-                  PLT_FONT_Y_SHIFT;
-    text_clip(r.x + 12, title_y, w->title,
-              w->active ? THEME_TEXT : THEME_TEXT_FAINT, -1,
-              (struct rect){r.x + 10, r.y + 3, r.w - 88,
-                            WINDOW_TITLE_H - 6});
-    struct rect mn = min_rect(id);
-    struct rect mx = max_rect(id);
-    struct rect cl = close_rect(id);
-    int idle = gray(3);
-    int mn_hover = control_hovered(id, 0);
-    int mx_hover = control_hovered(id, 1);
-    int cl_hover = control_hovered(id, 2);
-    int mn_color = w->active || mn_hover ? THEME_MIN_YELLOW : idle;
-    int mx_color = w->active || mx_hover ? THEME_MAX_GREEN : idle;
-    int cl_color = w->active || cl_hover ? THEME_CLOSE_RED : idle;
-    if (mn_hover)
-        fill_circle(mn.x + 6, mn.y + 6, 6, THEME_WIN_HOVER);
-    if (mx_hover)
-        fill_circle(mx.x + 6, mx.y + 6, 6, THEME_WIN_HOVER);
-    if (cl_hover)
-        fill_circle(cl.x + 6, cl.y + 6, 6, THEME_WIN_HOVER);
-    if (mn_hover && (prev_buttons & 1))
-        mn_color = plt_blend(THEME_MIN_YELLOW, THEME_TITLE_ACT, 150);
-    if (mx_hover && (prev_buttons & 1))
-        mx_color = plt_blend(THEME_MAX_GREEN, THEME_TITLE_ACT, 150);
-    if (cl_hover && (prev_buttons & 1)) cl_color = THEME_DANGER_DIM;
-    fill_circle(mn.x + 6, mn.y + 6, 5, mn_color);
-    fill_circle(mx.x + 6, mx.y + 6, 5, mx_color);
-    fill_circle(cl.x + 6, cl.y + 6, 5, cl_color);
-    int glyph = plt_rgb(40, 20, 20);
-    line_h(mn.x + 4, mn.y + 6, 5, gray(0));
-    border((struct rect){mx.x + 4, mx.y + 4, 5, 5}, gray(0), gray(0));
-    for (int i = 0; i < 5; i++) {
-        pixel(cl.x + 4 + i, cl.y + 4 + i, glyph);
-        pixel(cl.x + 8 - i, cl.y + 4 + i, glyph);
-    }
+    s = ui_target();
+    frame = ui_of(w->r);
+    /* A maximised window has no wallpaper around it to round against, so it
+     * squares off as it does on any modern desktop. */
+    radius = w->maximized ? 0 : UI_RADIUS_WINDOW;
+
+    if (!w->maximized)
+        ui_shadow(&s, frame, radius, UI_ELEV_FLYOUT_R,
+                  w->active ? UI_ELEV_DIALOG_A : UI_ELEV_CARD_A, 4);
+    ui_fill_round(&s, frame, radius, UI_BG_SOLID);
+    title = ui_rect_make(frame.x, frame.y, frame.w, WINDOW_TITLE_H);
+    ui_fill_round_mask(&s, title, radius, UI_CORNER_TOP,
+                       w->active ? UI_BG_LAYER : UI_BG_SOLID, 255);
+    ui_fill_a(&s, ui_rect_make(frame.x, frame.y + WINDOW_TITLE_H, frame.w, 1),
+              UI_STROKE_DIVIDER, w->active ? 255 : 160);
+
+    ts = ui_style(UI_FONT_BODY,
+                  w->active ? UI_TEXT_PRIMARY : UI_TEXT_TERTIARY);
+    ui_text_in(&s, ui_rect_make(frame.x + 12, frame.y,
+                                frame.w - 12 - 3 * UI_CAPTION_BTN_W - 8,
+                                WINDOW_TITLE_H),
+               w->title, ts);
+
+    draw_caption_button(&s, id, 0);
+    draw_caption_button(&s, id, 1);
+    draw_caption_button(&s, id, 2);
+
+    /* Outline last, so it sits above the title bar fill and the caption
+     * button hover states rather than being painted over by them. */
+    ui_stroke_round(&s, frame, radius, 1,
+                    w->active ? UI_STROKE_SURFACE : UI_STROKE_CONTROL, 255);
+
     if (!w->maximized) {
-        for (int i = 0; i < 3; i++) {
-            line_h(r.x + r.w - 18 + i * 5, r.y + r.h - 6 - i * 5,
-                   12 - i * 4, gray(4));
-        }
+        /* Resize grip: three hairlines in the bottom-right corner. */
+        for (int i = 0; i < 3; i++)
+            ui_fill_a(&s,
+                      ui_rect_make(w->r.x + w->r.w - 6 - i * 4,
+                                   w->r.y + w->r.h - 14 + i * 4, 4, 1),
+                      UI_TEXT_TERTIARY, 200);
     }
 }
 
@@ -1604,29 +1597,19 @@ static int blit_shared_1to1(int slot, const uint32_t *pixels, struct rect conten
     return copied;
 }
 
-static struct rect close_rect(int id) {
+/* Caption buttons are full-height rectangles flush with the top-right
+ * corner, not round traffic lights: full-height targets, hairline glyphs, and
+ * a red close button on hover. */
+static struct rect caption_rect(int id, int control) {
     struct rect r = windows[id].r;
-    return (struct rect){r.x + r.w - 27,
-                         r.y + (WINDOW_TITLE_H - 12) / 2, 12, 12};
-}
-
-static struct rect max_rect(int id) {
-    struct rect r = windows[id].r;
-    return (struct rect){r.x + r.w - 47,
-                         r.y + (WINDOW_TITLE_H - 12) / 2, 12, 12};
-}
-
-static struct rect min_rect(int id) {
-    struct rect r = windows[id].r;
-    return (struct rect){r.x + r.w - 67,
-                         r.y + (WINDOW_TITLE_H - 12) / 2, 12, 12};
+    /* control 0 = minimise, 1 = maximise, 2 = close, right to left. */
+    int slot = 2 - control;
+    return (struct rect){r.x + r.w - (slot + 1) * UI_CAPTION_BTN_W, r.y,
+                         UI_CAPTION_BTN_W, UI_CAPTION_BTN_H};
 }
 
 static struct rect control_hit_rect(int id, int control) {
-    struct rect visual = control == 2 ? close_rect(id) :
-                         control == 1 ? max_rect(id) : min_rect(id);
-    return (struct rect){visual.x - 4, visual.y - 5,
-                         visual.w + 8, visual.h + 10};
+    return caption_rect(id, control);
 }
 
 static int control_hovered(int id, int control) {
@@ -1805,11 +1788,11 @@ static struct rect fit_window_rect(struct rect r, int old_sw, int old_sh,
         r.h = r.h * sh / old_sh;
     }
     int max_w = max_i(WIN_MIN_W, sw - 16);
-    int max_h = max_i(WIN_MIN_H, dock_y - TOPBAR_H - 10);
+    int max_h = max_i(WIN_MIN_H, dock_y - WORK_TOP - 10);
     if (r.w > max_w) r.w = max_w;
     if (r.h > max_h) r.h = max_h;
     if (r.x < 8) r.x = 8;
-    if (r.y < TOPBAR_H + 4) r.y = TOPBAR_H + 4;
+    if (r.y < WORK_TOP + 4) r.y = WORK_TOP + 4;
     if (r.x + r.w > sw - 8) r.x = sw - 8 - r.w;
     if (r.y + r.h > dock_y - 6) r.y = dock_y - 6 - r.h;
     return r;
@@ -1817,21 +1800,18 @@ static struct rect fit_window_rect(struct rect r, int old_sw, int old_sh,
 
 static void relayout_after_mode_change(int old_sw, int old_sh) {
     int margin = max_i(18, sw / 48);
-    int content_h = sh - TOPBAR_H - DOCK_RESERVED_H - margin * 2;
+    int content_h = sh - WORK_TOP - TASKBAR_H - margin * 2;
     int left_w = min_i(max_i(360, sw / 3), 620);
     int right_w = min_i(max_i(400, sw / 3), 620);
     int launcher_h = min_i(content_h,
                            max_i(300, 126 + app_count * LAUNCHER_ROW_STEP));
-    struct rect launcher = {margin, TOPBAR_H + margin, left_w, launcher_h};
+    struct rect launcher = {margin, WORK_TOP + margin, left_w, launcher_h};
     struct rect status = {
-        sw - right_w - margin, TOPBAR_H + margin, right_w,
+        sw - right_w - margin, WORK_TOP + margin, right_w,
         min_i(content_h, max_i(460, (content_h * 2) / 3))
     };
-    int dock_x, dock_y, dock_w, task_cap;
-    dock_geometry(&dock_x, &dock_y, &dock_w, &task_cap);
-    (void)dock_x; (void)dock_w; (void)task_cap;
-    struct rect work = {8, TOPBAR_H + 4, sw - 16,
-                        dock_y - TOPBAR_H - 10};
+    int dock_y = sh - TASKBAR_H;
+    struct rect work = work_area();
 
     windows[WIN_LAUNCHER].restore = launcher;
     windows[WIN_LAUNCHER].r = windows[WIN_LAUNCHER].maximized ? work : launcher;
@@ -1856,7 +1836,7 @@ static void relayout_after_mode_change(int old_sw, int old_sh) {
     pointer_y = clamp_i(pointer_y, 0, sh - 1);
     compose_clip = (struct rect){0, 0, sw, sh};
     context_open = 0;
-    dock_expanded = 0;
+    taskbar_expanded = 0;
     drag_win = -1;
     resize_win = -1;
     scroll_drag_win = -1;
@@ -1892,7 +1872,12 @@ static int switch_display_mode(int index) {
     sh = (int)info.height;
     display_backend = info.backend;
     mode_error_until = 0;
+    /* The GPU frame texture and its viewport are sized to the old mode, and
+     * gpu_present_init retargets the compose buffer, so tear the GPU path
+     * down before rebinding and bring it back up against the new size. */
+    gpu_present_shutdown();
     (void)bind_scanout();
+    gpu_present_init();
     relayout_after_mode_change(old_sw, old_sh);
     return 0;
 }
@@ -1931,146 +1916,190 @@ static struct rect hscroll_thumb(int id) {
     return (struct rect){x, t.y, thumb_w, t.h};
 }
 
+/* Modern scrollbars are a thin rounded thumb on a near-invisible track that
+ * only fills in on hover, so the bar reads as part of the content rather than
+ * as chrome around it. */
 static void draw_scrollbars(int id) {
+    struct ui_surface s = ui_target();
+    struct rect vt, ht;
+
     clamp_scroll(id);
-    struct rect vt = vscroll_track(id);
-    struct rect ht = hscroll_track(id);
+    vt = vscroll_track(id);
+    ht = hscroll_track(id);
     /* Tracks live just outside the content clip.  Clear them on every
      * redraw so a window that shrinks from scrollable to non-scrollable does
      * not retain the previous track/thumb pixels. */
-    fill(vt, THEME_WIN_BODY);
-    fill(ht, THEME_WIN_BODY);
+    fill(vt, UI_BG_SOLID);
+    fill(ht, UI_BG_SOLID);
     if (max_scroll_y(id) > 0) {
-        struct rect vth = vscroll_thumb(id);
-        fill_round((struct rect){vth.x + 1, vth.y + 1,
-                                 vth.w - 2, vth.h - 2}, THEME_WIN_HOVER);
+        struct rect th = vscroll_thumb(id);
+        int hot = inside(pointer_x, pointer_y, vt) || scroll_drag_win == id;
+        if (hot)
+            ui_fill_round(&s, ui_of(vt), vt.w / 2, UI_BG_MICA_ALT);
+        ui_fill_round(&s,
+                      ui_rect_make(th.x + (hot ? 2 : 3), th.y + 2,
+                                   th.w - (hot ? 4 : 6), th.h - 4),
+                      3, hot ? UI_TEXT_SECONDARY : UI_TEXT_TERTIARY);
     }
     if (max_scroll_x(id) > 0) {
-        struct rect hth = hscroll_thumb(id);
-        fill_round((struct rect){hth.x + 1, hth.y + 1,
-                                 hth.w - 2, hth.h - 2}, THEME_WIN_HOVER);
-    }
-}
-
-static int launcher_icon_color(const char *name) {
-    uint32_t hash = 2166136261u;
-    while (name && *name) {
-        hash ^= (uint8_t)*name++;
-        hash *= 16777619u;
-    }
-    switch (hash % 6u) {
-    case 0: return THEME_WIN_BORDER_ACT;
-    case 1: return THEME_ACCENT_DIM;
-    case 2: return 21;
-    case 3: return THEME_MAX_GREEN;
-    case 4: return 23;
-    default: return THEME_DANGER_DIM;
+        struct rect th = hscroll_thumb(id);
+        int hot = inside(pointer_x, pointer_y, ht) || scroll_drag_win == id;
+        if (hot)
+            ui_fill_round(&s, ui_of(ht), ht.h / 2, UI_BG_MICA_ALT);
+        ui_fill_round(&s,
+                      ui_rect_make(th.x + 2, th.y + (hot ? 2 : 3),
+                                   th.w - 4, th.h - (hot ? 4 : 6)),
+                      3, hot ? UI_TEXT_SECONDARY : UI_TEXT_TERTIARY);
     }
 }
 
 static void draw_launcher(void) {
+    struct ui_surface s;
+    struct rect c, saved_clip, clip;
+    struct ui_text_style head;
+    int ox, oy, y, hover_row;
+
     if (!windows[WIN_LAUNCHER].visible || windows[WIN_LAUNCHER].minimized)
         return;
     draw_window_frame(WIN_LAUNCHER);
-    struct rect c = content_rect(WIN_LAUNCHER);
-    fill(c, THEME_WIN_BODY);
+    s = ui_target();
+    c = content_rect(WIN_LAUNCHER);
+    fill(c, UI_BG_SOLID);
     /* Same content clip as System: row fills must not paint past the body. */
-    struct rect saved_clip = compose_clip_push(c);
-    struct rect clip = c;
-    int ox = c.x - scroll_x[WIN_LAUNCHER];
-    int oy = c.y - scroll_y[WIN_LAUNCHER];
-    text_clip(ox, oy, "Installed", THEME_ACCENT, -1, clip);
-    int y = oy + LAUNCHER_HEADER_H;
+    saved_clip = compose_clip_push(c);
+    clip = c;
+    /* ui_target() snapshots compose_clip, so take it after the push. */
+    s = ui_target();
+    ox = c.x - scroll_x[WIN_LAUNCHER];
+    oy = c.y - scroll_y[WIN_LAUNCHER];
+
+    head = ui_style(UI_FONT_BODY, UI_TEXT_SECONDARY);
+    head.bold = 1;
+    ui_text_in(&s, ui_rect_make(ox, oy, c.w, LAUNCHER_HEADER_H - 8),
+               "Installed", head);
+    y = oy + LAUNCHER_HEADER_H;
     if (app_count == 0) {
-        text_clip(ox, y, "No apps in /fs/apps", THEME_TEXT_DIM, -1, clip);
+        ui_text_in(&s, ui_rect_make(ox, y, c.w, LAUNCHER_ROW_H),
+                   "No apps in /fs/apps",
+                   ui_style(UI_FONT_BODY, UI_TEXT_TERTIARY));
         compose_clip_pop(saved_clip);
         draw_scrollbars(WIN_LAUNCHER);
         return;
     }
-    int hover_row = hit_launcher_row_at(pointer_x, pointer_y);
+    hover_row = hit_launcher_row_at(pointer_x, pointer_y);
     for (int i = 0; i < app_count; i++) {
         struct rect row = launcher_row_paint_rect(i);
         struct rect visible = intersect_rect(row, clip);
-        if (visible.w <= 0 || visible.h <= 0)
-            continue;
+        struct ui_rect fill_r;
         int selected = i == app_selected;
         int hovered = i == hover_row;
-        if (selected) {
-            struct rect sel = intersect_rect(
-                (struct rect){row.x, row.y, row.w - 6, row.h}, clip);
-            if (sel.w > 0 && sel.h > 0)
-                fill_round(sel, THEME_SELECTION_SOFT);
-        } else if (hovered) {
-            struct rect hover = intersect_rect(
-                (struct rect){row.x, row.y, row.w - 6, row.h}, clip);
-            if (hover.w > 0 && hover.h > 0)
-                fill_round(hover, THEME_WIN_HOVER);
-        }
-        struct rect icon = intersect_rect(
-            (struct rect){row.x + 8, row.y + 9, 18, 18}, clip);
-        if (icon.w > 0 && icon.h > 0) {
-            fill_round(icon, selected ? THEME_ACCENT : THEME_FIELD_BORDER);
-            struct rect icon_fill = intersect_rect(
-                (struct rect){row.x + 11, row.y + 12, 12, 12}, clip);
-            if (icon_fill.w > 0 && icon_fill.h > 0)
-                fill_round(icon_fill, launcher_icon_color(apps[i].path));
-        }
-        int text_y = row.y + (row.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT;
-        text_clip(row.x + 40, text_y, apps[i].name,
-                  selected || hovered ? THEME_TEXT : THEME_TEXT_DIM, -1, clip);
+        if (visible.w <= 0 || visible.h <= 0)
+            continue;
+        fill_r = ui_rect_make(row.x, row.y, row.w - 6, row.h);
+        if (selected)
+            ui_fill_round(&s, fill_r, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
+        else if (hovered)
+            ui_fill_round(&s, fill_r, UI_RADIUS_CONTROL, UI_SUBTLE_PRESSED);
+        /* the theme marks the selected list row with an accent bar on its
+         * leading edge rather than by filling the whole row. */
+        if (selected)
+            ui_fill_round(&s, ui_rect_make(row.x + 1, row.y + row.h / 4, 3,
+                                           row.h / 2),
+                          1, UI_ACCENT_FILL);
+        ui_icon(&s, app_icon_for(apps[i].name), row.x + 14,
+                row.y + (row.h - 18) / 2, 18,
+                selected ? UI_ACCENT_FILL : UI_TEXT_SECONDARY, 255);
+        ui_text_in(&s, ui_rect_make(row.x + 42, row.y, row.w - 50, row.h),
+                   apps[i].name,
+                   ui_style(UI_FONT_BODY,
+                            selected || hovered ? UI_TEXT_PRIMARY
+                                                : UI_TEXT_SECONDARY));
     }
     compose_clip_pop(saved_clip);
     draw_scrollbars(WIN_LAUNCHER);
 }
 
+/* Themed settings pane: section headings, secondary body text, and the
+ * resolution grid.  Rows are laid out from a step derived from the line
+ * height rather than from hardcoded pixel offsets, so the pane stays aligned
+ * if the UI font size moves. */
 static void draw_status(void) {
+    struct ui_surface s;
+    struct rect c, saved_clip;
+    struct ui_text_style head, body, faint;
+    char line[96];
+    int ox, oy, step, row, mode_error, active_mode, group, start, count;
+
     if (!windows[WIN_STATUS].visible || windows[WIN_STATUS].minimized)
         return;
     draw_window_frame(WIN_STATUS);
-    struct rect c = content_rect(WIN_STATUS);
-    fill(c, THEME_WIN_BODY);
-    /* Restrict paint to the scrollable body.  button()/fill_round only honor
-     * compose_clip (not the text clip rect), so without this push the
-     * resolution grid paints through the frame onto the desktop whenever
-     * content_height exceeds the window. */
-    struct rect saved_clip = compose_clip_push(c);
-    struct rect clip = c;
-    int ox = c.x - scroll_x[WIN_STATUS];
-    int oy = c.y - scroll_y[WIN_STATUS];
-    char line[96];
-    text_clip(ox, oy, "Display", THEME_ACCENT, -1, clip);
-    copy_text(line, "resolution ", sizeof(line));
+    c = content_rect(WIN_STATUS);
+    fill(c, UI_BG_SOLID);
+    /* Restrict paint to the scrollable body.  The button and rounded-fill
+     * helpers only honour compose_clip, so without this push the resolution
+     * grid paints through the frame onto the desktop whenever content_height
+     * exceeds the window. */
+    saved_clip = compose_clip_push(c);
+    s = ui_target();
+    ox = c.x - scroll_x[WIN_STATUS];
+    oy = c.y - scroll_y[WIN_STATUS];
+    step = ui_line_height(UI_FONT_BODY) + 6;
+
+    head = ui_style(UI_FONT_BODY_LG, UI_TEXT_PRIMARY);
+    head.bold = 1;
+    body = ui_style(UI_FONT_BODY, UI_TEXT_SECONDARY);
+    faint = ui_style(UI_FONT_BODY, UI_TEXT_TERTIARY);
+
+#define STATUS_ROW(n) ui_rect_make(ox, oy + (n) * step, c.w, step)
+    row = 0;
+    ui_text_in(&s, STATUS_ROW(row++), "Display", head);
+    copy_text(line, "Resolution ", sizeof(line));
     append_uint(line, (unsigned int)sw, sizeof(line));
     append_text(line, " x ", sizeof(line));
     append_uint(line, (unsigned int)sh, sizeof(line));
     append_text(line, "  (", sizeof(line));
     append_aspect(line, sizeof(line), sw, sh);
     append_text(line, ")", sizeof(line));
-    text_clip(ox, oy + 32, line, THEME_TEXT_DIM, -1, clip);
-    text_clip(ox, oy + 60,
-              display_backend == GFX_BACKEND_VIRTIO_GPU_2D
-                  ? "VirtIO GPU 2D / 32bpp"
-                  : "Bochs VBE / 32bpp",
-              THEME_TEXT_FAINT, -1, clip);
-    copy_text(line, "apps ", sizeof(line));
+    ui_text_in(&s, STATUS_ROW(row++), line, body);
+    ui_text_in(&s, STATUS_ROW(row++),
+               display_backend == GFX_BACKEND_VIRTIO_GPU_2D
+                   ? "VirtIO GPU 2D / 32bpp"
+                   : "Bochs VBE / 32bpp",
+               faint);
+    {
+        struct gpu3d_caps caps;
+        if (gpu3d_info(&caps) == 0 && caps.available)
+            ui_text_in(&s, STATUS_ROW(row++), "virgl 3D available", faint);
+    }
+    copy_text(line, "Applications ", sizeof(line));
     append_uint(line, (unsigned int)app_count, sizeof(line));
-    text_clip(ox, oy + 88, line, THEME_TEXT_DIM, -1, clip);
-    text_clip(ox, oy + 120, "Controls", THEME_ACCENT, -1, clip);
-    text_clip(ox, oy + 150, "Ctrl+Space toggles IME", THEME_TEXT_DIM, -1, clip);
-    text_clip(ox, oy + 178, "[ ] cycle resolution", THEME_TEXT_DIM, -1, clip);
-    text_clip(ox, oy + 206, "Esc returns to shell", THEME_TEXT_DIM, -1, clip);
-    int mode_error = mode_error_until && tick < mode_error_until;
-    text_clip(ox, oy + STATUS_RES_HEAD_Y,
-              mode_error ? "Resolution unavailable" : "Resolution by aspect",
-              mode_error ? THEME_DANGER : THEME_ACCENT, -1, clip);
-    int active_mode = current_display_mode();
-    int group = 0;
-    int start = 0;
-    int count = 0;
+    ui_text_in(&s, STATUS_ROW(row++), line, body);
+
+    row++;
+    ui_text_in(&s, STATUS_ROW(row++), "Controls", head);
+    ui_text_in(&s, STATUS_ROW(row++), "Ctrl+Space toggles IME", body);
+    ui_text_in(&s, STATUS_ROW(row++), "[ ] cycle resolution", body);
+    ui_text_in(&s, STATUS_ROW(row++), "Esc returns to shell", body);
+#undef STATUS_ROW
+
+    mode_error = mode_error_until && tick < mode_error_until;
+    {
+        struct ui_text_style st = head;
+        if (mode_error)
+            st.color = UI_SYS_CRITICAL;
+        ui_text_in(&s, ui_rect_make(ox, oy + STATUS_RES_HEAD_Y, c.w,
+                                    ui_line_height(UI_FONT_BODY_LG)),
+                   mode_error ? "Resolution unavailable"
+                              : "Resolution by aspect",
+                   st);
+    }
+    active_mode = current_display_mode();
+    group = 0;
+    start = 0;
+    count = 0;
     while (display_group_at(group, &start, &count)) {
         struct rect label_r = status_group_label_rect(group);
-        text_clip(label_r.x, label_r.y + 2, display_modes[start].ratio,
-                  THEME_TEXT_FAINT, -1, clip);
+        ui_text_in(&s, ui_of(label_r), display_modes[start].ratio, faint);
         for (int i = 0; i < count; i++) {
             int mode = start + i;
             struct rect btn = status_mode_rect(mode);
@@ -2143,110 +2172,423 @@ static int collect_open_apps(int ids[MAX_GUI_APPS]) {
     return count;
 }
 
-static void dock_geometry(int *x, int *y, int *dock_w, int *task_cap) {
+/* The tray slot where a desktop shows the clock.  BuzzOS has no RTC, so it
+ * shows uptime rather than inventing a wall-clock time. */
+static void format_uptime(char *dst, size_t cap) {
+    uint32_t secs = monotonic_ms() / 1000u;
+    uint32_t h = secs / 3600u;
+    uint32_t m = (secs / 60u) % 60u;
+    uint32_t s = secs % 60u;
+    dst[0] = 0;
+    append_uint(dst, h, cap);
+    append_text(dst, m < 10u ? ":0" : ":", cap);
+    append_uint(dst, m, cap);
+    append_text(dst, s < 10u ? ":0" : ":", cap);
+    append_uint(dst, s, cap);
+}
+
+/* ---- Taskbar ----------------------------------------------------------
+ *
+ * Geometry is produced once, by taskbar_items(), and consumed by both the
+ * painter and the hit tester.  The previous dock computed its button rects
+ * twice from the same inputs, which meant a layout tweak had to be mirrored
+ * in two places or clicks would land on the wrong button.
+ */
+
+enum {
+    TB_NONE = 0,
+    TB_START,      /* value unused                       */
+    TB_WINDOW,     /* value = window id                  */
+    TB_OVERFLOW,   /* value unused; toggles the flyout   */
+    TB_TRAY_IME,
+    TB_TRAY_CLOCK,
+};
+
+struct tb_item {
+    uint8_t kind;
+    int16_t value;
+    struct rect r;
+};
+
+static struct rect taskbar_rect(void) {
+    return (struct rect){0, sh - TASKBAR_H, sw, TASKBAR_H};
+}
+
+/* Fill `out` with every interactive taskbar element, left to right, and
+ * return the count.  `out` must hold TB_MAX_ITEMS entries. */
+static int taskbar_items(struct tb_item *out) {
     int ids[MAX_GUI_APPS];
     int app_total = collect_open_apps(ids);
-    int system_count = WIN_APP_BASE;
-    int base_w = 18 + system_count * DOCK_SYSTEM_STEP;
-    int overflow_base = 24 + system_count * DOCK_SYSTEM_STEP + DOCK_MORE_W;
-    int max_w = min_i(1180, sw - 40);
-    if (max_w < overflow_base)
-        max_w = sw - 12;
-    int full_w = base_w + app_total * DOCK_TASK_STEP;
-    if (full_w <= max_w) {
-        *task_cap = app_total;
-        *dock_w = full_w;
-    } else {
-        *task_cap = max_i(0, (max_w - overflow_base) / DOCK_TASK_STEP);
-        *dock_w = overflow_base + *task_cap * DOCK_TASK_STEP;
-        if (*dock_w > max_w)
-            *dock_w = max_w;
+    struct rect bar = taskbar_rect();
+    int by = bar.y + (TASKBAR_H - TB_BTN_H) / 2;
+    int n = 0;
+    int tray_x = sw - TB_TRAY_PAD;
+    int clock_x, ime_x, group_w, gx, avail, shown, hidden, buttons;
+
+    /* Tray, laid out from the right edge inward. */
+    clock_x = tray_x - TB_CLOCK_W;
+    ime_x = clock_x - TB_BTN_W;
+
+    /* Button group: Start, the two system windows, then running apps. */
+    buttons = 1 + WIN_APP_BASE + app_total;
+    avail = ime_x - TB_TRAY_PAD * 2;
+    shown = app_total;
+    hidden = 0;
+    if ((1 + WIN_APP_BASE + shown) * TB_STEP > avail) {
+        int room = avail / TB_STEP - (1 + WIN_APP_BASE) - 1; /* -1 for More */
+        shown = room > 0 ? room : 0;
+        hidden = app_total - shown;
     }
-    *x = (sw - *dock_w) / 2;
-    *y = sh - 74;
-}
+    buttons = 1 + WIN_APP_BASE + shown + (hidden > 0 ? 1 : 0);
+    group_w = buttons * TB_STEP - TB_GAP;
+    /* Centre on the screen like the theme, but never under the tray. */
+    gx = (sw - group_w) / 2;
+    if (gx + group_w > ime_x - TB_TRAY_PAD)
+        gx = ime_x - TB_TRAY_PAD - group_w;
+    if (gx < TB_TRAY_PAD)
+        gx = TB_TRAY_PAD;
 
-static void draw_dock_tooltip(void) {
-    if (dock_hover < WIN_APP_BASE || dock_hover >= WIN_COUNT ||
-        !windows[dock_hover].visible)
-        return;
-    const char *title = windows[dock_hover].title;
-    int tw = min_i(sw - 16, gui_text_width(title) + 24);
-    int tx = clamp_i(pointer_x - tw / 2, 8, sw - tw - 8);
-    int ty = sh - 116;
-    struct rect tip = {tx, ty, tw, 34};
-    fill_round(tip, THEME_WIN_CONTROL);
-    fill_round((struct rect){tip.x + 1, tip.y + 1, tip.w - 2, tip.h - 2},
-               THEME_WIN_BODY);
-    int text_y = tip.y + (tip.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT;
-    text_clip(tip.x + 12, text_y, title, THEME_TEXT, -1,
-              (struct rect){tip.x + 5, tip.y + 2, tip.w - 10, tip.h - 4});
-}
-
-static void draw_dock(void) {
-    int ids[MAX_GUI_APPS];
-    int app_total = collect_open_apps(ids);
-    int x, y, dock_w, task_cap;
-    dock_geometry(&x, &y, &dock_w, &task_cap);
-    struct rect r = {x, y, dock_w, 60};
-    /* Lift the dock off the wallpaper with the same surface hierarchy as
-     * application windows. */
-    fill_blend((struct rect){r.x + 4, r.y + r.h, r.w - 4, 5}, 0, 70);
-    fill_blend((struct rect){r.x + r.w, r.y + 4, 5, r.h - 4}, 0, 70);
-    fill_round_t(r, corner_outer, THEME_FIELD_BORDER);
-    fill_round_t((struct rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2},
-                 corner_inner, THEME_PANEL_RAISED);
-    line_h(r.x + 5, r.y + 1, r.w - 10, THEME_WIN_HOVER);
-
+    out[n].kind = TB_START;
+    out[n].value = 0;
+    out[n].r = (struct rect){gx, by, TB_BTN_W, TB_BTN_H};
+    n++;
     for (int i = 0; i < WIN_APP_BASE; i++) {
-        struct rect b = {x + 12 + i * DOCK_SYSTEM_STEP, y + 10,
-                         DOCK_SYSTEM_W, 40};
-        const char *label = windows[i].dock_label
-            ? windows[i].dock_label : windows[i].title;
-        button(b, label, windows[i].active);
+        out[n].kind = TB_WINDOW;
+        out[n].value = (int16_t)i;
+        out[n].r = (struct rect){gx + n * TB_STEP, by, TB_BTN_W, TB_BTN_H};
+        n++;
     }
-
-    int shown = min_i(app_total, task_cap);
-    int task_x = x + 12 + WIN_APP_BASE * DOCK_SYSTEM_STEP;
-    if (app_total > 0)
-        line_v(task_x - 6, y + 12, 36, THEME_DIVIDER);
     for (int i = 0; i < shown; i++) {
-        int id = ids[i];
-        struct rect b = {task_x + i * DOCK_TASK_STEP, y + 10,
-                         DOCK_TASK_W, 40};
-        button(b, windows[id].title, windows[id].active);
-        if (windows[id].active)
-            fill_circle(b.x + b.w / 2, y + 55, 2, THEME_ACCENT);
+        out[n].kind = TB_WINDOW;
+        out[n].value = (int16_t)ids[i];
+        out[n].r = (struct rect){gx + n * TB_STEP, by, TB_BTN_W, TB_BTN_H};
+        n++;
     }
-    int hidden = app_total - shown;
-    if (hidden <= 0)
-        dock_expanded = 0;
     if (hidden > 0) {
-        int more_x = task_x + shown * DOCK_TASK_STEP;
-        button((struct rect){more_x, y + 10, DOCK_MORE_W, 40},
-               dock_expanded ? "Hide" : "More", dock_expanded);
+        out[n].kind = TB_OVERFLOW;
+        out[n].value = (int16_t)hidden;
+        out[n].r = (struct rect){gx + n * TB_STEP, by, TB_BTN_W, TB_BTN_H};
+        n++;
+    } else {
+        taskbar_expanded = 0;
     }
 
-    if (dock_expanded && hidden > 0) {
-        int panel_w = min_i(380, sw - 24);
-        int panel_h = 14 + hidden * 42;
-        int panel_x = clamp_i(x + dock_w - panel_w, 12,
-                              max_i(12, sw - panel_w - 12));
-        int panel_y = y - panel_h - 6;
-        struct rect panel = {panel_x, panel_y, panel_w, panel_h};
-        fill_blend((struct rect){panel.x + 4, panel.y + panel.h,
-                                 panel.w - 4, 4}, 0, 70);
-        fill_round(panel, THEME_FIELD_BORDER);
-        fill_round((struct rect){panel.x + 1, panel.y + 1,
-                                 panel.w - 2, panel.h - 2}, THEME_PANEL_RAISED);
-        for (int i = 0; i < hidden; i++) {
-            int id = ids[shown + i];
-            struct rect item = {panel_x + 7, panel_y + 7 + i * 42,
-                                panel_w - 14, 38};
-            button(item, windows[id].title, windows[id].active);
+    out[n].kind = TB_TRAY_IME;
+    out[n].value = 0;
+    out[n].r = (struct rect){ime_x, by, TB_BTN_W, TB_BTN_H};
+    n++;
+    out[n].kind = TB_TRAY_CLOCK;
+    out[n].value = 0;
+    out[n].r = (struct rect){clock_x, by, TB_CLOCK_W, TB_BTN_H};
+    n++;
+    return n;
+}
+
+/* Windows hidden behind the overflow button, in taskbar order. */
+static int taskbar_hidden_windows(int ids[MAX_GUI_APPS]) {
+    struct tb_item items[TB_MAX_ITEMS];
+    int all[MAX_GUI_APPS];
+    int total = collect_open_apps(all);
+    int count = taskbar_items(items);
+    int shown = 0, n = 0;
+    for (int i = 0; i < count; i++)
+        if (items[i].kind == TB_WINDOW && items[i].value >= WIN_APP_BASE)
+            shown++;
+    for (int i = shown; i < total; i++)
+        ids[n++] = all[i];
+    return n;
+}
+
+static struct rect taskbar_overflow_panel(int hidden) {
+    int panel_w = min_i(300, sw - 24);
+    int panel_h = 12 + hidden * 40;
+    struct tb_item items[TB_MAX_ITEMS];
+    int count = taskbar_items(items);
+    int anchor = sw - panel_w - 12;
+    for (int i = 0; i < count; i++)
+        if (items[i].kind == TB_OVERFLOW)
+            anchor = items[i].r.x + items[i].r.w - panel_w;
+    return (struct rect){clamp_i(anchor, 12, max_i(12, sw - panel_w - 12)),
+                         sh - TASKBAR_H - panel_h - 8, panel_w, panel_h};
+}
+
+static void draw_taskbar_tooltip(void) {
+    struct ui_surface s = ui_target();
+    const char *title;
+    int tw, tx, ty;
+    struct ui_rect tip;
+    if (taskbar_hover < 0 || taskbar_hover >= WIN_COUNT ||
+        !windows[taskbar_hover].visible)
+        return;
+    title = windows[taskbar_hover].title;
+    tw = min_i(sw - 16, ui_text_width(title, UI_FONT_BODY) + 24);
+    tx = clamp_i(pointer_x - tw / 2, 8, max_i(8, sw - tw - 8));
+    ty = sh - TASKBAR_H - 38;
+    tip = ui_rect_make(tx, ty, tw, 30);
+    ui_shadow(&s, tip, UI_RADIUS_CONTROL, 8, UI_ELEV_CARD_A, 2);
+    ui_fill_round(&s, tip, UI_RADIUS_CONTROL, UI_BG_LAYER);
+    ui_stroke_round(&s, tip, UI_RADIUS_CONTROL, 1, UI_STROKE_CONTROL, 255);
+    ui_text_in(&s, ui_rect_inset(tip, 8), title,
+               ui_style(UI_FONT_BODY, UI_TEXT_PRIMARY));
+}
+
+/* One taskbar button: a subtle fill when hovered, an accent underline when
+ * the window is open, and a wider one when it is the active window. */
+static void draw_tb_button(struct ui_surface *s, struct rect r, int icon,
+                           int active, int open, int hovered, int pressed) {
+    struct ui_rect box = ui_of(r);
+    uint32_t tint = UI_TEXT_PRIMARY;
+    if (pressed)
+        ui_fill_round(s, box, UI_RADIUS_CONTROL, UI_SUBTLE_PRESSED);
+    else if (active || hovered)
+        ui_fill_round(s, box, UI_RADIUS_CONTROL,
+                      active ? UI_SUBTLE_HOVER : UI_SUBTLE_PRESSED);
+    ui_icon_in(s, icon, box, TB_ICON, tint, active ? 255 : 225);
+    if (open) {
+        int w = active ? 16 : 6;
+        ui_fill_round(s, ui_rect_make(r.x + (r.w - w) / 2, r.y + r.h - 2, w, 3),
+                      1, active ? UI_ACCENT_FILL : UI_TEXT_TERTIARY);
+    }
+}
+
+static void draw_taskbar(void) {
+    struct ui_surface s = ui_target();
+    struct tb_item items[TB_MAX_ITEMS];
+    int count = taskbar_items(items);
+    struct rect bar = taskbar_rect();
+    char clock[16];
+
+    /* Acrylic: the wallpaper and any window edge under the bar show through
+     * blurred, which is the single strongest the theme cue. */
+    ui_acrylic(&s, ui_of(bar), 0, UI_BG_ACRYLIC_THIN, 190);
+    ui_fill_a(&s, ui_rect_make(bar.x, bar.y, bar.w, 1), UI_STROKE_SURFACE,
+              150);
+
+    for (int i = 0; i < count; i++) {
+        struct tb_item *it = &items[i];
+        int hovered = inside(pointer_x, pointer_y, it->r);
+        int pressed = hovered && (prev_buttons & 1);
+        switch (it->kind) {
+        case TB_START:
+            draw_tb_button(&s, it->r, UI_ICON_START, start_open, 0, hovered,
+                           pressed);
+            break;
+        case TB_WINDOW: {
+            int id = it->value;
+            draw_tb_button(&s, it->r, window_icon(id), windows[id].active,
+                           windows[id].visible, hovered, pressed);
+            break;
+        }
+        case TB_OVERFLOW:
+            draw_tb_button(&s, it->r, UI_ICON_MORE, taskbar_expanded, 0,
+                           hovered, pressed);
+            break;
+        case TB_TRAY_IME: {
+            struct ui_rect box = ui_of(it->r);
+            if (hovered)
+                ui_fill_round(&s, box, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
+            ui_icon_in(&s, UI_ICON_KEYBOARD, box, 20,
+                       ime_enabled ? UI_ACCENT_FILL : UI_TEXT_SECONDARY,
+                       255);
+            break;
+        }
+        case TB_TRAY_CLOCK: {
+            struct ui_rect box = ui_of(it->r);
+            struct ui_text_style st = ui_style(UI_FONT_CAPTION,
+                                               UI_TEXT_SECONDARY);
+            if (hovered)
+                ui_fill_round(&s, box, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
+            st.align = UI_ALIGN_CENTER;
+            format_uptime(clock, sizeof(clock));
+            ui_text_in(&s, box, clock, st);
+            break;
+        }
+        default:
+            break;
         }
     }
-    draw_dock_tooltip();
+
+    if (taskbar_expanded) {
+        int ids[MAX_GUI_APPS];
+        int hidden = taskbar_hidden_windows(ids);
+        if (hidden > 0) {
+            struct rect panel = taskbar_overflow_panel(hidden);
+            struct ui_rect p = ui_of(panel);
+            ui_shadow(&s, p, UI_RADIUS_OVERLAY, UI_ELEV_FLYOUT_R,
+                      UI_ELEV_FLYOUT_A, 4);
+            ui_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 205);
+            ui_stroke_round(&s, p, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE,
+                            255);
+            for (int i = 0; i < hidden; i++) {
+                int id = ids[i];
+                struct ui_rect row = ui_rect_make(panel.x + 6,
+                                                  panel.y + 6 + i * 40,
+                                                  panel.w - 12, 36);
+                struct rect hit = {row.x, row.y, row.w, row.h};
+                if (inside(pointer_x, pointer_y, hit))
+                    ui_fill_round(&s, row, UI_RADIUS_CONTROL,
+                                  UI_SUBTLE_HOVER);
+                ui_icon(&s, window_icon(id), row.x + 8,
+                        row.y + (row.h - 18) / 2, 18, UI_TEXT_PRIMARY, 255);
+                ui_text_in(&s, ui_rect_make(row.x + 34, row.y,
+                                            row.w - 42, row.h),
+                           windows[id].title,
+                           ui_style(UI_FONT_BODY, UI_TEXT_PRIMARY));
+            }
+        }
+    }
+    draw_taskbar_tooltip();
+}
+
+/* ---- Start menu -------------------------------------------------------
+ *
+ * Same discipline as the taskbar: the tile grid is described once and both
+ * the painter and the hit tester read it.
+ */
+
+static int start_rows(void) {
+    int rows = (app_count + START_COLS - 1) / START_COLS;
+    return rows < 1 ? 1 : rows;
+}
+
+static struct rect start_menu_rect(void) {
+    int w = min_i(START_W, sw - 24);
+    int h = START_PAD * 2 + ui_line_height(UI_FONT_BODY) + 8 +
+            start_rows() * (START_TILE + START_TILE_GAP) + START_FOOTER_H;
+    int y = sh - TASKBAR_H - h - 12;
+    if (h > sh - TASKBAR_H - 24) {
+        h = sh - TASKBAR_H - 24;
+        y = 12;
+    }
+    return (struct rect){(sw - w) / 2, y, w, h};
+}
+
+static struct rect start_tile_rect(int index) {
+    struct rect panel = start_menu_rect();
+    int grid_w = START_COLS * START_TILE + (START_COLS - 1) * START_TILE_GAP;
+    int gx = panel.x + (panel.w - grid_w) / 2;
+    int gy = panel.y + START_PAD + ui_line_height(UI_FONT_BODY) + 8;
+    int col = index % START_COLS;
+    int row = index / START_COLS;
+    return (struct rect){gx + col * (START_TILE + START_TILE_GAP),
+                         gy + row * (START_TILE + START_TILE_GAP),
+                         START_TILE, START_TILE};
+}
+
+static struct rect start_power_rect(void) {
+    struct rect panel = start_menu_rect();
+    return (struct rect){panel.x + panel.w - START_PAD - 40,
+                         panel.y + panel.h - START_PAD - 36, 40, 36};
+}
+
+static void draw_start_menu(void) {
+    struct ui_surface s;
+    struct rect panel;
+    struct ui_rect p;
+    struct ui_text_style head;
+    struct rect power;
+    struct ui_rect saved;
+
+    if (!start_open)
+        return;
+    s = ui_target();
+    panel = start_menu_rect();
+    p = ui_of(panel);
+
+    ui_shadow(&s, p, UI_RADIUS_OVERLAY, UI_ELEV_DIALOG_R, UI_ELEV_DIALOG_A,
+              6);
+    ui_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
+    ui_stroke_round(&s, p, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE, 255);
+
+    head = ui_style(UI_FONT_BODY, UI_TEXT_PRIMARY);
+    head.bold = 1;
+    ui_text_in(&s, ui_rect_make(panel.x + START_PAD, panel.y + START_PAD,
+                                panel.w - START_PAD * 2,
+                                ui_line_height(UI_FONT_BODY)),
+               "Pinned", head);
+
+    saved = ui_clip_push(&s, ui_rect_make(panel.x, panel.y, panel.w,
+                                          panel.h - START_FOOTER_H));
+    for (int i = 0; i < app_count; i++) {
+        struct rect tile = start_tile_rect(i);
+        struct ui_rect t = ui_of(tile);
+        struct ui_text_style label = ui_style(UI_FONT_CAPTION,
+                                              UI_TEXT_PRIMARY);
+        int hovered = inside(pointer_x, pointer_y, tile);
+        int pressed = hovered && (prev_buttons & 1);
+        if (pressed)
+            ui_fill_round(&s, t, UI_RADIUS_CONTROL, UI_SUBTLE_PRESSED);
+        else if (hovered)
+            ui_fill_round(&s, t, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
+        ui_icon(&s, app_icon_for(apps[i].name), tile.x + (tile.w - 32) / 2,
+                tile.y + 16, 32, UI_TEXT_PRIMARY, 255);
+        label.align = UI_ALIGN_CENTER;
+        ui_text_in(&s, ui_rect_make(tile.x + 4, tile.y + tile.h - 26,
+                                    tile.w - 8, 20),
+                   apps[i].name, label);
+    }
+    ui_clip_pop(&s, saved);
+
+    ui_fill_a(&s, ui_rect_make(panel.x + 1,
+                               panel.y + panel.h - START_FOOTER_H, panel.w - 2,
+                               1),
+              UI_STROKE_DIVIDER, 200);
+    ui_text_in(&s, ui_rect_make(panel.x + START_PAD,
+                                panel.y + panel.h - START_FOOTER_H,
+                                panel.w / 2, START_FOOTER_H),
+               "BuzzOS", ui_style(UI_FONT_BODY, UI_TEXT_SECONDARY));
+
+    power = start_power_rect();
+    {
+        struct ui_rect pw = ui_of(power);
+        int hovered = inside(pointer_x, pointer_y, power);
+        if (hovered)
+            ui_fill_round(&s, pw, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
+        ui_icon_in(&s, UI_ICON_POWER, pw, 20, UI_TEXT_SECONDARY, 255);
+    }
+}
+
+/* Returns the app index to launch, -2 for the power button, or -1 for a
+ * click that the menu swallows without acting on. */
+static int hit_start_menu(int x, int y) {
+    struct rect panel;
+    if (!start_open)
+        return -1;
+    panel = start_menu_rect();
+    if (!inside(x, y, panel))
+        return -1;
+    if (inside(x, y, start_power_rect()))
+        return -2;
+    for (int i = 0; i < app_count; i++)
+        if (inside(x, y, start_tile_rect(i)))
+            return i;
+    return -1;
+}
+
+/* Damage the Start menu plus its shadow. */
+static void start_damage(void) {
+    struct rect panel = start_menu_rect();
+    int pad = UI_ELEV_DIALOG_R + 8;
+    queue_damage((struct rect){max_i(0, panel.x - pad),
+                               max_i(0, panel.y - pad),
+                               min_i(sw, panel.w + pad * 2),
+                               min_i(sh, panel.h + pad * 2)});
+}
+
+/* Open or close the Start menu.
+ *
+ * Single point of truth for the transition: it repaints the menu region and
+ * drops the hovered-tile index.  Toggling is click-driven, so the pointer does
+ * not move and refresh_pointer_hover_damage() will not run -- a stale index
+ * left here would compare equal on reopen and the highlight under a
+ * stationary pointer would never be painted. */
+static void start_set_open(int open) {
+    if (start_open == open)
+        return;
+    start_damage();
+    start_open = open;
+    hover_start_tile = -1;
+    desktop_dirty = 1;
 }
 
 /* ---- Pinyin IME core -------------------------------------------------- */
@@ -2470,19 +2812,18 @@ static struct rect get_caret_area(void) {
 }
 
 static void draw_ime(void) {
-    const char *mode = ime_enabled ? "中" : "英";
-    struct rect badge = ime_badge_rect();
-    fill_round(badge, ime_enabled ? THEME_ACCENT_DIM : THEME_WIN_CONTROL);
-    int mode_w = gui_text_width(mode);
-    int mode_y = badge.y + (badge.h - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT;
-    text_clip(badge.x + (badge.w - mode_w) / 2, mode_y, mode,
-              THEME_TEXT, -1,
-              (struct rect){badge.x + 2, badge.y + 1,
-                            badge.w - 4, badge.h - 2});
+    struct ui_surface s = ui_target();
+    char comp[96];
+    char cands[192];
+    struct rect caret, panel;
+    struct ui_rect p;
+    int need_w, panel_w, panel_h, panel_x, panel_y;
+
+    /* The tray badge is painted by draw_taskbar; only the composition panel
+     * is drawn here, and only while composing. */
     if (!ime_enabled || ime_length == 0)
         return;
 
-    char comp[96];
     copy_text(comp, ime_buffer, sizeof(comp));
     if (ime_cand_count > IME_PAGE_SIZE) {
         append_text(comp, "  (", sizeof(comp));
@@ -2492,13 +2833,12 @@ static void draw_ime(void) {
         append_text(comp, ")", sizeof(comp));
     }
 
-    char cands[192];
     cands[0] = 0;
     for (int i = 0; i < IME_PAGE_SIZE; i++) {
         char item[GUIAPP_TEXT_MAX];
+        char number[4] = {(char)('1' + i), '.', 0, 0};
         if (!ime_candidate_at(i, item))
             break;
-        char number[4] = {(char)('1' + i), '.', 0, 0};
         if (i)
             append_text(cands, "  ", sizeof(cands));
         append_text(cands, number, sizeof(cands));
@@ -2507,50 +2847,79 @@ static void draw_ime(void) {
     if (!cands[0])
         copy_text(cands, "(no match — Space commits pinyin)", sizeof(cands));
 
-    int need_w = max_i(gui_text_width(comp), gui_text_width(cands)) + 28;
-    int panel_w = min_i(sw - 24, max_i(320, need_w));
-    int panel_h = 64;
+    need_w = max_i(ui_text_width(comp, UI_FONT_BODY),
+                   ui_text_width(cands, UI_FONT_BODY)) + 32;
+    panel_w = min_i(sw - 24, max_i(300, need_w));
+    panel_h = 60;
 
     /* OS-style: float next to the text caret of the focused app. */
-    struct rect caret = get_caret_area();
-    int panel_x = caret.x;
-    int panel_y = caret.y + caret.h + 6;
+    caret = get_caret_area();
+    panel_x = caret.x;
+    panel_y = caret.y + caret.h + 6;
     if (panel_x + panel_w > sw - 8)
         panel_x = sw - 8 - panel_w;
     if (panel_x < 8)
         panel_x = 8;
     if (panel_y + panel_h > sh - 8)
         panel_y = caret.y - panel_h - 6;
-    if (panel_y < TOPBAR_H + 4)
-        panel_y = TOPBAR_H + 4;
+    if (panel_y < WORK_TOP + 4)
+        panel_y = WORK_TOP + 4;
     if (panel_y + panel_h > sh - 8)
         panel_y = sh - 8 - panel_h;
-    struct rect panel = {panel_x, panel_y, panel_w, panel_h};
-    fill_round(panel, THEME_FIELD_BORDER);
-    fill_round((struct rect){panel.x + 1, panel.y + 1,
-                             panel.w - 2, panel.h - 2}, THEME_PANEL_RAISED);
-    struct rect clip = {panel.x + 8, panel.y + 4, panel.w - 16, panel.h - 8};
-    text_clip(panel.x + 12, panel.y + 8, comp, THEME_ACCENT, -1, clip);
-    text_clip(panel.x + 12, panel.y + 34, cands, THEME_TEXT, -1, clip);
+    panel = (struct rect){panel_x, panel_y, panel_w, panel_h};
+    p = ui_of(panel);
+
+    ui_shadow(&s, p, UI_RADIUS_OVERLAY, UI_ELEV_FLYOUT_R,
+              UI_ELEV_FLYOUT_A, 3);
+    ui_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
+    ui_stroke_round(&s, p, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE, 255);
+    ui_text_in(&s, ui_rect_make(panel.x + 12, panel.y + 6, panel.w - 24, 24),
+               comp, ui_style(UI_FONT_BODY, UI_ACCENT_FILL));
+    ui_text_in(&s, ui_rect_make(panel.x + 12, panel.y + 30, panel.w - 24, 24),
+               cands, ui_style(UI_FONT_BODY, UI_TEXT_PRIMARY));
 }
 
+/* Themed context menu: an acrylic flyout with hover rows, rather than a stack
+ * of framed buttons. */
 static void draw_context_menu(void) {
-    if (!context_open) return;
     static const char *labels[] = {"Copy", "Paste", "Cut"};
-    struct rect menu = {context_x, context_y,
-                        CONTEXT_MENU_W, CONTEXT_MENU_H};
+    static const uint8_t icons[] = {UI_ICON_DOCUMENT, UI_ICON_PLUS,
+                                    UI_ICON_MINUS};
+    struct ui_surface s;
+    struct rect menu;
+    struct ui_rect m;
+
+    if (!context_open)
+        return;
+    s = ui_target();
+    menu = (struct rect){context_x, context_y, CONTEXT_MENU_W,
+                         CONTEXT_MENU_H};
     if (menu.x + menu.w > sw) menu.x = sw - menu.w;
     if (menu.y + menu.h > sh) menu.y = sh - menu.h;
     context_x = menu.x; context_y = menu.y;
-    fill_round(menu, THEME_WIN_CONTROL);
-    fill_round((struct rect){menu.x + 1, menu.y + 1,
-                             menu.w - 2, menu.h - 2}, THEME_WIN_BODY);
+    m = ui_of(menu);
+
+    ui_shadow(&s, m, UI_RADIUS_OVERLAY, UI_ELEV_FLYOUT_R,
+              UI_ELEV_FLYOUT_A, 3);
+    ui_acrylic(&s, m, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 210);
+    ui_stroke_round(&s, m, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE, 255);
+
     for (int i = 0; i < 3; i++) {
+        struct rect row = {menu.x + 4, menu.y + 4 + i * CONTEXT_ITEM_STEP,
+                           menu.w - 8, CONTEXT_ITEM_H};
+        struct ui_rect rr = ui_of(row);
         int disabled = i == 1 && !clipboard[0];
-        button_state((struct rect){menu.x + 4,
-                                   menu.y + 4 + i * CONTEXT_ITEM_STEP,
-                                   menu.w - 8, CONTEXT_ITEM_H},
-                     labels[i], 0, disabled);
+        int hovered = !disabled && inside(pointer_x, pointer_y, row);
+        int pressed = hovered && (prev_buttons & 1);
+        uint32_t fg = disabled ? UI_TEXT_DISABLED : UI_TEXT_PRIMARY;
+        if (pressed)
+            ui_fill_round(&s, rr, UI_RADIUS_CONTROL, UI_SUBTLE_PRESSED);
+        else if (hovered)
+            ui_fill_round(&s, rr, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
+        ui_icon(&s, icons[i], row.x + 10, row.y + (row.h - 16) / 2, 16, fg,
+                disabled ? 150 : 255);
+        ui_text_in(&s, ui_rect_make(row.x + 36, row.y, row.w - 44, row.h),
+                   labels[i], ui_style(UI_FONT_BODY, fg));
     }
 }
 
@@ -2573,7 +2942,6 @@ static void draw_pointer(void) {
 
 static void compose_scene(void) {
     draw_background();
-    draw_topbar();
     for (int i = 0; i < WIN_COUNT; i++) {
         int id = z_order[i];
         if (id == WIN_LAUNCHER)
@@ -2583,7 +2951,11 @@ static void compose_scene(void) {
         else if (id >= WIN_APP_BASE)
             draw_app_window(id);
     }
-    draw_dock();
+    /* The Start menu sits above every window but below the taskbar's own
+     * acrylic, matching a conventional stacking order. */
+    draw_snap_preview();
+    draw_start_menu();
+    draw_taskbar();
     draw_ime();
     draw_context_menu();
     draw_pointer();
@@ -2606,6 +2978,86 @@ static int bind_scanout(void) {
     return -1;
 }
 
+/* ---- GPU presentation --------------------------------------------------
+ *
+ * When virgl is available the composed frame is handed to the host GPU as a
+ * texture and drawn as a quad, rather than copied to the scanout by the CPU.
+ *
+ * This is the conservative half of GPU compositing, and it is deliberate: the
+ * scene is still composed into `fb` by the software path, so every existing
+ * rule in docs/user-gui.md about damage, clipping and live resize continues to
+ * hold unchanged, and a virgl-less device keeps working by falling straight
+ * back to gfx_present.  What it buys is that the per-frame scanout copy --
+ * which on a 1280x720 desktop is 3.6 MB of CPU memcpy every full redraw --
+ * becomes a DMA the host GPU performs, and the frame arrives on a surface the
+ * GPU can filter rather than one the CPU must resample.
+ *
+ * Only the damaged sub-rect is uploaded, so a blinking caret costs a few
+ * hundred bytes rather than a full screen.
+ */
+enum { GPU_FRAME_LAYER = 1 };
+
+static int gpu_present_ready;
+
+static void gpu_present_init(void) {
+    int stride = 0;
+    uint32_t *texture;
+
+    gpu_present_ready = 0;
+    if (gpucomp_init(sw, sh) < 0)
+        return;
+    if (gpucomp_layer_ensure(GPU_FRAME_LAYER, sw, sh) < 0) {
+        gpucomp_shutdown();
+        return;
+    }
+    texture = gpucomp_layer_pixels(GPU_FRAME_LAYER, &stride);
+    if (!texture || stride <= 0) {
+        gpucomp_shutdown();
+        return;
+    }
+    /* The frame layer is the whole screen: square corners, fully opaque. */
+    gpucomp_layer_place(GPU_FRAME_LAYER, 0, 0, sw, sh, 0, 255);
+    if (gpu3d_scanout(1) < 0) {
+        gpucomp_shutdown();
+        return;
+    }
+    /* Compose directly into the texture's mapped backing.  Without this the
+     * compositor would still be writing the zero-copy scanout that the GPU is
+     * about to overwrite -- reading a surface while presenting onto it -- and
+     * it also removes the intermediate copy entirely: the scene is built
+     * straight into the memory the upload reads from. */
+    fb = texture;
+    fb_stride = stride;
+    scanout_direct = 0;
+    gpu_present_ready = 1;
+    gui_log("[gui] virgl present enabled");
+}
+
+/* Release GPU resources.  Does not rebind the compose buffer: the caller
+ * decides what fb should point at next, since the two call sites want
+ * different things (shutdown wants nothing, a mode change wants a rebind
+ * against the new geometry). */
+static void gpu_present_shutdown(void) {
+    if (!gpu_present_ready)
+        return;
+    gpu_present_ready = 0;
+    gpucomp_shutdown();
+}
+
+/* Upload the damaged rect and draw.  Returns 0 on success; the caller falls
+ * back to the software present path on anything else, so a mid-session GPU
+ * failure degrades rather than blanks the screen. */
+static int gpu_present_region(struct rect area) {
+    if (!gpu_present_ready)
+        return -1;
+    if (gpucomp_upload_rect(GPU_FRAME_LAYER, area.x, area.y, area.w,
+                            area.h) < 0)
+        return -1;
+    gpucomp_begin();
+    gpucomp_draw_layer(GPU_FRAME_LAYER);
+    return gpucomp_end(area.x, area.y, area.w, area.h);
+}
+
 static int render_region(struct rect area) {
     area = intersect_rect(area, (struct rect){0, 0, sw, sh});
     if (area.w <= 0 || area.h <= 0)
@@ -2613,6 +3065,9 @@ static int render_region(struct rect area) {
     compose_clip = area;
     compose_scene();
     compose_clip = (struct rect){0, 0, sw, sh};
+    /* Preferred path: let the host GPU move and present the frame. */
+    if (gpu_present_region(area) == 0)
+        return 0;
     if (scanout_direct)
         return gfx_present(area.x, area.y, area.w, area.h);
     /* Fallback: software backbuffer → kernel scanout copy. */
@@ -2775,9 +3230,9 @@ static void apply_resize(int id, int mx, int my) {
         r.w += r.x;
         r.x = 0;
     }
-    if (r.y < TOPBAR_H) {
-        r.h += r.y - TOPBAR_H;
-        r.y = TOPBAR_H;
+    if (r.y < WORK_TOP) {
+        r.h += r.y - WORK_TOP;
+        r.y = WORK_TOP;
     }
     if (r.x + r.w > sw)
         r.w = sw - r.x;
@@ -2885,13 +3340,10 @@ static void toggle_maximize(int id) {
         windows[id].r = windows[id].restore;
         windows[id].maximized = 0;
     } else {
-        int dock_x, dock_y, dock_w, task_cap;
-        dock_geometry(&dock_x, &dock_y, &dock_w, &task_cap);
         windows[id].restore = windows[id].r;
-        /* Keep maximized content inside the desktop work area instead of
-         * extending underneath the Deck. */
-        windows[id].r = (struct rect){8, TOPBAR_H + 4, sw - 16,
-                                     dock_y - TOPBAR_H - 10};
+        /* Fill the work area; the taskbar is reserved, everything else is
+         * available. */
+        windows[id].r = work_area();
         windows[id].maximized = 1;
     }
     clamp_scroll(id);
@@ -2917,44 +3369,134 @@ static int hit_scrollbar(int x, int y, int *axis_out) {
     return -1;
 }
 
-static int hit_dock(int x, int y) {
-    int ids[MAX_GUI_APPS];
-    int app_total = collect_open_apps(ids);
-    int dx, dy, dock_w, task_cap;
-    dock_geometry(&dx, &dy, &dock_w, &task_cap);
-    int shown = min_i(app_total, task_cap);
-    int hidden = app_total - shown;
-    if (dock_expanded && hidden > 0) {
-        int panel_w = min_i(380, sw - 24);
-        int panel_h = 14 + hidden * 42;
-        int panel_x = clamp_i(dx + dock_w - panel_w, 12,
-                              max_i(12, sw - panel_w - 12));
-        int panel_y = dy - panel_h - 6;
-        for (int i = 0; i < hidden; i++) {
-            struct rect item = {panel_x + 7, panel_y + 7 + i * 42,
-                                panel_w - 14, 38};
-            if (inside(x, y, item))
-                return ids[shown + i];
+/* Non-window taskbar hits, kept above the window-id range so callers can keep
+ * testing `>= 0` for "a window was clicked". */
+enum {
+    TB_HIT_OVERFLOW = WIN_COUNT,
+    TB_HIT_START,
+    TB_HIT_IME,
+    TB_HIT_CLOCK,
+};
+
+/* ---- Edge snap ---------------------------------------------------------
+ *
+ * the theme snaps a window when its title bar is dragged into a screen edge:
+ * the top maximises, the left and right halve.  The zone is keyed off the
+ * pointer rather than the window bounds so a window that is already wide
+ * does not snap merely by being dragged slightly left.
+ */
+
+enum {
+    SNAP_NONE = 0,
+    SNAP_LEFT,
+    SNAP_RIGHT,
+    SNAP_MAX,
+    SNAP_EDGE = 12,   /* px from the edge that arms the snap */
+};
+
+static int snap_zone_at(int x, int y) {
+    struct rect work = work_area();
+    if (y <= work.y + SNAP_EDGE)
+        return SNAP_MAX;
+    if (x <= work.x + SNAP_EDGE)
+        return SNAP_LEFT;
+    if (x >= work.x + work.w - 1 - SNAP_EDGE)
+        return SNAP_RIGHT;
+    return SNAP_NONE;
+}
+
+static struct rect snap_target_rect(int zone) {
+    struct rect work = work_area();
+    switch (zone) {
+    case SNAP_LEFT:
+        return (struct rect){work.x, work.y, work.w / 2, work.h};
+    case SNAP_RIGHT:
+        return (struct rect){work.x + work.w / 2, work.y,
+                             work.w - work.w / 2, work.h};
+    case SNAP_MAX:
+        return work;
+    default:
+        return work;
+    }
+}
+
+/* Commit the snap for a window whose drag just ended. */
+static void apply_snap(int id) {
+    int zone = snap_zone_at(pointer_x, pointer_y);
+    struct rect target;
+    if (zone == SNAP_NONE || id < 0 || id >= WIN_COUNT)
+        return;
+    target = snap_target_rect(zone);
+    /* Preserve the pre-snap bounds so the maximise button and a later drag
+     * can restore them, exactly as an explicit maximise does. */
+    if (!windows[id].maximized)
+        windows[id].restore = windows[id].r;
+    queue_damage(shadow_bounds(windows[id].r));
+    windows[id].r = target;
+    windows[id].maximized = (zone == SNAP_MAX);
+    clamp_scroll(id);
+    win_damage(id);
+    if (id >= WIN_APP_BASE) {
+        int slot = app_slot_for_win(id);
+        if (slot >= 0 && app_sessions[slot].used) {
+            app_sessions[slot].resize_dirty = 1;
+            (void)sync_app_size(id, 1);
         }
     }
-    for (int i = 0; i < WIN_APP_BASE; i++) {
-        if (inside(x, y,
-                   (struct rect){dx + 12 + i * DOCK_SYSTEM_STEP, dy + 10,
-                                 DOCK_SYSTEM_W, 40}))
-            return i;
+}
+
+/* Translucent preview of where the window will land, drawn during the drag. */
+static void draw_snap_preview(void) {
+    struct ui_surface s;
+    int zone;
+    struct rect target;
+    struct ui_rect t;
+
+    if (drag_win < 0)
+        return;
+    zone = snap_zone_at(pointer_x, pointer_y);
+    if (zone == SNAP_NONE)
+        return;
+    s = ui_target();
+    target = snap_target_rect(zone);
+    t = ui_of(target);
+    ui_fill_round_a(&s, t, UI_RADIUS_WINDOW, UI_ACCENT_FILL, 40);
+    ui_stroke_round(&s, t, UI_RADIUS_WINDOW, 2, UI_ACCENT_FILL, 190);
+}
+
+static int hit_start_menu(int x, int y);
+
+static int hit_taskbar(int x, int y) {
+    struct tb_item items[TB_MAX_ITEMS];
+    int count;
+
+    if (taskbar_expanded) {
+        int ids[MAX_GUI_APPS];
+        int hidden = taskbar_hidden_windows(ids);
+        if (hidden > 0) {
+            struct rect panel = taskbar_overflow_panel(hidden);
+            for (int i = 0; i < hidden; i++) {
+                struct rect row = {panel.x + 6, panel.y + 6 + i * 40,
+                                   panel.w - 12, 36};
+                if (inside(x, y, row))
+                    return ids[i];
+            }
+        }
     }
-    int task_x = dx + 12 + WIN_APP_BASE * DOCK_SYSTEM_STEP;
-    for (int i = 0; i < shown; i++) {
-        if (inside(x, y,
-                   (struct rect){task_x + i * DOCK_TASK_STEP, dy + 10,
-                                 DOCK_TASK_W, 40}))
-            return ids[i];
+
+    count = taskbar_items(items);
+    for (int i = 0; i < count; i++) {
+        if (!inside(x, y, items[i].r))
+            continue;
+        switch (items[i].kind) {
+        case TB_START:     return TB_HIT_START;
+        case TB_WINDOW:    return items[i].value;
+        case TB_OVERFLOW:  return TB_HIT_OVERFLOW;
+        case TB_TRAY_IME:  return TB_HIT_IME;
+        case TB_TRAY_CLOCK:return TB_HIT_CLOCK;
+        default:           return -1;
+        }
     }
-    if (hidden > 0 &&
-        inside(x, y,
-               (struct rect){task_x + shown * DOCK_TASK_STEP, dy + 10,
-                             DOCK_MORE_W, 40}))
-        return WIN_COUNT;
     return -1;
 }
 
@@ -3382,7 +3924,26 @@ static void refresh_pointer_hover_damage(void) {
         hover_chrome_ctl = chrome_ctl;
     }
 
-    int row = hit_launcher_row_at(pointer_x, pointer_y);
+    /* Overlays own the pointer while open.  Without this the launcher below
+     * the Start menu keeps taking hover -- and its rows light up through the
+     * menu -- because a flyout is not a window and so is invisible to
+     * top_window_at(). */
+    int overlay = start_open &&
+                  inside(pointer_x, pointer_y, start_menu_rect());
+
+    /* Tracked even while the menu is shut, so closing and reopening it under
+     * a stationary pointer still repaints the tile: leaving a stale index
+     * here would make the reopened highlight compare equal and never damage. */
+    int tile = overlay ? hit_start_menu(pointer_x, pointer_y) : -1;
+    if (tile != hover_start_tile) {
+        if (hover_start_tile >= 0)
+            damage_widget(start_tile_rect(hover_start_tile));
+        if (tile >= 0)
+            damage_widget(start_tile_rect(tile));
+        hover_start_tile = tile;
+    }
+
+    int row = overlay ? -1 : hit_launcher_row_at(pointer_x, pointer_y);
     if (row != hover_launcher_row) {
         if (hover_launcher_row >= 0)
             damage_widget(launcher_row_screen_rect(hover_launcher_row));
@@ -3398,7 +3959,7 @@ static void handle_mouse(void) {
         return;
     int old_pointer_x = pointer_x;
     int old_pointer_y = pointer_y;
-    int old_dock_hover = dock_hover;
+    int old_dock_hover = taskbar_hover;
     int pointer_moved = ms.x != pointer_x || ms.y != pointer_y;
     if (ms.buttons != prev_buttons)
         desktop_dirty = 1;
@@ -3417,9 +3978,9 @@ static void handle_mouse(void) {
     }
     int left = ms.buttons & 1;
     int right = ms.buttons & 2;
-    dock_hover = hit_dock(pointer_x, pointer_y);
-    if (dock_hover != old_dock_hover)
-        dock_damage();
+    taskbar_hover = hit_taskbar(pointer_x, pointer_y);
+    if (taskbar_hover != old_dock_hover)
+        taskbar_damage();
 
     if (right && !(prev_buttons & 2)) {
         int target = hit_window(pointer_x, pointer_y);
@@ -3453,7 +4014,11 @@ static void handle_mouse(void) {
 
     if (ms.wheel_seq != last_wheel_seq) {
         int wheel_delta = ms.wheel - last_wheel_value;
-        int h = hit_window(pointer_x, pointer_y);
+        /* An open flyout absorbs the wheel; scrolling the window underneath
+         * it would move content the pointer is not actually over. */
+        int h = (start_open &&
+                 inside(pointer_x, pointer_y, start_menu_rect()))
+            ? -1 : hit_window(pointer_x, pointer_y);
         if (h >= 0) {
             int slot = app_slot_for_win(h);
             if (slot >= 0 && app_sessions[slot].used && inside(pointer_x, pointer_y, content_rect(h)))
@@ -3473,13 +4038,45 @@ static void handle_mouse(void) {
     }
 
     if (left && !prev_buttons) {
-        if (dock_hover == WIN_COUNT) {
-            dock_expanded = !dock_expanded;
+        int start_pick = hit_start_menu(pointer_x, pointer_y);
+        if (start_open && start_pick >= 0) {
+            /* Launching closes the menu, as on any modern desktop. */
+            start_set_open(0);
+            run_app(apps[start_pick].path);
+            prev_buttons = ms.buttons;
+            return;
+        }
+        if (start_open && start_pick == -2) {
+            start_set_open(0);
+            running = 0;
+            prev_buttons = ms.buttons;
+            return;
+        }
+        if (start_open && inside(pointer_x, pointer_y, start_menu_rect())) {
+            /* A click inside the menu chrome is absorbed, not passed through
+             * to whatever window happens to be underneath. */
+            prev_buttons = ms.buttons;
+            return;
+        }
+        if (taskbar_hover == TB_HIT_START) {
+            start_set_open(!start_open);
+            taskbar_expanded = 0;
+        } else if (taskbar_hover == TB_HIT_IME) {
+            ime_enabled = !ime_enabled;
+            ime_clear();
+            ime_damage();
+        } else if (taskbar_hover == TB_HIT_CLOCK) {
+            /* No flyout yet; swallow the click so it does not fall through
+             * to the desktop and deactivate the focused window. */
+        } else if (taskbar_hover == TB_HIT_OVERFLOW) {
+            taskbar_expanded = !taskbar_expanded;
             desktop_dirty = 1;
-        } else if (dock_hover >= 0) {
-            activate(dock_hover);
-            dock_expanded = 0;
+        } else if (taskbar_hover >= 0) {
+            activate(taskbar_hover);
+            taskbar_expanded = 0;
+            start_set_open(0);
         } else {
+            start_set_open(0);
             int control = -1;
             int ctl_win = hit_control(pointer_x, pointer_y, &control);
             if (ctl_win >= 0) {
@@ -3563,27 +4160,28 @@ static void handle_mouse(void) {
                 drag_dx = pointer_x - windows[t].r.x;
                 drag_dy = pointer_y - windows[t].r.y;
             }
-            if (focus == WIN_LAUNCHER) {
-                struct rect c = content_rect(WIN_LAUNCHER);
-                int rel = pointer_y - (c.y + LAUNCHER_HEADER_H) +
-                          scroll_y[WIN_LAUNCHER];
-                if (rel >= 0) {
-                    int idx = rel / LAUNCHER_ROW_STEP;
-                    if (idx >= 0 && idx < app_count) {
-                        if (idx == app_last_click &&
-                            tick - app_last_click_tick <= 25u) {
-                            app_selected = idx;
-                            app_last_click = -1;
-                            run_app(apps[idx].path);
-                            prev_buttons = ms.buttons;
-                            return;
-                        }
-                        app_selected = idx;
-                        app_last_click = idx;
-                        app_last_click_tick = tick;
-                    }
+            /* Route launcher clicks through the same hit test the hover
+             * highlight uses.  This block previously derived the row from
+             * pointer_y alone, gated only on focus == WIN_LAUNCHER, so a
+             * click anywhere on screen -- over another window, or on bare
+             * desktop below the launcher -- selected and could double-click
+             * launch whichever row that y happened to line up with.
+             * hit_launcher_row_at() checks the top window, the content rect
+             * and the row band, so paint and hit agree. */
+            int launcher_row = hit_launcher_row_at(pointer_x, pointer_y);
+            if (launcher_row >= 0) {
+                if (launcher_row == app_last_click &&
+                    tick - app_last_click_tick <= 25u) {
+                    app_selected = launcher_row;
+                    app_last_click = -1;
+                    run_app(apps[launcher_row].path);
+                    prev_buttons = ms.buttons;
+                    return;
                 }
-            } else {
+                app_selected = launcher_row;
+                app_last_click = launcher_row;
+                app_last_click_tick = tick;
+            } else if (focus != WIN_LAUNCHER) {
                 int slot = app_slot_for_win(focus);
                 if (slot >= 0 && inside(pointer_x, pointer_y, content_rect(focus))) {
                     app_mouse_capture = focus;
@@ -3596,10 +4194,13 @@ static void handle_mouse(void) {
         if (app_mouse_capture >= 0)
             send_mouse_to_app(app_mouse_capture, ms.buttons, 0);
         int finished_resize = resize_win;
+        int finished_drag = drag_win;
         app_mouse_capture = -1;
         drag_win = -1;
         scroll_drag_win = -1;
         resize_win = -1;
+        if (finished_drag >= 0)
+            apply_snap(finished_drag);
         if (finished_resize >= WIN_APP_BASE)
             (void)sync_app_size(finished_resize, 1);
         update_hover_app(1);
@@ -3608,9 +4209,7 @@ static void handle_mouse(void) {
         struct rect old = windows[resize_win].r;
         apply_resize(resize_win, pointer_x, pointer_y);
         struct rect now = windows[resize_win].r;
-        queue_damage(union_rect(
-            (struct rect){old.x, old.y, old.w + 6, old.h + 6},
-            (struct rect){now.x, now.y, now.w + 6, now.h + 6}));
+        queue_damage(union_rect(shadow_bounds(old), shadow_bounds(now)));
         prev_buttons = ms.buttons;
         return;
     }
@@ -3644,12 +4243,23 @@ static void handle_mouse(void) {
         r->x = pointer_x - drag_dx;
         r->y = pointer_y - drag_dy;
         if (r->x < 0) r->x = 0;
-        if (r->y < TOPBAR_H) r->y = TOPBAR_H;
+        if (r->y < WORK_TOP) r->y = WORK_TOP;
         if (r->x + r->w > sw) r->x = sw - r->w;
         if (r->y + r->h > sh - 12) r->y = sh - 12 - r->h;
-        queue_damage(union_rect(
-            (struct rect){old.x, old.y, old.w + 6, old.h + 6},
-            (struct rect){r->x, r->y, r->w + 6, r->h + 6}));
+        queue_damage(union_rect(shadow_bounds(old), shadow_bounds(*r)));
+        /* The snap preview is drawn outside the window, so it needs its own
+         * damage or it leaves an outline behind when the zone changes. */
+        {
+            static int last_snap_zone;
+            int zone = snap_zone_at(pointer_x, pointer_y);
+            if (zone != last_snap_zone) {
+                if (last_snap_zone != SNAP_NONE)
+                    queue_damage(snap_target_rect(last_snap_zone));
+                if (zone != SNAP_NONE)
+                    queue_damage(snap_target_rect(zone));
+                last_snap_zone = zone;
+            }
+        }
         prev_buttons = ms.buttons;
         return;
     }
@@ -3684,6 +4294,9 @@ static void init_desktop(void) {
     else
         gui_log("[gui] software backbuffer (scanout map failed)");
     gfx_set_origin(0, 0);
+    /* Try the GPU present path after the scanout is bound: it retargets the
+     * compose buffer, and needs the software path as a working fallback. */
+    gpu_present_init();
     pointer_x = sw / 2;
     pointer_y = sh / 2;
     scan_apps();
@@ -3692,6 +4305,11 @@ static void init_desktop(void) {
 }
 
 static void shutdown_desktop(void) {
+    /* Point the compose buffer away from the GPU texture before freeing it;
+     * anything that paints during teardown would otherwise write into a
+     * destroyed resource. */
+    gpu_present_shutdown();
+    (void)bind_scanout();
     if (keyevent_fd >= 0) {
         close(keyevent_fd);
         keyevent_fd = -1;

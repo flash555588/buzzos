@@ -30,6 +30,27 @@ struct syscall_shm_mapping {
     uint32_t address;
     uint32_t size;
 };
+/* virgl 3D capability, and the resource handed back by gpu3d_resource_create.
+ * `address` maps the resource's own backing store, so texture uploads are
+ * zero-copy: write pixels there, then upload just the damaged box. */
+struct syscall_gpu3d_info {
+    uint32_t available;
+    uint32_t width;
+    uint32_t height;
+    uint32_t scanout_resource;
+    uint32_t max_resources;
+    uint32_t command_capacity;
+};
+struct syscall_gpu3d_resource {
+    uint32_t target;  /* in: 0 = linear buffer, 2 = 2D texture */
+    uint32_t format;  /* in: virgl format */
+    uint32_t bind;    /* in: virgl bind flags */
+    uint32_t width;   /* in: pixels, or bytes when target == 0 */
+    uint32_t height;  /* in */
+    uint32_t id;      /* out */
+    uint32_t address; /* out: mapped backing store */
+    uint32_t bytes;   /* out */
+};
 
 enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_SPAWN=6, SYS_YIELD=7, SYS_JOIN=8, SYS_SLEEP=9, SYS_KILL=10,
@@ -52,7 +73,10 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_AUDIO_WRITE=60, SYS_AUDIO_CONFIG=61, SYS_FB_BLIT_STRIDE=62,
        SYS_AUDIO_QUEUED=63, SYS_AUDIO_FLUSH=64,
        SYS_GFX_ACQUIRE=65, SYS_GFX_RELEASE=66, SYS_GFX_SET_MODE=67,
-       SYS_GFX_MAP_SURFACE=68, SYS_GFX_PRESENT=69 };
+       SYS_GFX_MAP_SURFACE=68, SYS_GFX_PRESENT=69,
+       SYS_GPU3D_INFO=70, SYS_GPU3D_RESOURCE_CREATE=71,
+       SYS_GPU3D_RESOURCE_DESTROY=72, SYS_GPU3D_UPLOAD=73,
+       SYS_GPU3D_SUBMIT=74, SYS_GPU3D_PRESENT=75, SYS_GPU3D_SCANOUT=76 };
 
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);

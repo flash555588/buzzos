@@ -233,13 +233,13 @@ static void render(void) {
     struct appui_rect display_rect = {16, 18, W - 32, 72};
     appui_field_frame(pixels, W, H, display_rect, 0);
     const char *value = display[0] ? display : "0";
-    int value_w = appui_text_width(value);
-    int value_x = display_rect.x + display_rect.w - 12 - value_w;
-    if (value_x < display_rect.x + 12)
-        value_x = display_rect.x + 12;
-    appui_text(pixels, W, H, value_x, 43, value, THEME_FIELD_TEXT, -1,
-               (struct appui_rect){display_rect.x + 10, display_rect.y + 8,
-                                   display_rect.w - 20, display_rect.h - 16});
+    /* The result is the one piece of type that should dominate the window,
+     * so it gets the title size and hugs the right edge like a calculator
+     * readout rather than sitting on the native glyph grid. */
+    appui_label(pixels, W, H,
+                (struct appui_rect){display_rect.x + 12, display_rect.y,
+                                    display_rect.w - 24, display_rect.h},
+                value, UI_FONT_TITLE, THEME_FIELD_TEXT, UI_ALIGN_RIGHT);
     for (int i = 0; i < (int)(sizeof(labels) / sizeof(labels[0])); i++) {
         struct appui_rect r = button_rect(i);
         int variant = APPUI_BTN_DEFAULT;

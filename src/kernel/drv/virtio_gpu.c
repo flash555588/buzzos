@@ -7,6 +7,7 @@
 #include "pmm.h"
 #include "serial.h"
 #include "virtio_gpu.h"
+#include "virtio_gpu_internal.h"
 
 enum {
     VIRTIO_VENDOR_ID = 0x1AF4,
@@ -45,6 +46,13 @@ enum {
     VIRTIO_GPU_RESP_OK_DISPLAY_INFO = 0x1101,
     VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM = 2,
     VIRTIO_GPU_MAX_SCANOUTS = 16,
+
+    /* virtio-gpu device feature bits (low feature dword). */
+    VIRTIO_GPU_F_VIRGL_BIT = 1u << 0,
+    VIRTIO_GPU_F_EDID_BIT = 1u << 1,
+    VIRTIO_GPU_F_RESOURCE_UUID_BIT = 1u << 2,
+    VIRTIO_GPU_F_RESOURCE_BLOB_BIT = 1u << 3,
+    VIRTIO_GPU_F_CONTEXT_INIT_BIT = 1u << 4,
 
     /* Match fb_set_mode / GUIAPP_MAX_* so 1920x1200 (16:10) is allowed. */
     GPU_MAX_WIDTH = 1920,
@@ -202,6 +210,7 @@ static uint32_t gpu_width;
 static uint32_t gpu_height;
 static uint32_t gpu_resource_id;
 static uint32_t gpu_next_resource_id = 1;
+static uint32_t gpu_feature_low;
 static int gpu_is_ready;
 
 static void bytes_zero(void *pointer, uint32_t size) {
@@ -310,8 +319,30 @@ static int gpu_negotiate_features(void) {
     uint32_t feature_high = gpu_common->device_feature;
     if (!(feature_high & VIRTIO_F_VERSION_1_HIGH))
         return -1;
+
+    /* Device-specific features live in the low dword.  Log what the host
+     * offers so the 3D/virgl path can be gated on real capability instead of
+     * assumptions:  bit0 VIRGL, bit1 EDID, bit2 RESOURCE_UUID,
+     * bit3 RESOURCE_BLOB, bit4 CONTEXT_INIT. */
+    gpu_common->device_feature_select = 0;
+    gpu_feature_low = gpu_common->device_feature;
+    serial_puts("[gpu] device features lo=");
+    serial_puthex(gpu_feature_low);
+    serial_puts(" hi=");
+    serial_puthex(feature_high);
+    serial_puts(" virgl=");
+    serial_puthex((gpu_feature_low & VIRTIO_GPU_F_VIRGL_BIT) ? 1u : 0u);
+    serial_puts(" blob=");
+    serial_puthex((gpu_feature_low & VIRTIO_GPU_F_RESOURCE_BLOB_BIT) ? 1u : 0u);
+    serial_puts(" ctxinit=");
+    serial_puthex((gpu_feature_low & VIRTIO_GPU_F_CONTEXT_INIT_BIT) ? 1u : 0u);
+    serial_puts(" queues=");
+    serial_puthex(gpu_common->num_queues);
+    serial_puts("\n");
+
     gpu_common->guest_feature_select = 0;
-    gpu_common->guest_feature = 0;
+    gpu_common->guest_feature =
+        (gpu_feature_low & VIRTIO_GPU_F_VIRGL_BIT) ? VIRTIO_GPU_F_VIRGL_BIT : 0u;
     gpu_common->guest_feature_select = 1;
     gpu_common->guest_feature = VIRTIO_F_VERSION_1_HIGH;
     gpu_status_add(VIRTIO_STATUS_FEATURES_OK);
@@ -442,6 +473,133 @@ static int gpu_submit_expect(const void *request, uint32_t request_size,
         return -1;
     }
     return 0;
+}
+
+/* ---- transport surface consumed by the virgl 3D layer ---- */
+
+int vgpu_submit_expect(const void *request, uint32_t request_size,
+                       uint32_t expected_response) {
+    return gpu_submit_expect(request, request_size, expected_response);
+}
+
+/* 3D command streams routinely exceed one page, so they get a dedicated
+ * multi-page request buffer.  Allocated on first use: hosts without virgl
+ * never pay for it. */
+enum { GPU_LARGE_REQUEST_PAGES = 16 }; /* 64 KiB */
+
+static uint8_t *gpu_large_request;
+
+uint32_t vgpu_large_request_capacity(void) {
+    return (uint32_t)GPU_LARGE_REQUEST_PAGES * PAGE_SIZE;
+}
+
+int vgpu_submit_large(const void *request, uint32_t request_size,
+                      uint32_t expected_response) {
+    struct virtio_gpu_ctrl_hdr response;
+    uint16_t used_before;
+    int complete = 0;
+
+    if (!request || request_size == 0 ||
+        request_size > vgpu_large_request_capacity() || !gpu_notify)
+        return -1;
+    if (!gpu_large_request) {
+        uintptr_t phys = pmm_alloc_pages(GPU_LARGE_REQUEST_PAGES);
+        if (!phys)
+            return -1;
+        gpu_large_request = (uint8_t *)phys;
+    }
+
+    uint32_t irq_flags = irq_save();
+    bytes_copy(gpu_large_request, request, request_size);
+    bytes_zero(gpu_response, sizeof(response));
+    gpu_desc[0].addr = (uint64_t)(uintptr_t)gpu_large_request;
+    gpu_desc[0].len = request_size;
+    gpu_desc[0].flags = VRING_DESC_F_NEXT;
+    gpu_desc[0].next = 1;
+    gpu_desc[1].addr = (uint64_t)(uintptr_t)gpu_response;
+    gpu_desc[1].len = (uint32_t)sizeof(response);
+    gpu_desc[1].flags = VRING_DESC_F_WRITE;
+    gpu_desc[1].next = 0;
+
+    used_before = gpu_used->idx;
+    gpu_avail->ring[gpu_avail_index % gpu_queue_size] = 0;
+    __sync_synchronize();
+    gpu_avail_index++;
+    gpu_avail->idx = gpu_avail_index;
+    __sync_synchronize();
+    *gpu_notify = GPU_QUEUE_INDEX;
+    irq_restore(irq_flags);
+
+    for (uint32_t spin = 0; spin < 10000000u; spin++) {
+        if (gpu_used->idx != used_before) {
+            complete = 1;
+            break;
+        }
+        __asm__ volatile("pause");
+    }
+    if (!complete) {
+        serial_puts("[gpu] 3D submit timeout\n");
+        return -1;
+    }
+    __sync_synchronize();
+    bytes_copy(&response, gpu_response, sizeof(response));
+    if (response.type != expected_response) {
+        serial_puts("[gpu] 3D submit response=");
+        serial_puthex(response.type);
+        serial_puts("\n");
+        return -1;
+    }
+    return 0;
+}
+
+int vgpu_attach_backing(uint32_t resource_id, uintptr_t phys, uint32_t bytes) {
+    struct virtio_gpu_attach_one attach = {0};
+    attach.command.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+    attach.command.resource_id = resource_id;
+    attach.command.nr_entries = 1;
+    attach.entry.addr = (uint64_t)phys;
+    attach.entry.length = bytes;
+    return gpu_submit_expect(&attach, sizeof(attach),
+                             VIRTIO_GPU_RESP_OK_NODATA);
+}
+
+uint32_t vgpu_alloc_resource_id(void) {
+    uint32_t id = gpu_next_resource_id++;
+    if (!id)
+        id = gpu_next_resource_id++;
+    return id;
+}
+
+int vgpu_virgl_offered(void) {
+    return (gpu_feature_low & VIRTIO_GPU_F_VIRGL_BIT) ? 1 : 0;
+}
+
+uint32_t vgpu_scanout_resource(void) { return gpu_resource_id; }
+uint32_t vgpu_scanout_width(void) { return gpu_width; }
+uint32_t vgpu_scanout_height(void) { return gpu_height; }
+
+int vgpu_set_scanout(uint32_t resource_id, uint32_t width, uint32_t height) {
+    struct virtio_gpu_set_scanout scanout = {0};
+    scanout.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    scanout.r.width = width;
+    scanout.r.height = height;
+    scanout.scanout_id = 0;
+    scanout.resource_id = resource_id;
+    return gpu_submit_expect(&scanout, sizeof(scanout),
+                             VIRTIO_GPU_RESP_OK_NODATA);
+}
+
+int vgpu_flush_resource(uint32_t resource_id, int x, int y,
+                        int width, int height) {
+    struct virtio_gpu_resource_flush flush = {0};
+    flush.hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    flush.r.x = (uint32_t)x;
+    flush.r.y = (uint32_t)y;
+    flush.r.width = (uint32_t)width;
+    flush.r.height = (uint32_t)height;
+    flush.resource_id = resource_id;
+    return gpu_submit_expect(&flush, sizeof(flush),
+                             VIRTIO_GPU_RESP_OK_NODATA);
 }
 
 static int gpu_get_display_info(void) {
@@ -656,6 +814,9 @@ int virtio_gpu_init(uint32_t width, uint32_t height) {
     serial_putc('x');
     serial_puthex(height);
     serial_puts(" damage uploads enabled\n");
+    /* Optional: bring up the host GL pipeline.  Failure is not fatal -- the
+     * software compositor keeps using the 2D scanout resource. */
+    (void)virtio_gpu_3d_init();
     return 0;
 }
 

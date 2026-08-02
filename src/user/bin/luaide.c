@@ -17,6 +17,7 @@ enum {
     TOOLBAR_H = 50,
     STATUS_H = 24,
     REPL_BAR_H = 36,
+    REPL_PROMPT_W = 40,
     TOOL_BUTTON_H = 34,
     TOOL_BUTTON_GAP = 6,
     TOOL_BUTTON_PAD = 20,
@@ -30,6 +31,14 @@ enum {
     TB_REPL = 4,
     TB_CLEAR = 5,
     TB_COUNT = 6,
+};
+
+/* Scroll axis ids, also stored in drag_scroll_axis (-1 = no drag). */
+enum {
+    AXIS_EDITOR_H = 0,
+    AXIS_EDITOR_V = 1,
+    AXIS_OUTPUT_H = 2,
+    AXIS_OUTPUT_V = 3,
 };
 
 static const char *const TB_LABELS[TB_COUNT] = {
@@ -72,7 +81,7 @@ static char complete_items[COMPLETE_MAX][32];
 static int dirty_color = 1;
 static lua_State *L;
 
-/* Token kinds stored in tok_color[]; map to RGB32 for the light document. */
+/* Token kinds stored in tok_color[]; map to RGB32 for the dark editor. */
 enum {
     COL_DEFAULT = 0,
     COL_KEYWORD = 1,
@@ -82,14 +91,17 @@ enum {
     COL_SYMBOL  = 5,
 };
 
+/* Tuned for THEME_EDITOR_BG (#1C1C1C): every kind clears a luma of ~110 over a
+ * base of ~28, so no token drops to the muddy contrast the old light-surface
+ * palette had once the editor went dark. */
 static uint32_t token_paint_color(int kind) {
     switch (kind) {
-    case COL_KEYWORD: return plt_rgb(0x1a, 0x56, 0xb0); /* blue */
-    case COL_STRING:  return plt_rgb(0x16, 0x7a, 0x3a); /* green */
-    case COL_COMMENT: return plt_rgb(0x6a, 0x6a, 0x6a); /* gray */
-    case COL_NUMBER:  return plt_rgb(0xb0, 0x5a, 0x12); /* brown/orange */
-    case COL_SYMBOL:  return plt_rgb(0x4a, 0x4a, 0x58);
-    default:          return THEME_DOCUMENT_TEXT;
+    case COL_KEYWORD: return UI_ACCENT_LIGHT1;              /* accent blue */
+    case COL_STRING:  return plt_rgb(0xCE, 0x91, 0x78);      /* warm sand   */
+    case COL_COMMENT: return plt_rgb(0x6A, 0x99, 0x55);      /* muted green */
+    case COL_NUMBER:  return plt_rgb(0xB5, 0xCE, 0xA8);      /* pale green  */
+    case COL_SYMBOL:  return UI_TEXT_SECONDARY;
+    default:          return THEME_EDITOR_TEXT;
     }
 }
 
@@ -473,7 +485,7 @@ static void save_file(void) {
         set_status("Save failed");
 }
 
-/* Windows-style: browse with Files, then open the chosen path in LuaIDE. */
+/* Browse with Files, then open the chosen path in LuaIDE. */
 static void open_via_files(struct guiapp_ctx *ctx) {
     if (guiapp_request_launch(ctx, "/fs/apps/filemanager",
                               "openfor:/fs/apps/luaide") < 0)
@@ -656,6 +668,11 @@ static struct appui_rect status_rect(void) {
     return (struct appui_rect){0, h - STATUS_H, w, STATUS_H};
 }
 
+/* Left edge of the REPL input text, past the prompt label. */
+static int repl_text_x(void) {
+    return repl_rect().x + 8 + REPL_PROMPT_W;
+}
+
 static int content_w(void) { return max_line_width() + 16; }
 static int content_h(void) {
     return line_count_of(textbuf, text_len) * (KFONT_HEIGHT + 4) + 12;
@@ -724,28 +741,6 @@ static struct appui_rect editor_htrack(void) {
     return (struct appui_rect){e.x + 1, e.y + e.h - 11, e.w - 14, 10};
 }
 
-static struct appui_rect editor_vthumb(void) {
-    struct appui_rect t = editor_vtrack();
-    int maxs = max_scroll_y();
-    if (maxs <= 0)
-        return t;
-    int th = appui_max(22, t.h * t.h / appui_max(t.h, content_h()));
-    if (th > t.h)
-        th = t.h;
-    return (struct appui_rect){t.x, t.y + scroll_y * (t.h - th) / maxs, t.w, th};
-}
-
-static struct appui_rect editor_hthumb(void) {
-    struct appui_rect t = editor_htrack();
-    int maxs = max_scroll_x();
-    if (maxs <= 0)
-        return t;
-    int tw = appui_max(28, t.w * t.w / appui_max(t.w, content_w()));
-    if (tw > t.w)
-        tw = t.w;
-    return (struct appui_rect){t.x + scroll_x * (t.w - tw) / maxs, t.y, tw, t.h};
-}
-
 static struct appui_rect output_vtrack(void) {
     struct appui_rect o = output_rect();
     return (struct appui_rect){o.x + o.w - 11, o.y + 1, 10, o.h - 14};
@@ -756,53 +751,81 @@ static struct appui_rect output_htrack(void) {
     return (struct appui_rect){o.x + 1, o.y + o.h - 11, o.w - 14, 10};
 }
 
-static struct appui_rect output_vthumb(void) {
-    struct appui_rect t = output_vtrack();
-    int maxs = max_out_scroll_y();
-    if (maxs <= 0)
-        return t;
-    int th = appui_max(22, t.h * t.h / appui_max(t.h, out_content_h()));
-    if (th > t.h)
-        th = t.h;
-    return (struct appui_rect){t.x, t.y + out_scroll_y * (t.h - th) / maxs, t.w,
-                               th};
-}
+/* Everything appui_scroll_thumb needs for one axis.  Painting, hit-testing and
+ * dragging all go through here so the drawn thumb and the grabbable thumb are
+ * derived from a single description. */
+struct scroll_axis {
+    struct appui_rect track;
+    int vertical;
+    int content;
+    int viewport;
+    int offset;
+};
 
-static struct appui_rect output_hthumb(void) {
-    struct appui_rect t = output_htrack();
-    int maxs = max_out_scroll_x();
-    if (maxs <= 0)
-        return t;
-    int tw = appui_max(28, t.w * t.w / appui_max(t.w, out_content_w()));
-    if (tw > t.w)
-        tw = t.w;
-    return (struct appui_rect){t.x + out_scroll_x * (t.w - tw) / maxs, t.y, tw,
-                               t.h};
-}
-
-static void draw_scroll_thumb(struct appui_rect thumb, int vertical) {
-    if (vertical) {
-        thumb.x += 4;
-        thumb.w -= 8;
-    } else {
-        thumb.y += 4;
-        thumb.h -= 8;
+static struct scroll_axis scroll_axis_of(int axis) {
+    struct scroll_axis a;
+    int editor = (axis == AXIS_EDITOR_H || axis == AXIS_EDITOR_V);
+    struct appui_rect clip = editor ? text_clip_rect() : output_clip_rect();
+    a.vertical = (axis == AXIS_EDITOR_V || axis == AXIS_OUTPUT_V);
+    switch (axis) {
+    case AXIS_EDITOR_V:
+        a.track = editor_vtrack();
+        a.content = content_h();
+        a.viewport = clip.h;
+        a.offset = scroll_y;
+        break;
+    case AXIS_EDITOR_H:
+        a.track = editor_htrack();
+        a.content = content_w();
+        a.viewport = clip.w;
+        a.offset = scroll_x;
+        break;
+    case AXIS_OUTPUT_V:
+        a.track = output_vtrack();
+        a.content = out_content_h();
+        a.viewport = clip.h;
+        a.offset = out_scroll_y;
+        break;
+    default:
+        a.track = output_htrack();
+        a.content = out_content_w();
+        a.viewport = clip.w;
+        a.offset = out_scroll_x;
+        break;
     }
-    appui_fill_round(pixels, w, h, thumb, THEME_WIN_HOVER);
+    return a;
+}
+
+static void scroll_axis_set(int axis, int value) {
+    switch (axis) {
+    case AXIS_EDITOR_V: scroll_y = value; break;
+    case AXIS_EDITOR_H: scroll_x = value; break;
+    case AXIS_OUTPUT_V: out_scroll_y = value; break;
+    default:            out_scroll_x = value; break;
+    }
+}
+
+static struct appui_rect scroll_axis_thumb(struct scroll_axis a) {
+    return appui_scroll_thumb(a.track, a.vertical, a.content, a.viewport,
+                              a.offset);
+}
+
+static void draw_scroll_axis(int axis) {
+    struct scroll_axis a = scroll_axis_of(axis);
+    int hot = drag_scroll_axis == axis ||
+              appui_inside(pointer_x, pointer_y, a.track);
+    appui_scrollbar(pixels, w, h, a.track, a.vertical, a.content, a.viewport,
+                    a.offset, hot);
 }
 
 static void draw_editor_scrollbars(void) {
-    if (max_scroll_y() > 0)
-        draw_scroll_thumb(editor_vthumb(), 1);
-    if (max_scroll_x() > 0)
-        draw_scroll_thumb(editor_hthumb(), 0);
+    draw_scroll_axis(AXIS_EDITOR_V);
+    draw_scroll_axis(AXIS_EDITOR_H);
 }
 
 static void draw_output_scrollbars(void) {
-    if (max_out_scroll_y() > 0)
-        draw_scroll_thumb(output_vthumb(), 1);
-    if (max_out_scroll_x() > 0)
-        draw_scroll_thumb(output_hthumb(), 0);
+    draw_scroll_axis(AXIS_OUTPUT_V);
+    draw_scroll_axis(AXIS_OUTPUT_H);
 }
 
 static void cursor_xy(int *x_out, int *y_out) {
@@ -924,8 +947,10 @@ static void accept_completion(void) {
 static void render_output(void) {
     struct appui_rect panel = output_rect();
     struct appui_rect clip = output_clip_rect();
-    appui_fill(pixels, w, h, panel, THEME_FIELD_BG);
-    appui_border(pixels, w, h, panel, THEME_FIELD_BORDER, THEME_DIVIDER);
+    appui_fill_round_r(pixels, w, h, panel, UI_RADIUS_CONTROL,
+                       THEME_EDITOR_BG);
+    appui_stroke_round(pixels, w, h, panel, UI_RADIUS_CONTROL,
+                       UI_STROKE_CONTROL);
 
     int line_origin = clip.x - out_scroll_x;
     int x = line_origin;
@@ -941,7 +966,7 @@ static void render_output(void) {
         if (y + KFONT_HEIGHT >= clip.y && y < clip.y + clip.h &&
             x + advance >= clip.x && x < clip.x + clip.w)
             (void)appui_draw_codepoint_at(pixels, w, h, x, y, c,
-                                          THEME_FIELD_TEXT, -1, clip,
+                                          THEME_EDITOR_TEXT, -1, clip,
                                           line_origin);
         x += advance;
     }
@@ -961,17 +986,12 @@ static void render_completions(void) {
     if (py + box_h > h - STATUS_H - REPL_BAR_H)
         py = clip.y + cy - scroll_y - box_h - 2;
     struct appui_rect box = {px, py, box_w, box_h};
-    appui_fill(pixels, w, h, box, THEME_WIN_PANEL);
-    appui_border(pixels, w, h, box, THEME_ACCENT, THEME_DIVIDER);
+    appui_card(pixels, w, h, box);
     for (int i = 0; i < complete_count; i++) {
-        int row_y = py + 3 + i * (KFONT_HEIGHT + 4);
-        if (i == complete_index)
-            appui_fill(pixels, w, h,
-                       (struct appui_rect){px + 2, row_y - 1, box_w - 4,
-                                           KFONT_HEIGHT + 2},
-                       THEME_SELECTION_BG);
-        appui_text(pixels, w, h, px + 6, row_y, complete_items[i], THEME_TEXT, -1,
-                   box);
+        struct appui_rect row = {px + 3, py + 3 + i * (KFONT_HEIGHT + 4),
+                                 box_w - 6, KFONT_HEIGHT + 4};
+        appui_list_row(pixels, w, h, row, complete_items[i], -1,
+                       i == complete_index ? APPUI_STATE_SELECTED : 0);
     }
 }
 
@@ -979,8 +999,7 @@ static void render(void) {
     ensure_colors();
     clamp_scrolls();
     appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H},
-               THEME_TOOLBAR_BG);
+    appui_toolbar(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H});
 
     for (int i = 0; i < TB_COUNT; i++) {
         struct appui_rect r = toolbar_button_rect(i);
@@ -996,10 +1015,11 @@ static void render(void) {
 
     /* Editor */
     struct appui_rect editor = editor_rect();
-    appui_fill(pixels, w, h, editor, THEME_DOCUMENT_BG);
-    appui_border(pixels, w, h, editor,
-                 focus == FOCUS_EDITOR ? THEME_ACCENT : THEME_FIELD_BORDER,
-                 THEME_DIVIDER);
+    appui_fill_round_r(pixels, w, h, editor, UI_RADIUS_CONTROL,
+                       THEME_EDITOR_BG);
+    appui_stroke_round(pixels, w, h, editor, UI_RADIUS_CONTROL,
+                       focus == FOCUS_EDITOR ? UI_ACCENT_FILL
+                                             : UI_STROKE_CONTROL);
     struct appui_rect clip = text_clip_rect();
     int line_origin = clip.x - scroll_x;
     int x = line_origin;
@@ -1036,16 +1056,21 @@ static void render(void) {
 
     render_output();
 
-    /* REPL bar */
+    /* REPL bar.  The "lua>" prompt is chrome and moves to appui_label, but the
+     * typed line stays on the KFONT grid because its caret is measured with
+     * appui_text_width; the prompt therefore occupies a fixed-width box so the
+     * line origin does not depend on the label metrics. */
     struct appui_rect rr = repl_rect();
-    appui_fill(pixels, w, h, rr,
-               focus == FOCUS_REPL ? THEME_FIELD_BG : THEME_WIN_PANEL);
-    appui_border(pixels, w, h, rr,
-                 focus == FOCUS_REPL ? THEME_ACCENT : THEME_FIELD_BORDER,
-                 THEME_DIVIDER);
-    appui_text(pixels, w, h, rr.x + 6, rr.y + 8, "lua>", THEME_ACCENT, -1, rr);
-    int rx = rr.x + 6 + appui_text_width("lua> ");
-    appui_text(pixels, w, h, rx, rr.y + 8, repl_line, THEME_FIELD_TEXT, -1, rr);
+    appui_fill_round_r(pixels, w, h, rr, UI_RADIUS_CONTROL,
+                       focus == FOCUS_REPL ? THEME_EDITOR_BG : UI_BG_LAYER);
+    appui_stroke_round(pixels, w, h, rr, UI_RADIUS_CONTROL,
+                       focus == FOCUS_REPL ? UI_ACCENT_FILL
+                                           : UI_STROKE_CONTROL);
+    appui_label(pixels, w, h,
+                (struct appui_rect){rr.x + 8, rr.y, REPL_PROMPT_W, rr.h},
+                "lua>", UI_FONT_BODY, UI_ACCENT_TEXT, UI_ALIGN_LEFT);
+    int rx = repl_text_x();
+    appui_text(pixels, w, h, rx, rr.y + 8, repl_line, THEME_EDITOR_TEXT, -1, rr);
     if (focus == FOCUS_REPL) {
         int caret_x = rx + appui_text_width(repl_line);
         appui_fill(pixels, w, h,
@@ -1055,12 +1080,15 @@ static void render(void) {
 
     /* Status */
     struct appui_rect sr = status_rect();
-    appui_fill(pixels, w, h, sr, THEME_TOOLBAR_BG);
+    appui_fill(pixels, w, h, sr, UI_BG_LAYER);
+    appui_separator(pixels, w, h, sr.x, sr.y, sr.w, 0);
     char lineinfo[96];
     appui_copy_text(lineinfo, status, sizeof(lineinfo));
     appui_append_text(lineinfo, "  |  ", sizeof(lineinfo));
     appui_append_text(lineinfo, file_path, sizeof(lineinfo));
-    appui_text(pixels, w, h, 8, sr.y + 4, lineinfo, THEME_TEXT_DIM, -1, sr);
+    appui_label(pixels, w, h,
+                (struct appui_rect){sr.x + 8, sr.y, sr.w - 16, sr.h}, lineinfo,
+                UI_FONT_CAPTION, UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
 
     render_completions();
 }
@@ -1084,6 +1112,43 @@ static void toolbar_click(struct guiapp_ctx *ctx, int index) {
     }
 }
 
+/* Press on a scroll track: page to the pointer when it misses the thumb, then
+ * begin a drag.  The hit test uses appui_scroll_thumb, the same call the
+ * painter makes, so the grabbable thumb is exactly the drawn one. */
+static int press_scroll_axis(int axis, int mx, int my) {
+    struct scroll_axis a = scroll_axis_of(axis);
+    struct appui_rect thumb;
+    int pointer = a.vertical ? my : mx;
+    if (a.content <= a.viewport || !appui_inside(mx, my, a.track))
+        return 0;
+    thumb = scroll_axis_thumb(a);
+    if (!appui_inside(mx, my, thumb)) {
+        scroll_axis_set(axis, appui_scroll_offset_at(a.track, a.vertical,
+                                                     a.content, a.viewport,
+                                                     pointer));
+        clamp_scrolls();
+        a = scroll_axis_of(axis);
+    }
+    drag_scroll_axis = axis;
+    drag_mouse_start = pointer;
+    drag_scroll_start = a.offset;
+    return 1;
+}
+
+static void drag_scroll_axis_to(int mx, int my) {
+    struct scroll_axis a = scroll_axis_of(drag_scroll_axis);
+    struct appui_rect thumb = scroll_axis_thumb(a);
+    int pointer = a.vertical ? my : mx;
+    int extent = a.vertical ? a.track.h : a.track.w;
+    int span = extent - (a.vertical ? thumb.h : thumb.w);
+    int max_scroll = a.content - a.viewport;
+    if (span <= 0 || max_scroll <= 0)
+        return;
+    scroll_axis_set(drag_scroll_axis,
+                    drag_scroll_start +
+                        (pointer - drag_mouse_start) * max_scroll / span);
+}
+
 static void mouse(struct guiapp_ctx *ctx, int mx, int my, int buttons, int wheel) {
     pointer_x = mx;
     pointer_y = my;
@@ -1105,91 +1170,25 @@ static void mouse(struct guiapp_ctx *ctx, int mx, int my, int buttons, int wheel
                 return;
             }
         }
-        if (max_scroll_y() > 0 && appui_inside(mx, my, editor_vtrack())) {
-            struct appui_rect t = editor_vtrack();
-            struct appui_rect th = editor_vthumb();
-            if (!appui_inside(mx, my, th)) {
-                int span = appui_max(1, t.h - th.h);
-                scroll_y = (my - t.y - th.h / 2) * max_scroll_y() / span;
-                clamp_scrolls();
+        if (!press_scroll_axis(AXIS_EDITOR_V, mx, my) &&
+            !press_scroll_axis(AXIS_EDITOR_H, mx, my) &&
+            !press_scroll_axis(AXIS_OUTPUT_V, mx, my) &&
+            !press_scroll_axis(AXIS_OUTPUT_H, mx, my)) {
+            if (appui_inside(mx, my, text_clip_rect())) {
+                focus = FOCUS_EDITOR;
+                cursor = position_at(mx, my);
+                ensure_cursor_visible();
+                update_completions();
+            } else if (appui_inside(mx, my, repl_rect())) {
+                focus = FOCUS_REPL;
+                complete_count = 0;
+            } else if (appui_inside(mx, my, output_clip_rect())) {
+                complete_count = 0;
             }
-            drag_scroll_axis = 1;
-            drag_mouse_start = my;
-            drag_scroll_start = scroll_y;
-        } else if (max_scroll_x() > 0 && appui_inside(mx, my, editor_htrack())) {
-            struct appui_rect t = editor_htrack();
-            struct appui_rect th = editor_hthumb();
-            if (!appui_inside(mx, my, th)) {
-                int span = appui_max(1, t.w - th.w);
-                scroll_x = (mx - t.x - th.w / 2) * max_scroll_x() / span;
-                clamp_scrolls();
-            }
-            drag_scroll_axis = 0;
-            drag_mouse_start = mx;
-            drag_scroll_start = scroll_x;
-        } else if (max_out_scroll_y() > 0 &&
-                   appui_inside(mx, my, output_vtrack())) {
-            struct appui_rect t = output_vtrack();
-            struct appui_rect th = output_vthumb();
-            if (!appui_inside(mx, my, th)) {
-                int span = appui_max(1, t.h - th.h);
-                out_scroll_y = (my - t.y - th.h / 2) * max_out_scroll_y() / span;
-                clamp_scrolls();
-            }
-            drag_scroll_axis = 3;
-            drag_mouse_start = my;
-            drag_scroll_start = out_scroll_y;
-        } else if (max_out_scroll_x() > 0 &&
-                   appui_inside(mx, my, output_htrack())) {
-            struct appui_rect t = output_htrack();
-            struct appui_rect th = output_hthumb();
-            if (!appui_inside(mx, my, th)) {
-                int span = appui_max(1, t.w - th.w);
-                out_scroll_x = (mx - t.x - th.w / 2) * max_out_scroll_x() / span;
-                clamp_scrolls();
-            }
-            drag_scroll_axis = 2;
-            drag_mouse_start = mx;
-            drag_scroll_start = out_scroll_x;
-        } else if (appui_inside(mx, my, text_clip_rect())) {
-            focus = FOCUS_EDITOR;
-            cursor = position_at(mx, my);
-            ensure_cursor_visible();
-            update_completions();
-        } else if (appui_inside(mx, my, repl_rect())) {
-            focus = FOCUS_REPL;
-            complete_count = 0;
-        } else if (appui_inside(mx, my, output_clip_rect())) {
-            complete_count = 0;
         }
     }
-    if ((buttons & 1) && drag_scroll_axis >= 0) {
-        if (drag_scroll_axis == 1) {
-            struct appui_rect t = editor_vtrack();
-            struct appui_rect th = editor_vthumb();
-            int span = appui_max(1, t.h - th.h);
-            scroll_y = drag_scroll_start +
-                       (my - drag_mouse_start) * max_scroll_y() / span;
-        } else if (drag_scroll_axis == 0) {
-            struct appui_rect t = editor_htrack();
-            struct appui_rect th = editor_hthumb();
-            int span = appui_max(1, t.w - th.w);
-            scroll_x = drag_scroll_start +
-                       (mx - drag_mouse_start) * max_scroll_x() / span;
-        } else if (drag_scroll_axis == 3) {
-            struct appui_rect t = output_vtrack();
-            struct appui_rect th = output_vthumb();
-            int span = appui_max(1, t.h - th.h);
-            out_scroll_y = drag_scroll_start +
-                           (my - drag_mouse_start) * max_out_scroll_y() / span;
-        } else if (drag_scroll_axis == 2) {
-            struct appui_rect t = output_htrack();
-            struct appui_rect th = output_hthumb();
-            int span = appui_max(1, t.w - th.w);
-            out_scroll_x = drag_scroll_start +
-                           (mx - drag_mouse_start) * max_out_scroll_x() / span;
-        }
-    }
+    if ((buttons & 1) && drag_scroll_axis >= 0)
+        drag_scroll_axis_to(mx, my);
     if (!(buttons & 1))
         drag_scroll_axis = -1;
     prev_buttons = buttons;
@@ -1287,7 +1286,7 @@ static void key(int k) {
 static void report_caret(struct guiapp_ctx *ctx) {
     if (focus == FOCUS_REPL) {
         struct appui_rect rr = repl_rect();
-        int x = rr.x + 6 + appui_text_width("lua> ") + appui_text_width(repl_line);
+        int x = repl_text_x() + appui_text_width(repl_line);
         int y = rr.y + 8;
         (void)guiapp_send_caret(ctx, x, y);
         return;

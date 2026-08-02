@@ -313,13 +313,18 @@ def check_runtime_lifecycle():
         if snippet not in sys_net:
             fail(f"socket owner cleanup is missing: {snippet}")
 
+    # The desktop once hosted a single embedded terminal, reaped by
+    # join(term_reader_tid) / waitpid(term_pid).  Terminal is now an ordinary
+    # GUI app and every app owns a reader thread, so the invariant these
+    # assertions protect -- that a closing window joins its reader and reaps
+    # its process rather than leaking either -- lives in close_window().
     for snippet in [
         "shutdown_desktop",
-        "join(term_reader_tid)",
-        "waitpid(term_pid",
+        "join(app_sessions[slot].reader_tid)",
+        "waitpid(app_sessions[slot].pid",
         "desktop_dirty",
         "tick - last_render_tick >= 60u",
-        "sync_app_size(finished_resize)",
+        "sync_app_size(finished_resize",
     ]:
         if snippet not in gui_c:
             fail(f"desktop lifecycle/event-driven rendering is missing: {snippet}")
@@ -752,6 +757,7 @@ def check_procfs_diagnostics():
     procfs = read_text("src/kernel/fs/procfs.c")
     shell_c = read_text("src/user/bin/shell.c")
     gui_c = read_text("src/user/bin/gui.c")
+    terminal_c = read_text("src/user/bin/terminal.c")
     report_py = read_text("tools/project_report.py")
     smoke_ps1 = read_text("scripts/smoke.ps1")
 
@@ -806,13 +812,16 @@ def check_procfs_diagnostics():
         fail("shell is missing limits /proc/limits command")
     if "cmd_fsinfo" not in shell_c or 'cmd_cat("/proc/fs")' not in shell_c:
         fail("shell is missing fsinfo /proc/fs command")
+    # Terminal moved out of the desktop into its own GUI app, so these are
+    # checked against terminal.c rather than gui.c.  The invariant is that the
+    # terminal drives the real /bin/sh over inherited stdio, not a reduced
+    # built-in command set.
     for snippet in [
-        'argv[0] = "/bin/sh"',
+        'shell_argv[] = {"/bin/sh"}',
         'spawn_process_args("/bin/sh"',
         "SPAWN_FLAG_INHERIT_STDIO",
-        "terminal_send_key",
     ]:
-        if snippet not in gui_c:
+        if snippet not in terminal_c:
             fail(f"GUI terminal is not attached to the full /bin/sh command surface: {snippet}")
     if "collect_health_interfaces" not in report_py or "/proc/health" not in report_py:
         fail("project report is missing health interface summary")

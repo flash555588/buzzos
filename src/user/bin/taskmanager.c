@@ -13,6 +13,8 @@ enum {
     TABLE_HEADER_H = 34,
     FOOTER_H = 50,
     ROW_H = 32,
+    HEADER_CHEVRON = 10,
+    CPU_BAR_MIN_W = 48,
     TAB_PROCESSES = 0,
     TAB_RESOURCES = 1,
     SORT_PID = 0,
@@ -39,6 +41,9 @@ static int process_count;
 static int selected_pid = -1;
 static int confirm_pid = -1;
 static int scroll_row;
+static int scroll_dragging;
+static int scroll_drag_mouse;
+static int scroll_drag_start_px;
 static int active_tab = TAB_PROCESSES;
 static int sort_column = SORT_CPU;
 static int sort_descending = 1;
@@ -466,34 +471,28 @@ static struct appui_rect header_cell(int column) {
                                TABLE_HEADER_H};
 }
 
-static void draw_label(int x, int y, const char *text, int color,
-                       struct appui_rect clip) {
-    appui_text(pixels, w, h, x, y, text, color, -1, clip);
-}
-
 static void draw_summary_card(struct appui_rect area, const char *label,
-                              const char *value, int accent, int tenths) {
-    appui_fill_round(pixels, w, h, area, THEME_DIVIDER);
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){area.x + 1, area.y + 1,
-                                         area.w - 2, area.h - 2},
-                     THEME_PANEL_RAISED);
-    draw_label(area.x + 10, area.y + 10, label, THEME_TEXT_DIM,
-               (struct appui_rect){area.x + 8, area.y + 4,
-                                   area.w - 16, 28});
-    draw_label(area.x + 10, area.y + 34, value, THEME_TEXT,
-               (struct appui_rect){area.x + 8, area.y + 30,
-                                   area.w - 16, 28});
+                              const char *value, uint32_t accent, int tenths) {
+    appui_card(pixels, w, h, area);
+    appui_label(pixels, w, h,
+                (struct appui_rect){area.x + 12, area.y + 6, area.w - 24, 20},
+                label, UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
+    appui_label(pixels, w, h,
+                (struct appui_rect){area.x + 12, area.y + 26, area.w - 24, 24},
+                value, UI_FONT_TITLE, UI_TEXT_PRIMARY, UI_ALIGN_LEFT);
     if (tenths >= 0) {
-        struct appui_rect track = {area.x + 10, area.y + area.h - 10,
-                                   area.w - 20, 4};
-        appui_fill(pixels, w, h, track, THEME_FIELD_BG);
-        appui_fill(pixels, w, h,
-                   (struct appui_rect){track.x, track.y,
-                                       track.w * clamp_int(tenths, 0, 1000) /
-                                           1000,
-                                       track.h},
-                   accent);
+        struct appui_rect track = {area.x + 12, area.y + area.h - 12,
+                                   area.w - 24, 4};
+        /* appui_progress paints the accent fill; a status-coloured bar keeps
+         * the per-card hue, so those two are drawn by hand over its track. */
+        appui_fill_round_r(pixels, w, h, track, track.h / 2, UI_CTRL_REST);
+        appui_fill_round_r(pixels, w, h,
+                           (struct appui_rect){track.x, track.y,
+                                               track.w *
+                                                   clamp_int(tenths, 0, 1000) /
+                                                   1000,
+                                               track.h},
+                           track.h / 2, accent);
     }
 }
 
@@ -509,96 +508,138 @@ static void draw_summary(void) {
     appui_append_text(count, process_count == 1 ? " process" : " processes",
                       sizeof(count));
     draw_summary_card((struct appui_rect){12, y, card_w, 66},
-                      "CPU", cpu, THEME_ACCENT, system_cpu_tenths);
+                      "CPU", cpu, UI_ACCENT_FILL, system_cpu_tenths);
     draw_summary_card((struct appui_rect){12 + card_w + gap, y, card_w, 66},
-                      "Memory", memory, THEME_MAX_GREEN, memory_tenths);
+                      "Memory", memory, UI_SYS_SUCCESS, memory_tenths);
     draw_summary_card((struct appui_rect){12 + (card_w + gap) * 2, y,
                                           w - 24 - (card_w + gap) * 2, 66},
-                      "Processes", count, THEME_MIN_YELLOW, -1);
+                      "Processes", count, UI_SYS_CAUTION, -1);
 }
 
+/* Sort direction is a chevron rather than an ASCII "v"/"^", which never
+ * aligned with the label baseline. */
 static void header_label(int column, const char *label) {
-    char text[24];
-    appui_copy_text(text, label, sizeof(text));
-    if (sort_column == column)
-        appui_append_text(text, sort_descending ? " v" : " ^", sizeof(text));
     struct appui_rect cell = header_cell(column);
-    draw_label(cell.x + 8, cell.y + 7, text,
-               sort_column == column ? THEME_TEXT : THEME_TEXT_DIM,
-               (struct appui_rect){cell.x + 4, cell.y + 2,
-                                   cell.w - 8, cell.h - 4});
+    int active = sort_column == column;
+    int label_w = appui_label_width(label, UI_FONT_CAPTION);
+    int text_w = appui_min(label_w, appui_max(1, cell.w - 16));
+    appui_label(pixels, w, h,
+                (struct appui_rect){cell.x + 8, cell.y, text_w, cell.h}, label,
+                UI_FONT_CAPTION,
+                active ? UI_TEXT_PRIMARY : UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
+    if (active && cell.w - 16 - text_w >= HEADER_CHEVRON)
+        appui_icon(pixels, w, h,
+                   sort_descending ? UI_ICON_CHEVRON_DOWN : UI_ICON_CHEVRON_UP,
+                   (struct appui_rect){cell.x + 10 + text_w, cell.y,
+                                       HEADER_CHEVRON, cell.h},
+                   HEADER_CHEVRON, UI_ACCENT_FILL);
+}
+
+static int table_content_px(void) {
+    return process_count * ROW_H;
+}
+
+static int table_viewport_px(void) {
+    return visible_rows() * ROW_H;
+}
+
+static int table_scrollable(void) {
+    return table_content_px() > table_viewport_px();
+}
+
+static struct appui_rect table_scroll_track(void) {
+    return (struct appui_rect){w - 8 - APPUI_SCROLL_W,
+                               table_y() + TABLE_HEADER_H, APPUI_SCROLL_W,
+                               table_viewport_px()};
+}
+
+static struct appui_rect table_scroll_thumb(void) {
+    return appui_scroll_thumb(table_scroll_track(), 1, table_content_px(),
+                              table_viewport_px(), scroll_row * ROW_H);
 }
 
 static void draw_process_table(void) {
     int y = table_y();
     appui_fill(pixels, w, h,
                (struct appui_rect){8, y, w - 16, TABLE_HEADER_H},
-               THEME_LIST_HEADER);
+               UI_BG_LAYER);
     header_label(SORT_PID, "PID");
     header_label(SORT_NAME, "Process");
     header_label(SORT_STATE, "State");
     header_label(SORT_CPU, "CPU");
     header_label(SORT_MEMORY, "Memory");
+    appui_separator(pixels, w, h, 8, y + TABLE_HEADER_H - 1, w - 16, 0);
 
     int rows = visible_rows();
     int body_y = y + TABLE_HEADER_H;
+    int scroll_w = table_scrollable() ? APPUI_SCROLL_W : 0;
     int state_x = header_cell(SORT_STATE).x;
     int cpu_x = header_cell(SORT_CPU).x;
     int memory_x = header_cell(SORT_MEMORY).x;
     struct appui_rect body = {8, body_y, w - 16, rows * ROW_H};
-    appui_fill(pixels, w, h, body, THEME_LIST_BG);
+    appui_fill(pixels, w, h, body, UI_BG_SOLID);
     for (int shown = 0; shown < rows; shown++) {
         int index = scroll_row + shown;
         if (index >= process_count)
             break;
         struct process_row *row = &processes[index];
         int row_y = body_y + shown * ROW_H;
-        int selected = row->pid == selected_pid;
-        int bg = selected ? THEME_SELECTION_BG :
-                 ((index & 1) ? THEME_LIST_ALT : THEME_LIST_BG);
-        appui_fill(pixels, w, h,
-                   (struct appui_rect){8, row_y, w - 16, ROW_H}, bg);
+        struct appui_rect row_rect = {8, row_y, w - 16 - scroll_w, ROW_H};
+        int state = appui_pointer_state(row_rect, pointer_x, pointer_y,
+                                        pointer_buttons);
+        if (row->pid == selected_pid)
+            state |= APPUI_STATE_SELECTED;
+        /* Empty label: the table paints its own columns, but the row still
+         * owns the selection fill, accent bar and hover state. */
+        appui_list_row(pixels, w, h, row_rect, "", -1, state);
         char pid[16], cpu[20], memory[24];
         pid[0] = 0;
         appui_append_int(pid, row->pid, sizeof(pid));
         format_percent(cpu, row->cpu_tenths, sizeof(cpu));
         format_memory(memory, row->rss_kb, sizeof(memory));
-        int fg = selected ? THEME_SELECTION_TEXT : THEME_LIST_TEXT;
-        int dim = selected ? THEME_SELECTION_TEXT : THEME_TEXT_DIM;
-        int text_y = row_y + (ROW_H - KFONT_HEIGHT) / 2 + PLT_FONT_Y_SHIFT;
-        draw_label(20, text_y, pid, dim,
-                   (struct appui_rect){12, row_y + 2, 58, ROW_H - 4});
-        draw_label(82, text_y, row->name, fg,
-                   (struct appui_rect){78, row_y + 2,
-                                       appui_max(40, state_x - 84),
-                                       ROW_H - 4});
-        draw_label(state_x + 8, text_y, row->state, dim,
-                   (struct appui_rect){state_x + 4, row_y + 2,
-                                       cpu_x - state_x - 8, ROW_H - 4});
-        draw_label(cpu_x + 8, text_y, cpu, fg,
-                   (struct appui_rect){cpu_x + 4, row_y + 2,
-                                       memory_x - cpu_x - 8, ROW_H - 4});
-        draw_label(memory_x + 8, text_y, memory, fg,
-                   (struct appui_rect){memory_x + 4, row_y + 2,
-                                       w - memory_x - 16, ROW_H - 4});
+        uint32_t fg = (state & APPUI_STATE_SELECTED) ? UI_TEXT_PRIMARY
+                                                     : UI_TEXT_SECONDARY;
+        appui_label(pixels, w, h,
+                    (struct appui_rect){12, row_y, 58, ROW_H}, pid,
+                    UI_FONT_BODY, UI_TEXT_TERTIARY, UI_ALIGN_RIGHT);
+        appui_label(pixels, w, h,
+                    (struct appui_rect){82, row_y,
+                                        appui_max(20, state_x - 90), ROW_H},
+                    row->name, UI_FONT_BODY, fg, UI_ALIGN_LEFT);
+        appui_label(pixels, w, h,
+                    (struct appui_rect){state_x + 8, row_y,
+                                        appui_max(20, cpu_x - state_x - 16),
+                                        ROW_H},
+                    row->state, UI_FONT_BODY, UI_TEXT_TERTIARY,
+                    UI_ALIGN_LEFT);
+        /* CPU cell: a hairline usage bar under the number reads faster than
+         * the number alone when scanning a full table. */
+        struct appui_rect cpu_cell = {cpu_x + 8, row_y,
+                                      appui_max(20, memory_x - cpu_x - 16),
+                                      ROW_H};
+        appui_label(pixels, w, h, cpu_cell, cpu, UI_FONT_BODY, fg,
+                    UI_ALIGN_RIGHT);
+        if (cpu_cell.w >= CPU_BAR_MIN_W)
+            appui_progress(pixels, w, h,
+                           (struct appui_rect){cpu_cell.x, row_y + ROW_H - 7,
+                                               cpu_cell.w, 3},
+                           row->cpu_tenths, 1000);
+        appui_label(pixels, w, h,
+                    (struct appui_rect){memory_x + 8, row_y,
+                                        appui_max(20, w - memory_x - 16 -
+                                                      scroll_w),
+                                        ROW_H},
+                    memory, UI_FONT_BODY, fg, UI_ALIGN_RIGHT);
     }
 
-    if (process_count > rows) {
-        struct appui_rect track = {w - 10, body_y, 4, rows * ROW_H};
-        int thumb_h = appui_max(20, track.h * rows / process_count);
-        int maximum = process_count - rows;
-        int thumb_y = track.y + (track.h - thumb_h) * scroll_row /
-                                appui_max(1, maximum);
-        appui_fill_round(pixels, w, h, track, THEME_FIELD_BG);
-        appui_fill_round(pixels, w, h,
-                         (struct appui_rect){track.x, thumb_y,
-                                             track.w, thumb_h},
-                         THEME_TEXT_FAINT);
-    }
+    appui_scrollbar(pixels, w, h, table_scroll_track(), 1, table_content_px(),
+                    table_viewport_px(), scroll_row * ROW_H,
+                    scroll_dragging ||
+                    appui_inside(pointer_x, pointer_y, table_scroll_track()));
 }
 
 static void draw_line(struct appui_rect clip, int x0, int y0,
-                      int x1, int y1, int color) {
+                      int x1, int y1, uint32_t color) {
     int dx = x1 > x0 ? x1 - x0 : x0 - x1;
     int sx = x0 < x1 ? 1 : -1;
     int dy_abs = y1 > y0 ? y1 - y0 : y0 - y1;
@@ -625,19 +666,13 @@ static void draw_line(struct appui_rect clip, int x0, int y0,
 }
 
 static void draw_history_graph(struct appui_rect area, const int *history,
-                               int color) {
-    appui_fill_round(pixels, w, h, area, THEME_DIVIDER);
-    appui_fill(pixels, w, h,
-               (struct appui_rect){area.x + 1, area.y + 1,
-                                   area.w - 2, area.h - 2},
-               THEME_FIELD_BG);
+                               uint32_t color) {
+    appui_card(pixels, w, h, area);
     struct appui_rect plot = {area.x + 10, area.y + 8,
                               area.w - 20, area.h - 16};
     for (int i = 1; i < 4; i++) {
         int gy = plot.y + plot.h * i / 4;
-        appui_fill(pixels, w, h,
-                   (struct appui_rect){plot.x, gy, plot.w, 1},
-                   THEME_WIN_PANEL);
+        appui_separator(pixels, w, h, plot.x, gy, plot.w, 0);
     }
     int previous_x = plot.x;
     int previous_y = plot.y + plot.h -
@@ -657,30 +692,30 @@ static void draw_resources(void) {
     int top = TOOLBAR_H + TABS_H + 10;
     int graph_h = appui_max(36, (h - top - 120) / 2);
     char value[64];
+    struct appui_rect cpu_head = {16, top, appui_max(1, w - 32), 24};
     format_percent(value, system_cpu_tenths, sizeof(value));
-    draw_label(16, top, "CPU history", THEME_TEXT,
-               (struct appui_rect){12, top - 2, w - 24, 30});
-    int value_w = appui_text_width(value);
-    draw_label(w - 16 - value_w, top, value, THEME_ACCENT,
-               (struct appui_rect){12, top - 2, w - 24, 30});
+    appui_label(pixels, w, h, cpu_head, "CPU history", UI_FONT_BODY_LG,
+                UI_TEXT_PRIMARY, UI_ALIGN_LEFT);
+    appui_label(pixels, w, h, cpu_head, value, UI_FONT_BODY_LG,
+                UI_ACCENT_FILL, UI_ALIGN_RIGHT);
     draw_history_graph((struct appui_rect){12, top + 30, w - 24, graph_h},
-                       cpu_history, THEME_ACCENT);
+                       cpu_history, UI_ACCENT_FILL);
 
     int memory_y = top + 42 + graph_h;
+    struct appui_rect mem_head = {16, memory_y, appui_max(1, w - 32), 24};
     value[0] = 0;
     format_memory(value, memory_used_kb, sizeof(value));
     appui_append_text(value, " of ", sizeof(value));
     char total[24];
     format_memory(total, memory_total_kb, sizeof(total));
     appui_append_text(value, total, sizeof(value));
-    draw_label(16, memory_y, "Memory history", THEME_TEXT,
-               (struct appui_rect){12, memory_y - 2, w - 24, 30});
-    value_w = appui_text_width(value);
-    draw_label(w - 16 - value_w, memory_y, value, THEME_MAX_GREEN,
-               (struct appui_rect){12, memory_y - 2, w - 24, 30});
+    appui_label(pixels, w, h, mem_head, "Memory history", UI_FONT_BODY_LG,
+                UI_TEXT_PRIMARY, UI_ALIGN_LEFT);
+    appui_label(pixels, w, h, mem_head, value, UI_FONT_BODY_LG,
+                UI_SYS_SUCCESS, UI_ALIGN_RIGHT);
     draw_history_graph((struct appui_rect){12, memory_y + 30,
                                            w - 24, graph_h},
-                       memory_history, THEME_MAX_GREEN);
+                       memory_history, UI_SYS_SUCCESS);
 }
 
 static struct appui_rect confirm_box(void) {
@@ -700,25 +735,25 @@ static struct appui_rect confirm_button(int accept) {
 static void draw_confirmation(void) {
     if (confirm_pid < 0)
         return;
-    appui_fill_blend(pixels, w, h, (struct appui_rect){0, 0, w, h},
-                     THEME_DESKTOP_DEEP, 176);
+    appui_scrim(pixels, w, h);
     struct appui_rect box = confirm_box();
-    appui_fill_round(pixels, w, h, box, THEME_DANGER);
-    appui_fill_round(pixels, w, h,
-                     (struct appui_rect){box.x + 1, box.y + 1,
-                                         box.w - 2, box.h - 2},
-                     THEME_PANEL_RAISED);
-    draw_label(box.x + 18, box.y + 18, "End this process?",
-               THEME_TEXT,
-               (struct appui_rect){box.x + 12, box.y + 10,
-                                   box.w - 24, 32});
+    appui_card(pixels, w, h, box);
+    appui_stroke_round(pixels, w, h, box, UI_RADIUS_OVERLAY,
+                       UI_SYS_CRITICAL);
+    appui_label(pixels, w, h,
+                (struct appui_rect){box.x + 18, box.y + 14, box.w - 36, 30},
+                "End this process?", UI_FONT_TITLE, UI_TEXT_PRIMARY,
+                UI_ALIGN_LEFT);
     char message[112] = "Terminate PID ";
     appui_append_int(message, confirm_pid, sizeof(message));
-    appui_append_text(message, " and all of its threads?\n", sizeof(message));
-    appui_append_text(message, "Unsaved work may be lost.", sizeof(message));
-    draw_label(box.x + 18, box.y + 58, message, THEME_TEXT_DIM,
-               (struct appui_rect){box.x + 12, box.y + 48,
-                                   box.w - 24, 68});
+    appui_append_text(message, " and all of its threads?", sizeof(message));
+    appui_label(pixels, w, h,
+                (struct appui_rect){box.x + 18, box.y + 56, box.w - 36, 24},
+                message, UI_FONT_BODY, UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
+    appui_label(pixels, w, h,
+                (struct appui_rect){box.x + 18, box.y + 80, box.w - 36, 24},
+                "Unsaved work may be lost.", UI_FONT_BODY,
+                UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
     appui_button_ex(pixels, w, h, confirm_button(0), "Cancel",
                     APPUI_BTN_DEFAULT,
                     appui_pointer_state(confirm_button(0), pointer_x,
@@ -730,12 +765,12 @@ static void draw_confirmation(void) {
 }
 
 static void render(void) {
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h},
-               THEME_APP_BG);
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H},
-               THEME_TOOLBAR_BG);
-    draw_label(16, 18, "System Monitor", THEME_TEXT,
-               (struct appui_rect){12, 8, appui_max(100, w - 240), 40});
+    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, UI_BG_SOLID);
+    appui_toolbar(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H});
+    appui_label(pixels, w, h,
+                (struct appui_rect){16, 12, appui_max(1, w - 256), 34},
+                "System Monitor", UI_FONT_TITLE, UI_TEXT_PRIMARY,
+                UI_ALIGN_LEFT);
     appui_button_ex(pixels, w, h, refresh_button_rect(), "Refresh",
                     APPUI_BTN_DEFAULT,
                     appui_pointer_state(refresh_button_rect(), pointer_x,
@@ -746,28 +781,29 @@ static void render(void) {
                     appui_pointer_state(pause_button_rect(), pointer_x,
                                         pointer_y, pointer_buttons));
     appui_fill(pixels, w, h,
-               (struct appui_rect){0, TOOLBAR_H, w, TABS_H},
-               THEME_PANEL_BG);
-    appui_button_ex(pixels, w, h, tab_rect(TAB_PROCESSES), "Processes",
-                    APPUI_BTN_GHOST,
-                    appui_pointer_state(tab_rect(TAB_PROCESSES), pointer_x,
-                                        pointer_y, pointer_buttons) |
-                    (active_tab == TAB_PROCESSES ? APPUI_STATE_SELECTED : 0));
-    appui_button_ex(pixels, w, h, tab_rect(TAB_RESOURCES), "Resources",
-                    APPUI_BTN_GHOST,
-                    appui_pointer_state(tab_rect(TAB_RESOURCES), pointer_x,
-                                        pointer_y, pointer_buttons) |
-                    (active_tab == TAB_RESOURCES ? APPUI_STATE_SELECTED : 0));
+               (struct appui_rect){0, TOOLBAR_H, w, TABS_H}, UI_BG_SOLID);
+    appui_separator(pixels, w, h, 0, TOOLBAR_H + TABS_H - 1, w, 0);
+    appui_tab(pixels, w, h, tab_rect(TAB_PROCESSES), "Processes",
+              active_tab == TAB_PROCESSES,
+              appui_pointer_state(tab_rect(TAB_PROCESSES), pointer_x,
+                                  pointer_y, pointer_buttons));
+    appui_tab(pixels, w, h, tab_rect(TAB_RESOURCES), "Resources",
+              active_tab == TAB_RESOURCES,
+              appui_pointer_state(tab_rect(TAB_RESOURCES), pointer_x,
+                                  pointer_y, pointer_buttons));
 
     if (active_tab == TAB_PROCESSES) {
         draw_summary();
         draw_process_table();
         appui_fill(pixels, w, h,
                    (struct appui_rect){0, h - FOOTER_H, w, FOOTER_H},
-                   THEME_TOOLBAR_BG);
-        draw_label(14, h - 31, status_text, THEME_TEXT_DIM,
-                   (struct appui_rect){10, h - 42,
-                                       appui_max(40, w - 216), 36});
+                   UI_BG_LAYER);
+        appui_separator(pixels, w, h, 0, h - FOOTER_H, w, 0);
+        appui_label(pixels, w, h,
+                    (struct appui_rect){14, h - FOOTER_H,
+                                        appui_max(1, w - 220), FOOTER_H},
+                    status_text, UI_FONT_BODY, UI_TEXT_SECONDARY,
+                    UI_ALIGN_LEFT);
         int state = appui_pointer_state(end_button_rect(), pointer_x,
                                         pointer_y, pointer_buttons);
         if (!can_end_selected())
@@ -780,8 +816,10 @@ static void render(void) {
         format_uptime(uptime, sizeof(uptime));
         char footer[80] = "Uptime ";
         appui_append_text(footer, uptime, sizeof(footer));
-        draw_label(14, h - 28, footer, THEME_TEXT_DIM,
-                   (struct appui_rect){10, h - 40, w - 20, 34});
+        appui_label(pixels, w, h,
+                    (struct appui_rect){14, h - FOOTER_H,
+                                        appui_max(1, w - 28), FOOTER_H},
+                    footer, UI_FONT_BODY, UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
     }
     draw_confirmation();
 }
@@ -854,13 +892,40 @@ static void handle_click(int x, int y) {
         request_end_selected();
         return;
     }
+    if (table_scrollable() && appui_inside(x, y, table_scroll_track()))
+        return;
+    /* Bound the hit-test to the painted rows.  visible_rows() truncates, so
+     * the strip between the last row and the footer used to map to
+     * scroll_row + rows -- selecting a process that was never drawn there. */
     int body_y = table_y() + TABLE_HEADER_H;
-    if (x >= 8 && x < w - 8 && y >= body_y &&
-        y < h - FOOTER_H) {
+    int scroll_w = table_scrollable() ? APPUI_SCROLL_W : 0;
+    if (x >= 8 && x < w - 8 - scroll_w && y >= body_y &&
+        y < body_y + table_viewport_px()) {
         int index = scroll_row + (y - body_y) / ROW_H;
         if (index >= 0 && index < process_count)
             selected_pid = processes[index].pid;
     }
+}
+
+/* Scroll offset in pixels, clamped, then converted back to whole rows. */
+static void set_scroll_px(int offset_px) {
+    int max_px = appui_max(0, table_content_px() - table_viewport_px());
+    scroll_row = clamp_int(offset_px, 0, max_px) / ROW_H;
+    clamp_scroll();
+}
+
+/* Both the press test and the drag use appui_scroll_thumb, the same geometry
+ * appui_scrollbar paints, so the grabbable thumb cannot drift from it. */
+static void handle_scroll_press(int x, int y) {
+    struct appui_rect track = table_scroll_track();
+    if (!table_scrollable() || !appui_inside(x, y, track))
+        return;
+    if (!appui_inside(x, y, table_scroll_thumb()))
+        set_scroll_px(appui_scroll_offset_at(track, 1, table_content_px(),
+                                             table_viewport_px(), y));
+    scroll_dragging = 1;
+    scroll_drag_mouse = y;
+    scroll_drag_start_px = scroll_row * ROW_H;
 }
 
 static void handle_mouse(int x, int y, int buttons, int wheel) {
@@ -871,8 +936,22 @@ static void handle_mouse(int x, int y, int buttons, int wheel) {
         scroll_row -= wheel * 3;
         clamp_scroll();
     }
-    if ((buttons & 1) && !(previous_buttons & 1))
-        handle_click(x, y);
+    if ((buttons & 1) && !(previous_buttons & 1)) {
+        if (active_tab == TAB_PROCESSES && confirm_pid < 0)
+            handle_scroll_press(x, y);
+        if (!scroll_dragging)
+            handle_click(x, y);
+    }
+    if ((buttons & 1) && scroll_dragging) {
+        struct appui_rect track = table_scroll_track();
+        struct appui_rect thumb = table_scroll_thumb();
+        int span = appui_max(1, track.h - thumb.h);
+        int max_px = appui_max(0, table_content_px() - table_viewport_px());
+        set_scroll_px(scroll_drag_start_px +
+                      (y - scroll_drag_mouse) * max_px / span);
+    }
+    if (!(buttons & 1))
+        scroll_dragging = 0;
     previous_buttons = buttons;
 }
 

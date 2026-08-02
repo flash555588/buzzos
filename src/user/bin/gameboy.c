@@ -103,17 +103,27 @@ static int message(const char *title, const char *a, const char *b) {
         }
         if (appui_pixels_ensure(&p, &pcap, w, h, GUIAPP_MAX_W, GUIAPP_MAX_H) < 0)
             break;
-        appui_fill(p, w, h, (struct appui_rect){0, 0, w, h}, appui_gray(2));
-        appui_text(p, w, h, 28, 30, title, THEME_TEXT, -1,
-                   (struct appui_rect){20, 20, w - 40, 32});
-        appui_text(p, w, h, 28, 84, a, appui_rgb6(1, 4, 2), -1,
-                   (struct appui_rect){20, 76, w - 40, 30});
-        appui_text(p, w, h, 28, 126, b, THEME_TEXT, -1,
-                   (struct appui_rect){20, 118, w - 40, 60});
-        appui_text(p, w, h, 28, 200,
-                   "Controls: arrows, Z=B, X=A, Enter=Start, Backspace=Select",
-                   appui_gray(5), -1,
-                   (struct appui_rect){20, 192, w - 40, 34});
+        /* Empty state: icon, title, detail, then the controls hint as
+         * secondary text. */
+        appui_fill(p, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
+        {
+            int cx = w / 2;
+            int top = h / 2 - 110;
+            appui_icon(p, w, h, UI_ICON_GAMEPAD,
+                       (struct appui_rect){cx - 24, top, 48, 48}, 48,
+                       UI_TEXT_TERTIARY);
+            appui_label(p, w, h, (struct appui_rect){20, top + 64, w - 40, 32},
+                        title, UI_FONT_TITLE, UI_TEXT_PRIMARY,
+                        UI_ALIGN_CENTER);
+            appui_label(p, w, h, (struct appui_rect){20, top + 102, w - 40, 24},
+                        a, UI_FONT_BODY, UI_SYS_CAUTION, UI_ALIGN_CENTER);
+            appui_label(p, w, h, (struct appui_rect){20, top + 130, w - 40, 24},
+                        b, UI_FONT_BODY, UI_TEXT_SECONDARY, UI_ALIGN_CENTER);
+            appui_label(p, w, h, (struct appui_rect){20, top + 170, w - 40, 24},
+                        "Controls: arrows, Z=B, X=A, Enter=Start, "
+                        "Backspace=Select",
+                        UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_CENTER);
+        }
         if (guiapp_send_frame(&gui, title, w, h, p) < 0)
             break;
     }

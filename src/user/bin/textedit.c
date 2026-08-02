@@ -369,24 +369,17 @@ static struct appui_rect htrack(void) {
     return (struct appui_rect){e.x + 1, e.y + e.h - 11, e.w - 14, 10};
 }
 
+/* Scroll geometry delegates to appui, so the thumb the pointer grabs is the
+ * one that was painted.  Keeping a private copy of this math is how a drag
+ * ends up lagging the cursor. */
 static struct appui_rect vthumb(void) {
     struct appui_rect t = vtrack();
-    int maxs = max_scroll_y();
-    if (maxs <= 0)
-        return t;
-    int th = appui_max(22, t.h * t.h / appui_max(t.h, content_h()));
-    if (th > t.h) th = t.h;
-    return (struct appui_rect){t.x, t.y + scroll_y * (t.h - th) / maxs, t.w, th};
+    return appui_scroll_thumb(t, 1, content_h(), text_clip_rect().h, scroll_y);
 }
 
 static struct appui_rect hthumb(void) {
     struct appui_rect t = htrack();
-    int maxs = max_scroll_x();
-    if (maxs <= 0)
-        return t;
-    int tw = appui_max(28, t.w * t.w / appui_max(t.w, content_w()));
-    if (tw > t.w) tw = t.w;
-    return (struct appui_rect){t.x + scroll_x * (t.w - tw) / maxs, t.y, tw, t.h};
+    return appui_scroll_thumb(t, 0, content_w(), text_clip_rect().w, scroll_x);
 }
 
 static void draw_status_tail(int x, int y, const char *text, int color,
@@ -417,25 +410,19 @@ static void draw_status_tail(int x, int y, const char *text, int color,
 }
 
 static void draw_scrollbars(void) {
-    if (max_scroll_y() > 0) {
-        struct appui_rect thumb = vthumb();
-        thumb.x += 4;
-        thumb.w -= 8;
-        appui_fill_round(pixels, w, h, thumb, THEME_WIN_HOVER);
-    }
-    if (max_scroll_x() > 0) {
-        struct appui_rect thumb = hthumb();
-        thumb.y += 4;
-        thumb.h -= 8;
-        appui_fill_round(pixels, w, h, thumb, THEME_WIN_HOVER);
-    }
+    struct appui_rect clip = text_clip_rect();
+    appui_scrollbar(pixels, w, h, vtrack(), 1, content_h(), clip.h, scroll_y,
+                    drag_scroll_axis == 1 ||
+                    appui_inside(pointer_x, pointer_y, vtrack()));
+    appui_scrollbar(pixels, w, h, htrack(), 0, content_w(), clip.w, scroll_x,
+                    drag_scroll_axis == 0 ||
+                    appui_inside(pointer_x, pointer_y, htrack()));
 }
 
 static void render(void) {
     clamp_scrolls();
     appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
-    appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H},
-               THEME_TOOLBAR_BG);
+    appui_toolbar(pixels, w, h, (struct appui_rect){0, 0, w, TOOLBAR_H});
     struct appui_rect open = toolbar_button_rect(0);
     struct appui_rect save = toolbar_button_rect(1);
     struct appui_rect clear = toolbar_button_rect(2);
@@ -451,8 +438,11 @@ static void render(void) {
                                          TOOL_BUTTON_H});
 
     struct appui_rect editor = editor_rect();
-    appui_fill(pixels, w, h, editor, THEME_DOCUMENT_BG);
-    appui_border(pixels, w, h, editor, THEME_FIELD_BORDER, THEME_DIVIDER);
+    /* Dark editor surface: this is a code/text editor, not a page preview,
+     * so it follows the system theme rather than imitating paper. */
+    appui_fill(pixels, w, h, editor, THEME_EDITOR_BG);
+    appui_stroke_round(pixels, w, h, editor, UI_RADIUS_CONTROL,
+                       UI_STROKE_CONTROL);
     struct appui_rect clip = text_clip_rect();
     int x = clip.x - scroll_x;
     int y = clip.y - scroll_y;
@@ -490,7 +480,7 @@ static void render(void) {
         if (y + KFONT_HEIGHT >= clip.y && y < clip.y + clip.h &&
             x + glyph_w >= clip.x && x < clip.x + clip.w)
             appui_draw_codepoint(pixels, w, h, x, y, cp,
-                                 THEME_DOCUMENT_TEXT, -1, clip);
+                                 THEME_EDITOR_TEXT, -1, clip);
         x += glyph_w;
     }
     appui_fill(pixels, w, h,
