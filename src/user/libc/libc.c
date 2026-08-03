@@ -14,46 +14,39 @@
  *  Syscall wrappers (int 0x80, Linux-like ABI)
  * ================================================================ */
 
-static int syscall0(int nr) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(nr) : "memory");
-    return ret;
+static intptr_t syscall5(uintptr_t nr, uintptr_t a1, uintptr_t a2,
+                         uintptr_t a3, uintptr_t a4, uintptr_t a5) {
+    register uintptr_t arg4 __asm__("r10") = a4;
+    register uintptr_t arg5 __asm__("r8") = a5;
+    uintptr_t ret;
+    __asm__ volatile("int $0x80"
+                     : "=a"(ret)
+                     : "a"(nr), "D"(a1), "S"(a2), "d"(a3),
+                       "r"(arg4), "r"(arg5)
+                     : "memory", "cc");
+    return (intptr_t)ret;
 }
 
-static int syscall1(int nr, int a1) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(nr), "b"(a1) : "memory");
-    return ret;
+static intptr_t syscall0(uintptr_t nr) {
+    return syscall5(nr, 0, 0, 0, 0, 0);
 }
 
-static int syscall2(int nr, int a1, int a2) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(nr), "b"(a1), "c"(a2) : "memory");
-    return ret;
+static intptr_t syscall1(uintptr_t nr, uintptr_t a1) {
+    return syscall5(nr, a1, 0, 0, 0, 0);
 }
 
-static int syscall3(int nr, int a1, int a2, int a3) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(nr), "b"(a1), "c"(a2), "d"(a3) : "memory");
-    return ret;
+static intptr_t syscall2(uintptr_t nr, uintptr_t a1, uintptr_t a2) {
+    return syscall5(nr, a1, a2, 0, 0, 0);
 }
 
-static int syscall4(int nr, int a1, int a2, int a3, int a4) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(nr), "b"(a1), "c"(a2), "d"(a3), "S"(a4)
-                     : "memory");
-    return ret;
+static intptr_t syscall3(uintptr_t nr, uintptr_t a1, uintptr_t a2,
+                         uintptr_t a3) {
+    return syscall5(nr, a1, a2, a3, 0, 0);
 }
 
-static int syscall5(int nr, int a1, int a2, int a3, int a4, int a5) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(nr), "b"(a1), "c"(a2), "d"(a3), "S"(a4), "D"(a5)
-                     : "memory");
-    return ret;
+static intptr_t syscall4(uintptr_t nr, uintptr_t a1, uintptr_t a2,
+                         uintptr_t a3, uintptr_t a4) {
+    return syscall5(nr, a1, a2, a3, a4, 0);
 }
 
 static int gfx_origin_x;
@@ -100,7 +93,7 @@ void exit(int code) {
 }
 
 int open(const char *path, int flags, ...) {
-    return syscall2(SYS_OPEN, (int)(uintptr_t)path, flags);
+    return syscall2(SYS_OPEN, (uintptr_t)path, flags);
 }
 
 int close(int fd) {
@@ -112,43 +105,33 @@ int dup(int fd) {
 }
 
 int dup2(int oldfd, int newfd) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(SYS_DUP2), "b"(oldfd), "c"(newfd) : "memory");
-    return ret;
+    return (int)syscall2(SYS_DUP2, (uintptr_t)oldfd, (uintptr_t)newfd);
 }
 
 int stat(const char *path, struct stat *st) {
-    return syscall3(SYS_STAT, (int)(uintptr_t)path, (int)(uintptr_t)st, 0);
+    return syscall3(SYS_STAT, (uintptr_t)path, (uintptr_t)st, 0);
 }
 
 int fsstat(struct fs_info *info) {
-    return syscall1(SYS_FSSTAT, (int)(uintptr_t)info);
+    return syscall1(SYS_FSSTAT, (uintptr_t)info);
 }
 
 int getdents(int fd, struct dirent *ents, size_t count) {
-    return syscall3(SYS_GETDENTS, fd, (int)(uintptr_t)ents, (int)count);
+    return syscall3(SYS_GETDENTS, fd, (uintptr_t)ents, (int)count);
 }
 
 int spawn_process(const char *path, int flags) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(SYS_SPAWN_PROC), "b"((int)(uintptr_t)path), "c"(flags)
-                     : "memory");
-    return ret;
+    return (int)syscall2(SYS_SPAWN_PROC, (uintptr_t)path, (uintptr_t)flags);
 }
 
 int spawn_process_args(const char *path, char *const argv[], int argc, int flags) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(SYS_SPAWN_PROC_ARGS), "b"((int)(uintptr_t)path),
-                       "c"((int)(uintptr_t)argv), "d"(argc), "S"(flags)
-                     : "memory");
-    return ret;
+    return (int)syscall4(SYS_SPAWN_PROC_ARGS, (uintptr_t)path,
+                         (uintptr_t)argv, (uintptr_t)argc,
+                         (uintptr_t)flags);
 }
 
 int ps(char *buf, size_t size, int show_dead) {
-    return syscall3(SYS_PS, (int)(uintptr_t)buf, (int)size, show_dead);
+    return syscall3(SYS_PS, (uintptr_t)buf, (int)size, show_dead);
 }
 
 void reboot(void) {
@@ -157,19 +140,19 @@ void reboot(void) {
 }
 
 int mkdir(const char *path) {
-    return syscall1(SYS_MKDIR, (int)(uintptr_t)path);
+    return syscall1(SYS_MKDIR, (uintptr_t)path);
 }
 
 int unlink(const char *path) {
-    return syscall1(SYS_UNLINK, (int)(uintptr_t)path);
+    return syscall1(SYS_UNLINK, (uintptr_t)path);
 }
 
 int rmdir(const char *path) {
-    return syscall1(SYS_RMDIR, (int)(uintptr_t)path);
+    return syscall1(SYS_RMDIR, (uintptr_t)path);
 }
 
 int rename(const char *old_path, const char *new_path) {
-    return syscall2(SYS_RENAME, (int)(uintptr_t)old_path, (int)(uintptr_t)new_path);
+    return syscall2(SYS_RENAME, (uintptr_t)old_path, (uintptr_t)new_path);
 }
 
 int create(const char *path) {
@@ -180,11 +163,11 @@ int create(const char *path) {
 }
 
 int read(int fd, void *buf, size_t count) {
-    return syscall3(SYS_READ, fd, (int)(uintptr_t)buf, (int)count);
+    return syscall3(SYS_READ, fd, (uintptr_t)buf, (int)count);
 }
 
 int write(int fd, const void *buf, size_t count) {
-    return syscall3(SYS_WRITE, fd, (int)(uintptr_t)buf, (int)count);
+    return syscall3(SYS_WRITE, fd, (uintptr_t)buf, (int)count);
 }
 
 int lseek(int fd, int offset, int whence) {
@@ -196,51 +179,37 @@ int socket(int domain, int type, int protocol) {
 }
 
 int bind(int sd, const struct sockaddr_in *addr, size_t addrlen) {
-    return syscall3(SYS_BIND, sd, (int)(uintptr_t)addr, (int)addrlen);
+    return syscall3(SYS_BIND, sd, (uintptr_t)addr, (int)addrlen);
 }
 
 int connect(int sd, const struct sockaddr_in *addr, size_t addrlen) {
-    return syscall3(SYS_CONNECT, sd, (int)(uintptr_t)addr, (int)addrlen);
+    return syscall3(SYS_CONNECT, sd, (uintptr_t)addr, (int)addrlen);
 }
 
 int send(int sd, const void *buf, size_t len, int flags) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(SYS_SEND), "b"(sd), "c"((int)(uintptr_t)buf),
-                       "d"((int)len), "S"(flags)
-                     : "memory");
-    return ret;
+    return (int)syscall4(SYS_SEND, (uintptr_t)sd, (uintptr_t)buf,
+                         (uintptr_t)len, (uintptr_t)flags);
 }
 
 int recv(int sd, void *buf, size_t len, int flags) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(SYS_RECV), "b"(sd), "c"((int)(uintptr_t)buf),
-                       "d"((int)len), "S"(flags)
-                     : "memory");
-    return ret;
+    return (int)syscall4(SYS_RECV, (uintptr_t)sd, (uintptr_t)buf,
+                         (uintptr_t)len, (uintptr_t)flags);
 }
 
 int sendto(int sd, const void *buf, size_t len, int flags,
            const struct sockaddr_in *addr, size_t addrlen) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(SYS_SENDTO), "b"(sd), "c"((int)(uintptr_t)buf),
-                       "d"((int)len), "S"((int)(uintptr_t)addr), "D"((int)addrlen)
-                     : "memory");
     (void)flags;
-    return ret;
+    return (int)syscall5(SYS_SENDTO, (uintptr_t)sd, (uintptr_t)buf,
+                         (uintptr_t)len, (uintptr_t)addr,
+                         (uintptr_t)addrlen);
 }
 
 int recvfrom(int sd, void *buf, size_t len, int flags,
              struct sockaddr_in *addr, size_t addrlen) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret)
-                     : "a"(SYS_RECVFROM), "b"(sd), "c"((int)(uintptr_t)buf),
-                       "d"((int)len), "S"((int)(uintptr_t)addr), "D"((int)addrlen)
-                     : "memory");
     (void)flags;
-    return ret;
+    return (int)syscall5(SYS_RECVFROM, (uintptr_t)sd, (uintptr_t)buf,
+                         (uintptr_t)len, (uintptr_t)addr,
+                         (uintptr_t)addrlen);
 }
 
 int closesocket(int sd) {
@@ -248,11 +217,11 @@ int closesocket(int sd) {
 }
 
 int dns_resolve(const char *host, uint32_t *ip_out) {
-    return syscall2(SYS_DNS_RESOLVE, (int)(uintptr_t)host, (int)(uintptr_t)ip_out);
+    return syscall2(SYS_DNS_RESOLVE, (uintptr_t)host, (uintptr_t)ip_out);
 }
 
 int net_info(uint8_t mac[6], uint32_t *ip_out) {
-    return syscall2(SYS_NETINFO, (int)(uintptr_t)mac, (int)(uintptr_t)ip_out);
+    return syscall2(SYS_NETINFO, (uintptr_t)mac, (uintptr_t)ip_out);
 }
 
 uint16_t htons(uint16_t v) {
@@ -282,12 +251,12 @@ int gfx_fill_rect(int x, int y, int w, int h, int color) {
 
 int gfx_text(int x, int y, const char *s, int fg, int bg) {
     return syscall5(SYS_GFX_TEXT, x + gfx_origin_x, y + gfx_origin_y,
-                    (int)(uintptr_t)s, fg, bg);
+                    (uintptr_t)s, fg, bg);
 }
 
 int fb_blit(int x, int y, int w, int h, const uint32_t *pixels) {
     return syscall5(SYS_FB_BLIT, x + gfx_origin_x, y + gfx_origin_y, w, h,
-                    (int)(uintptr_t)pixels);
+                    (uintptr_t)pixels);
 }
 
 int fb_blit_stride(int x, int y, int w, int h, const uint32_t *pixels,
@@ -296,11 +265,11 @@ int fb_blit_stride(int x, int y, int w, int h, const uint32_t *pixels,
         return -1;
     unsigned int packed = (unsigned int)w | ((unsigned int)h << 16);
     return syscall5(SYS_FB_BLIT_STRIDE, x + gfx_origin_x, y + gfx_origin_y,
-                    (int)packed, (int)(uintptr_t)pixels, stride);
+                    (int)packed, (uintptr_t)pixels, stride);
 }
 
 int mouse_get(struct mouse_state *out) {
-    int ret = syscall1(SYS_MOUSE_GET, (int)(uintptr_t)out);
+    int ret = syscall1(SYS_MOUSE_GET, (uintptr_t)out);
     if (ret == 0 && out) {
         out->x -= gfx_origin_x;
         out->y -= gfx_origin_y;
@@ -309,7 +278,7 @@ int mouse_get(struct mouse_state *out) {
 }
 
 int gfx_info(struct gfx_info *out) {
-    return syscall1(SYS_GFX_INFO, (int)(uintptr_t)out);
+    return syscall1(SYS_GFX_INFO, (uintptr_t)out);
 }
 
 int gfx_acquire_display(void) {
@@ -338,14 +307,14 @@ int gfx_set_mode(int width, int height) {
 
 int gfx_map_surface(struct gfx_surface_map *out) {
     struct {
-        uint32_t address;
+        uintptr_t address;
         uint32_t width;
         uint32_t height;
         uint32_t stride_pixels;
         uint32_t bytes;
         uint32_t backend;
     } raw;
-    if (!out || syscall1(SYS_GFX_MAP_SURFACE, (int)(uintptr_t)&raw) < 0)
+    if (!out || syscall1(SYS_GFX_MAP_SURFACE, (uintptr_t)&raw) < 0)
         return -1;
     out->pixels = (uint32_t *)(uintptr_t)raw.address;
     out->width = raw.width;
@@ -370,7 +339,7 @@ int gfx_cursor_define(const uint32_t *pixels, int width, int height,
     wh = (uint32_t)width | ((uint32_t)height << 16);
     hot = (uint32_t)hot_x | ((uint32_t)hot_y << 16);
     xy = (uint32_t)x | ((uint32_t)y << 16);
-    return syscall4(SYS_GFX_CURSOR_DEFINE, (int)(uintptr_t)pixels,
+    return syscall4(SYS_GFX_CURSOR_DEFINE, (uintptr_t)pixels,
                     (int)wh, (int)hot, (int)xy);
 }
 
@@ -382,13 +351,13 @@ int gfx_cursor_move(int x, int y, int visible) {
 
 int font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap) {
     return syscall3(SYS_FONT_GLYPH, (int)codepoint,
-                    (int)(uintptr_t)bits, (int)cap);
+                    (uintptr_t)bits, (int)cap);
 }
 
 int gpu3d_info(struct gpu3d_caps *out) {
     if (!out)
         return -1;
-    return syscall1(SYS_GPU3D_INFO, (int)(uintptr_t)out);
+    return syscall1(SYS_GPU3D_INFO, (uintptr_t)out);
 }
 
 int gpu3d_resource_create(uint32_t target, uint32_t format, uint32_t bind,
@@ -396,7 +365,9 @@ int gpu3d_resource_create(uint32_t target, uint32_t format, uint32_t bind,
                           struct gpu3d_resource *out) {
     struct {
         uint32_t target, format, bind, width, height;
-        uint32_t id, address, bytes;
+        uint32_t id;
+        uintptr_t address;
+        size_t bytes;
     } raw;
     if (!out)
         return -1;
@@ -408,7 +379,7 @@ int gpu3d_resource_create(uint32_t target, uint32_t format, uint32_t bind,
     raw.id = 0;
     raw.address = 0;
     raw.bytes = 0;
-    if (syscall1(SYS_GPU3D_RESOURCE_CREATE, (int)(uintptr_t)&raw) < 0)
+    if (syscall1(SYS_GPU3D_RESOURCE_CREATE, (uintptr_t)&raw) < 0)
         return -1;
     out->id = raw.id;
     out->pixels = (uint32_t *)(uintptr_t)raw.address;
@@ -440,7 +411,7 @@ int gpu3d_resource_import_shm(uint32_t shm_token, uint32_t shm_offset,
     io.width = width;
     io.height = height;
     io.id = 0;
-    if (syscall1(SYS_GPU3D_IMPORT_SHM, (int)(uintptr_t)&io) < 0)
+    if (syscall1(SYS_GPU3D_IMPORT_SHM, (uintptr_t)&io) < 0)
         return -1;
     *out_id = io.id;
     return 0;
@@ -456,7 +427,7 @@ int gpu3d_upload(uint32_t id, int x, int y, int w, int h) {
 }
 
 int gpu3d_submit(const uint32_t *dwords, uint32_t count) {
-    return syscall2(SYS_GPU3D_SUBMIT, (int)(uintptr_t)dwords, (int)count);
+    return syscall2(SYS_GPU3D_SUBMIT, (uintptr_t)dwords, (int)count);
 }
 
 int gpu3d_present(int x, int y, int w, int h) {
@@ -496,17 +467,17 @@ int gettid(void) {
 }
 
 int chdir(const char *path) {
-    return syscall1(SYS_CHDIR, (int)(uintptr_t)path);
+    return syscall1(SYS_CHDIR, (uintptr_t)path);
 }
 
 char *getcwd(char *buf, size_t size) {
-    if (syscall3(SYS_GETCWD, (int)(uintptr_t)buf, (int)size, 0) < 0)
+    if (syscall3(SYS_GETCWD, (uintptr_t)buf, (int)size, 0) < 0)
         return (char *)0;
     return buf;
 }
 
 int waitpid(int pid, int *status, int options) {
-    return syscall3(SYS_WAITPID, pid, (int)(uintptr_t)status, options);
+    return syscall3(SYS_WAITPID, pid, (uintptr_t)status, options);
 }
 
 static void thread_return_trampoline(void) {
@@ -521,23 +492,23 @@ static void thread_return_trampoline(void) {
 }
 
 int pipe(int fds[2]) {
-    return syscall1(SYS_PIPE, (int)(uintptr_t)fds);
+    return syscall1(SYS_PIPE, (uintptr_t)fds);
 }
 
 int futex_wait(int *addr, int expected) {
-    return syscall2(SYS_FUTEX_WAIT, (int)(uintptr_t)addr, expected);
+    return syscall2(SYS_FUTEX_WAIT, (uintptr_t)addr, expected);
 }
 
 int futex_wait_timeout(int *addr, int expected, unsigned int timeout_ms) {
-    return syscall3(SYS_FUTEX_WAIT_TIMEOUT, (int)(uintptr_t)addr, expected, (int)timeout_ms);
+    return syscall3(SYS_FUTEX_WAIT_TIMEOUT, (uintptr_t)addr, expected, (int)timeout_ms);
 }
 
 int futex_wake(int *addr, int count) {
-    return syscall2(SYS_FUTEX_WAKE, (int)(uintptr_t)addr, count);
+    return syscall2(SYS_FUTEX_WAKE, (uintptr_t)addr, count);
 }
 
 int spawn(thread_fn func) {
-    return syscall2(SYS_SPAWN, (int)(uintptr_t)func, (int)(uintptr_t)thread_return_trampoline);
+    return syscall2(SYS_SPAWN, (uintptr_t)func, (uintptr_t)thread_return_trampoline);
 }
 
 void yield(void) {
@@ -553,11 +524,11 @@ void sleep_ms(unsigned int ms) {
 }
 
 int shm_create(size_t size, struct shm_mapping *mapping) {
-    return syscall2(SYS_SHM_CREATE, (int)size, (int)(uintptr_t)mapping);
+    return syscall2(SYS_SHM_CREATE, (int)size, (uintptr_t)mapping);
 }
 
 int shm_map(uint32_t token, struct shm_mapping *mapping) {
-    return syscall2(SYS_SHM_MAP, (int)token, (int)(uintptr_t)mapping);
+    return syscall2(SYS_SHM_MAP, (int)token, (uintptr_t)mapping);
 }
 
 int shm_unmap(uint32_t token) {
@@ -565,7 +536,7 @@ int shm_unmap(uint32_t token) {
 }
 
 int audio_write(const uint8_t *samples, size_t count) {
-    return syscall2(SYS_AUDIO_WRITE, (int)(uintptr_t)samples, (int)count);
+    return syscall2(SYS_AUDIO_WRITE, (uintptr_t)samples, (int)count);
 }
 
 int audio_config(unsigned int sample_rate) {
@@ -1695,13 +1666,13 @@ static struct heap_block *heap_grow(size_t size) {
     size_t total = size + sizeof(struct heap_block);
     if (total < HEAP_CHUNK)
         total = HEAP_CHUNK;
-    if (total > 0x7FFFFFFFu)
+    if (total > (size_t)INTPTR_MAX)
         return (void *)0;
-    int old_break = syscall1(SYS_SBRK, (int)total);
+    intptr_t old_break = syscall1(SYS_SBRK, (uintptr_t)total);
     if (old_break < 0)
         return (void *)0;
 
-    struct heap_block *block = (struct heap_block *)(uintptr_t)(uint32_t)old_break;
+    struct heap_block *block = (struct heap_block *)(uintptr_t)old_break;
     block->size = total - sizeof(struct heap_block);
     block->next = 0;
     block->prev = heap_tail;
@@ -1957,7 +1928,7 @@ int uname(struct utsname *name) {
     if (!name) return -1;
     strcpy(name->sysname, "BuzzOS"); strcpy(name->nodename, "buzzos");
     strcpy(name->release, "0.1"); strcpy(name->version, "NetSurf port");
-    strcpy(name->machine, "i386");
+    strcpy(name->machine, "x86_64");
     return 0;
 }
 

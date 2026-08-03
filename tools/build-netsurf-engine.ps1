@@ -41,8 +41,9 @@ $testament = @(
 Set-Content -Encoding Ascii (Join-Path $BuildDir "testament.h") $testament
 
 $common = @(
-    "--target=i386-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
-    "-fno-stack-protector", "-fno-pic", "-mno-sse", "-mno-mmx", "-O1",
+    "--target=x86_64-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
+    "-fno-stack-protector", "-fno-pic", "-mcmodel=large", "-mno-red-zone",
+    "-mno-stack-arg-probe", "-O1",
     "-DNDEBUG", "-D__serenity__", "-Dmonkey", "-Dnsmonkey",
     "-DWITHOUT_ICONV_FILTER", "-D_ALIGNED=__attribute__((aligned))",
     "-DSTMTEXPR=1", "-include", "src/user/ports/netsurf/buzzos_build_config.h",
@@ -161,8 +162,9 @@ foreach ($input in Get-ChildItem (Join-Path $bearsslRoot "src") -Recurse -Filter
     $objectName = "bearssl_" + $relative.Replace("\", "_").Replace("/", "_").Replace(".c", ".o")
     $object = Join-Path $BuildDir $objectName
     $bearsslFlags = @(
-        "--target=i386-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
-        "-fno-stack-protector", "-fno-pic", "-mno-sse", "-mno-mmx", "-O2",
+        "--target=x86_64-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
+        "-fno-stack-protector", "-fno-pic", "-mcmodel=large", "-mno-red-zone",
+        "-mno-stack-arg-probe", "-O2",
         "-DNDEBUG", "-Isrc/user/libc", "-I$bearsslRoot/inc", "-I$bearsslRoot/src"
     )
     & clang @bearsslFlags -c $input.FullName -o $object
@@ -183,7 +185,8 @@ if ($Link) {
         @($objects) + @($dependencyObjects)
     function Link-Executable([string]$Target, [string[]]$Inputs, [string]$ResponseName) {
         $responseFile = Join-Path $BuildDir $ResponseName
-        $linkArguments = @("-m", "elf_i386", "-T", "build/user/user.ld",
+        $linkArguments = @("-m", "elf_x86_64", "-z", "max-page-size=0x1000",
+                           "-T", "build/user/user.ld",
                            "-nostdlib", "-o", $Target) + $Inputs
         $linkArguments | ForEach-Object { '"' + $_ + '"' } |
             Set-Content -Encoding Ascii $responseFile

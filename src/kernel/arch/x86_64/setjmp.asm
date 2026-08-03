@@ -1,10 +1,10 @@
 bits 64
 section .text
-global setjmp
-global longjmp
+global kernel_setjmp
+global kernel_longjmp
 
-; SysV x86_64 callee-saved state: rbx, rbp, r12-r15, rsp, rip.
-setjmp:
+; jmp_buf: rbx, rbp, r12, r13, r14, r15, rsp, rip (8 uint64_t)
+kernel_setjmp:
     mov [rdi + 0], rbx
     mov [rdi + 8], rbp
     mov [rdi + 16], r12
@@ -18,7 +18,7 @@ setjmp:
     xor eax, eax
     ret
 
-longjmp:
+kernel_longjmp:
     mov rdx, rdi
     mov eax, esi
     test eax, eax

@@ -15,14 +15,14 @@ enum irq_trigger {
  */
 typedef int (*irq_handler_t)(void *context);
 
-static inline uint32_t irq_save(void) {
-    uint32_t flags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
+static inline uint64_t irq_save(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
     return flags;
 }
 
-static inline void irq_restore(uint32_t flags) {
-    __asm__ volatile("push %0; popf" :: "r"(flags) : "memory", "cc");
+static inline void irq_restore(uint64_t flags) {
+    __asm__ volatile("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
 }
 
 int irq_register_handler(uint8_t irq, irq_handler_t handler, void *context,

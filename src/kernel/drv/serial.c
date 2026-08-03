@@ -60,3 +60,10 @@ void serial_puthex(uint32_t v) {
         serial_putc(hex[(v >> (i * 4)) & 0xF]);
     }
 }
+
+void serial_puthex64(uint64_t v) {
+    static const char hex[] = "0123456789ABCDEF";
+    serial_puts("0x");
+    for (int i = 15; i >= 0; i--)
+        serial_putc(hex[(v >> (i * 4)) & 0xFu]);
+}

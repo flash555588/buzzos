@@ -5,7 +5,8 @@
  * GPU resources and their guest backing stores, and the passthrough for
  * command streams encoded in user space.  Command *encoding* deliberately
  * lives in the compositor, not here -- TGSI shader text and vertex data want
- * floating point and string handling, and the kernel is built -mno-sse.
+ * floating point and string handling, and the kernel is built with
+ * -mgeneral-regs-only so an interrupt cannot clobber a user task's XMM state.
  *
  * When virgl is unavailable (plain virtio-vga, Bochs VBE, Limine linear
  * framebuffer) every entry point fails cleanly and the software compositor
@@ -33,8 +34,8 @@ struct vgpu_3d_resource {
     uintptr_t phys;
     uint32_t bytes;
     uint32_t pages;
-    uint32_t user_va;
-    uint32_t owner_cr3; /* address space holding the user mapping */
+    uintptr_t user_va;
+    uintptr_t owner_cr3; /* address space holding the user mapping */
     uint32_t width;
     uint32_t height;
     uint32_t format;
@@ -120,7 +121,9 @@ static int vgpu_resource_create_3d(uint32_t resource_id, uint32_t target,
     request.array_size = 1;
     request.last_level = 0;
     request.nr_samples = 0;
-    request.flags = 0;
+    request.flags = target == VGPU_PIPE_TEXTURE_2D
+        ? VGPU_RESOURCE_FLAG_Y_0_TOP
+        : 0;
     return vgpu_submit_expect(&request, sizeof(request), VGPU_RESP_OK_NODATA);
 }
 
@@ -212,10 +215,11 @@ int virtio_gpu_3d_query(struct gpu3d_info *out) {
 int virtio_gpu_3d_resource_create(uint32_t target, uint32_t format,
                                   uint32_t bind, uint32_t width,
                                   uint32_t height, uint32_t *out_id,
-                                  uint32_t *out_user_va, uint32_t *out_bytes) {
+                                  uintptr_t *out_user_va, uint32_t *out_bytes) {
     struct vgpu_3d_resource *entry;
     uint64_t bytes64;
-    uint32_t bytes, pages, slot_va;
+    uint32_t bytes, pages;
+    uintptr_t slot_va;
     uintptr_t phys;
 
     if (!gpu_3d_ready || !out_id || !out_user_va || !out_bytes)
@@ -264,7 +268,7 @@ int virtio_gpu_3d_resource_create(uint32_t target, uint32_t format,
     }
 
     slot_va = USER_GPU_START +
-              (uint32_t)resource_slot_index(entry) * USER_GPU_SLOT_SIZE;
+              (uintptr_t)resource_slot_index(entry) * USER_GPU_SLOT_SIZE;
     entry->owner_cr3 = paging_current_cr3();
     if (paging_map_user_phys(entry->owner_cr3, slot_va, phys, bytes,
                              PAGE_PRESENT | PAGE_RW | PAGE_USER) < 0) {

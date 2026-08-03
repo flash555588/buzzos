@@ -3,7 +3,7 @@
 #include "serial.h"
 #include "syscall_internal.h"
 
-static int user_range_bounds_ok(uint32_t ptr, uint32_t len) {
+static int user_range_bounds_ok(uintptr_t ptr, size_t len) {
     if (len == 0)
         return 1;
     if (ptr < USER_PTR_START || ptr >= USER_PTR_END)
@@ -13,21 +13,21 @@ static int user_range_bounds_ok(uint32_t ptr, uint32_t len) {
     return 1;
 }
 
-int user_range_ok(uint32_t ptr, uint32_t len) {
+int user_range_ok(uintptr_t ptr, size_t len) {
     return user_range_bounds_ok(ptr, len) &&
            paging_user_range_accessible(ptr, len, 0);
 }
 
-int user_range_writable(uint32_t ptr, uint32_t len) {
+int user_range_writable(uintptr_t ptr, size_t len) {
     return user_range_bounds_ok(ptr, len) &&
            paging_user_range_accessible(ptr, len, 1);
 }
 
 int user_string_ok(const char *s) {
-    uint32_t ptr = (uint32_t)(uintptr_t)s;
+    uintptr_t ptr = (uintptr_t)s;
     if (!user_range_ok(ptr, 1))
         return 0;
-    for (uint32_t i = 0; i < 256; i++) {
+    for (size_t i = 0; i < 4096; i++) {
         if (!user_range_ok(ptr + i, 1))
             return 0;
         if (s[i] == 0)
@@ -39,20 +39,17 @@ int user_string_ok(const char *s) {
 static syscall_handler_fn syscall_table[256];
 
 void syscall_handler(struct syscall_frame *frame) {
-    uint32_t eax = frame->eax;
-    uint32_t ebx = frame->ebx;
-    uint32_t ecx = frame->ecx;
-    uint32_t edx = frame->edx;
-    uint32_t esi = frame->esi;
-    uint32_t edi = frame->edi;
-    (void)esi; (void)edi;
-
-    int nr = (int)eax;
-    int result = -1;
+    uintptr_t arg1 = frame->rdi;
+    uintptr_t arg2 = frame->rsi;
+    uintptr_t arg3 = frame->rdx;
+    uintptr_t arg4 = frame->r10;
+    uintptr_t arg5 = frame->r8;
+    int nr = (int)frame->rax;
+    intptr_t result = -1;
     if (nr < 256 && syscall_table[nr])
-        result = syscall_table[nr](ebx, ecx, edx, esi, edi);
+        result = syscall_table[nr](arg1, arg2, arg3, arg4, arg5);
 
-    frame->eax = (uint32_t)result;
+    frame->rax = (uint64_t)result;
 }
 
 void syscall_init(void) {

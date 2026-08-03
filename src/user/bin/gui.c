@@ -33,9 +33,11 @@ enum {
     DISPLAY_BTN_GAP = 6,
     DISPLAY_GROUP_LABEL_H = 22,
     DISPLAY_GROUP_GAP = 14,
-    /* Content Y of the "Resolution" heading inside the System window. */
-    STATUS_RES_HEAD_Y = 236,
-    STATUS_RES_BODY_Y = 264,
+    /* The System pane's resolution section starts below the flowed text rows;
+     * its Y is derived by status_res_head_y(), not hardcoded, so it cannot
+     * collide with the last row when the UI font or the row count changes. */
+    STATUS_TEXT_ROWS = 9,
+    STATUS_SECTION_GAP = 10,
     /* modern desktop layout: no top bar, so the work area starts at the screen top and
      * ends at the taskbar.  WORK_TOP is kept as a named zero because window
      * clamping, damage and maximise all measure from it. */
@@ -156,8 +158,11 @@ struct app_session {
     uint32_t shm_token;
     struct guiapp_shared_surface *shared;
     uint32_t gpu_resource;
+    uint32_t *gpu_pixels;
     int gpu_resource_w;
     int gpu_resource_h;
+    int gpu_content_w;
+    int gpu_content_h;
     int gpu_resource_canvas;
     int canvas_mode;
     uint16_t canvas_count;
@@ -1804,10 +1809,40 @@ static int display_group_at(int group_index, int *start_out, int *count_out) {
     return 0;
 }
 
+/* Whether the System pane carries the extra "virgl 3D available" row.  Cached
+ * rather than queried per paint because the resolution grid's origin is
+ * derived from the row count: hit testing runs between paints and must agree
+ * with what was last drawn. */
+static int status_virgl_row;
+
+static void status_refresh_caps(void) {
+    struct gpu3d_caps caps;
+    status_virgl_row = gpu3d_info(&caps) == 0 && caps.available;
+}
+
+/* Row pitch shared by the System pane's text block and by everything that
+ * measures below it. */
+static int status_row_step(void) {
+    return ui_line_height(UI_FONT_BODY) + 6;
+}
+
+/* Content Y of the "Resolution by aspect" heading: directly below the flowed
+ * text rows.  The previous fixed 236 assumed a smaller UI font, so the heading
+ * painted on top of "Esc returns to shell". */
+static int status_res_head_y(void) {
+    int rows = STATUS_TEXT_ROWS + (status_virgl_row ? 1 : 0);
+    return rows * status_row_step() + STATUS_SECTION_GAP;
+}
+
+/* Content Y of the first aspect-group label, below the heading. */
+static int status_res_body_y(void) {
+    return status_res_head_y() + ui_line_height(UI_FONT_BODY_LG) + 6;
+}
+
 /* Content-local layout of mode button `index` inside a panel of width `inner_w`. */
 static void display_mode_cell(int index, int inner_w,
                               int *x_out, int *y_out, int *w_out, int *h_out) {
-    int y = STATUS_RES_BODY_Y;
+    int y = status_res_body_y();
     int group = 0;
     int start = 0;
     int count = 0;
@@ -1835,7 +1870,7 @@ static void display_mode_cell(int index, int inner_w,
         group++;
     }
     *x_out = 0;
-    *y_out = STATUS_RES_BODY_Y;
+    *y_out = status_res_body_y();
     *w_out = inner_w;
     *h_out = DISPLAY_BTN_H;
 }
@@ -1860,7 +1895,7 @@ static struct rect status_group_label_rect(int group_index) {
     struct rect c = content_rect(WIN_STATUS);
     int ox = c.x - scroll_x[WIN_STATUS];
     int oy = c.y - scroll_y[WIN_STATUS];
-    int y = STATUS_RES_BODY_Y;
+    int y = status_res_body_y();
     int group = 0;
     int start = 0;
     int count = 0;
@@ -1873,7 +1908,7 @@ static struct rect status_group_label_rect(int group_index) {
              DISPLAY_GROUP_GAP;
         group++;
     }
-    return (struct rect){ox, oy + STATUS_RES_BODY_Y, c.w, DISPLAY_GROUP_LABEL_H};
+    return (struct rect){ox, oy + status_res_body_y(), c.w, DISPLAY_GROUP_LABEL_H};
 }
 
 static struct rect fit_window_rect(struct rect r, int old_sw, int old_sh,
@@ -1981,6 +2016,7 @@ static int switch_display_mode(int index) {
     /* gpu_present_init now binds the kernel's new 3-D render target. */
     (void)bind_scanout();
     gpu_present_init();
+    status_refresh_caps();
     relayout_after_mode_change(old_sw, old_sh);
     pointer_x = clamp_i(pointer_x, 0, sw - 1);
     pointer_y = clamp_i(pointer_y, 0, sh - 1);
@@ -2151,7 +2187,7 @@ static void draw_status(void) {
     s = ui_target();
     ox = c.x - scroll_x[WIN_STATUS];
     oy = c.y - scroll_y[WIN_STATUS];
-    step = ui_line_height(UI_FONT_BODY) + 6;
+    step = status_row_step();
 
     head = ui_style(UI_FONT_BODY_LG, UI_TEXT_PRIMARY);
     head.bold = 1;
@@ -2174,11 +2210,8 @@ static void draw_status(void) {
                    ? "VirtIO GPU 2D / 32bpp"
                    : "Bochs VBE / 32bpp",
                faint);
-    {
-        struct gpu3d_caps caps;
-        if (gpu3d_info(&caps) == 0 && caps.available)
-            ui_text_in(&s, STATUS_ROW(row++), "virgl 3D available", faint);
-    }
+    if (status_virgl_row)
+        ui_text_in(&s, STATUS_ROW(row++), "virgl 3D available", faint);
     copy_text(line, "Applications ", sizeof(line));
     append_uint(line, (unsigned int)app_count, sizeof(line));
     ui_text_in(&s, STATUS_ROW(row++), line, body);
@@ -2195,7 +2228,7 @@ static void draw_status(void) {
         struct ui_text_style st = head;
         if (mode_error)
             st.color = UI_SYS_CRITICAL;
-        ui_text_in(&s, ui_rect_make(ox, oy + STATUS_RES_HEAD_Y, c.w,
+        ui_text_in(&s, ui_rect_make(ox, oy + status_res_head_y(), c.w,
                                     ui_line_height(UI_FONT_BODY_LG)),
                    mode_error ? "Resolution unavailable"
                               : "Resolution by aspect",
@@ -3182,8 +3215,11 @@ static void gpu_app_texture_release(int slot) {
             (void)gpu3d_resource_destroy(app_sessions[slot].gpu_resource);
     }
     app_sessions[slot].gpu_resource = 0;
+    app_sessions[slot].gpu_pixels = 0;
     app_sessions[slot].gpu_resource_w = 0;
     app_sessions[slot].gpu_resource_h = 0;
+    app_sessions[slot].gpu_content_w = 0;
+    app_sessions[slot].gpu_content_h = 0;
     app_sessions[slot].gpu_resource_canvas = 0;
 }
 
@@ -3210,8 +3246,11 @@ static int gpu_canvas_render(int slot) {
                                   session->source_h) < 0)
             return -1;
         session->gpu_resource = gpucomp_layer_resource(layer);
+        session->gpu_pixels = 0;
         session->gpu_resource_w = session->source_w;
         session->gpu_resource_h = session->source_h;
+        session->gpu_content_w = session->source_w;
+        session->gpu_content_h = session->source_h;
         session->gpu_resource_canvas = 1;
     }
 
@@ -3226,6 +3265,12 @@ static int gpu_canvas_render(int slot) {
             if (command->w <= 0 || command->h <= 0)
                 continue;
             result = gpucomp_canvas_rect(layer, command->x, command->y,
+                                         command->w, command->h,
+                                         command->radius, command->color);
+        } else if (command->type == GUIAPP_CANVAS_LINE) {
+            if (command->radius <= 0)
+                continue;
+            result = gpucomp_canvas_line(layer, command->x, command->y,
                                          command->w, command->h,
                                          command->radius, command->color);
         } else if (command->type == GUIAPP_CANVAS_TEXT) {
@@ -3256,12 +3301,22 @@ static int gpu_canvas_render(int slot) {
     return result;
 }
 
-/* Bind the app's existing shared pixel pages directly as a virgl texture.
- * There is no GUI-side memcpy: TRANSFER_TO_HOST_3D reads the pages the app
- * published through guiapp. */
+/* Snapshot a CPU-rendered app surface into compositor-owned GPU backing.
+ *
+ * Importing the writable SHM pages directly looked attractive, but a resize
+ * changes their row stride while the app is publishing.  TRANSFER_TO_HOST_3D
+ * can then consume half of one generation and half of the next; detecting the
+ * sequence change afterwards is too late because the host texture has already
+ * been modified.  A private texture makes the seqlock effective: copy first,
+ * verify, and only then let the host read immutable backing. */
 static int gpu_app_texture_sync(int slot, struct rect dirty) {
     struct app_session *session;
-    int width, height;
+    struct gpu3d_resource candidate;
+    int width, height, stride, layer, need_new;
+    int allocation_w, allocation_h;
+    uint32_t sequence, old_resource;
+    uint32_t *destination;
+    const uint32_t *source;
     if (!gpu_present_ready || slot < 0 || slot >= MAX_GUI_APPS ||
         !app_sessions[slot].used || !app_sessions[slot].shared)
         return -1;
@@ -3273,48 +3328,108 @@ static int gpu_app_texture_sync(int slot, struct rect dirty) {
     if (session->canvas_mode)
         return gpu_canvas_render(slot);
 
-    if (session->gpu_resource_canvas || !session->gpu_resource ||
-        session->gpu_resource_w != width ||
-        session->gpu_resource_h != height) {
-        uint32_t resource = 0;
-        gpu_app_texture_release(slot);
-        if (gpu3d_resource_import_shm(
-                session->shm_token, GUIAPP_SHARED_HEADER_SIZE,
-                VIRGL_TARGET_TEXTURE_2D, VIRGL_FORMAT_B8G8R8X8_UNORM,
-                VIRGL_BIND_SAMPLER_VIEW, (uint32_t)width, (uint32_t)height,
-                &resource) < 0)
-            return -1;
-        session->gpu_resource = resource;
-        session->gpu_resource_w = width;
-        session->gpu_resource_h = height;
-        if (gpucomp_layer_import(gpu_app_layer(slot), resource, width, height,
-                                 VIRGL_FORMAT_B8G8R8X8_UNORM) < 0) {
-            gpu_app_texture_release(slot);
-            return -1;
-        }
-        dirty = (struct rect){0, 0, width, height};
-    }
+    source = (const uint32_t *)((const uint8_t *)session->shared +
+                                GUIAPP_SHARED_HEADER_SIZE);
+    /* Only consume the exact generation whose frame metadata the reader
+     * accepted.  Width is also the SHM row stride, so a mismatch must never
+     * be interpreted using the current texture dimensions. */
+    sequence = session->shared->sequence;
+    if ((sequence & 1u) || sequence != session->last_sequence ||
+        session->shared->width != (uint32_t)width ||
+        session->shared->height != (uint32_t)height)
+        return 1;
+    __sync_synchronize();
 
+    layer = gpu_app_layer(slot);
+    if (session->gpu_resource_canvas)
+        gpu_app_texture_release(slot);
+    need_new = !session->gpu_resource || !session->gpu_pixels ||
+               session->gpu_resource_w < width ||
+               session->gpu_resource_h < height;
+    if (session->gpu_content_w != width || session->gpu_content_h != height)
+        dirty = (struct rect){0, 0, width, height};
     dirty = intersect_rect(dirty, (struct rect){0, 0, width, height});
     if (dirty.w <= 0 || dirty.h <= 0)
         return 0;
-    /* Do not issue DMA while the application is in the middle of publishing
-     * a new dirty rectangle.  Its reader thread will wake us for the newer
-     * sequence, so yielding here coalesces instead of copying torn pixels. */
-    uint32_t sequence = session->shared->sequence;
-    if (sequence & 1u)
-        return 1;
+
+    memset(&candidate, 0, sizeof(candidate));
+    if (need_new) {
+        /* Allocate the replacement without touching the currently displayed
+         * resource.  Only swap its sampler view after a stable full snapshot
+         * has uploaded successfully, so failed resize generations cannot
+         * flash a blank or half-written texture. */
+        allocation_w = width + width / 4;
+        allocation_h = height + height / 4;
+        if (allocation_w > GPUCOMP_TEXTURE_MAX_W)
+            allocation_w = GPUCOMP_TEXTURE_MAX_W;
+        if (allocation_h > GPUCOMP_TEXTURE_MAX_H)
+            allocation_h = GPUCOMP_TEXTURE_MAX_H;
+        if (gpu3d_resource_create(
+                VIRGL_TARGET_TEXTURE_2D, VIRGL_FORMAT_B8G8R8X8_UNORM,
+                VIRGL_BIND_SAMPLER_VIEW, (uint32_t)allocation_w,
+                (uint32_t)allocation_h, &candidate) < 0)
+            return -1;
+        destination = candidate.pixels;
+        stride = allocation_w;
+        dirty = (struct rect){0, 0, width, height};
+    } else {
+        destination = session->gpu_pixels;
+        stride = session->gpu_resource_w;
+    }
+    if (!destination || stride < width) {
+        if (candidate.id)
+            (void)gpu3d_resource_destroy(candidate.id);
+        return -1;
+    }
+
+    for (int row = 0; row < dirty.h; row++) {
+        memcpy(destination + (size_t)(dirty.y + row) * (size_t)stride +
+                                    (size_t)dirty.x,
+               source + (size_t)(dirty.y + row) * (size_t)width +
+                        (size_t)dirty.x,
+               (size_t)dirty.w * sizeof(uint32_t));
+    }
     __sync_synchronize();
-    int result = gpu3d_upload(session->gpu_resource, dirty.x, dirty.y,
-                              dirty.w, dirty.h);
-    __sync_synchronize();
-    if (result == 0 && session->shared->sequence != sequence) {
-        /* The app started a newer publish while TRANSFER_TO_HOST_3D was
-         * reading.  Queue that generation instead of presenting a tear. */
+    if (session->shared->sequence != sequence) {
+        /* The private copy may be mixed, but it has not reached the host.
+         * Recopy the whole stable generation because the newer dirty region
+         * need not overlap the one we just attempted. */
+        if (candidate.id)
+            (void)gpu3d_resource_destroy(candidate.id);
         app_note_dirty(slot, (struct rect){0, 0, width, height});
         return 1;
     }
-    return result;
+
+    if (need_new) {
+        if (gpu3d_upload(candidate.id, dirty.x, dirty.y,
+                         dirty.w, dirty.h) < 0) {
+            (void)gpu3d_resource_destroy(candidate.id);
+            return -1;
+        }
+        old_resource = session->gpu_resource;
+        if (gpucomp_layer_import(layer, candidate.id, allocation_w,
+                                 allocation_h,
+                                 VIRGL_FORMAT_B8G8R8X8_UNORM) < 0 ||
+            gpucomp_layer_source_size(layer, width, height) < 0) {
+            (void)gpu3d_resource_destroy(candidate.id);
+            return -1;
+        }
+        session->gpu_resource = candidate.id;
+        session->gpu_pixels = candidate.pixels;
+        session->gpu_resource_w = allocation_w;
+        session->gpu_resource_h = allocation_h;
+        session->gpu_resource_canvas = 0;
+        if (old_resource)
+            (void)gpu3d_resource_destroy(old_resource);
+    } else {
+        if (gpucomp_layer_source_size(layer, width, height) < 0 ||
+            gpu3d_upload(session->gpu_resource, dirty.x, dirty.y,
+                         dirty.w, dirty.h) < 0)
+            return -1;
+    }
+    session->gpu_content_w = width;
+    session->gpu_content_h = height;
+    return 0;
 }
 
 static void gpu_canvas_capability_set(int enabled) {
@@ -5009,6 +5124,7 @@ static void init_desktop(void) {
     /* Try the GPU present path after the scanout is bound: it retargets the
      * compose buffer, and needs the software path as a working fallback. */
     gpu_present_init();
+    status_refresh_caps();
     scan_apps();
     keyevent_fd = open("/dev/keyevent", O_RDONLY);
     layout();

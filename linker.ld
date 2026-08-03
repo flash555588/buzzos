@@ -33,8 +33,15 @@ SECTIONS
        reserved from the physical allocator. */
     .boot_stack (NOLOAD) : ALIGN(16) {
         __boot_stack_bottom = .;
-        . += 0x10000;
+        . += 0x20000;
         __boot_stack_top = .;
+    }
+
+    /* Temporary long-mode tables used by the Multiboot2 transition.  They
+       must not be part of .bss because kernel_main clears .bss while they
+       are still the active CR3. */
+    .boot_paging (NOLOAD) : ALIGN(4096) {
+        *(.boot_paging)
     }
     __kernel_end = .;
 }

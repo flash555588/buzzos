@@ -46,6 +46,7 @@ enum { GUIAPP_CAP_GPU_CANVAS = 1u << 0 };
 enum {
     GUIAPP_CANVAS_RECT = 1,
     GUIAPP_CANVAS_TEXT = 2,
+    GUIAPP_CANVAS_LINE = 3,
 };
 
 enum {
@@ -60,8 +61,8 @@ enum {
 struct guiapp_canvas_command {
     uint16_t type;
     uint16_t flags;
-    int16_t x, y, w, h;
-    int16_t radius;
+    int16_t x, y, w, h; /* LINE stores (x0, y0, x1, y1) */
+    int16_t radius;     /* corner radius, or LINE thickness */
     int16_t aux;       /* text pixel size for GUIAPP_CANVAS_TEXT */
     uint32_t color;    /* 0x00RRGGBB */
     uint16_t text_offset;
@@ -179,6 +180,8 @@ int guiapp_canvas_begin(struct guiapp_ctx *ctx, struct guiapp_canvas *canvas,
                         int width, int height);
 int guiapp_canvas_rect(struct guiapp_canvas *canvas, int x, int y, int w,
                        int h, int radius, uint32_t color);
+int guiapp_canvas_line(struct guiapp_canvas *canvas, int x0, int y0, int x1,
+                       int y1, int thickness, uint32_t color);
 int guiapp_canvas_text(struct guiapp_canvas *canvas, int x, int y, int w,
                        int h, const char *text, int pixel_size,
                        uint32_t color, uint16_t flags);

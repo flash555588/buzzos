@@ -540,7 +540,7 @@ int fb_display_acquire(int pid) {
 int fb_unmap_scanout_user(int pid) {
     if (pid <= 0 || scanout_mapped_pid != pid)
         return 0;
-    uint32_t cr3 = paging_current_cr3();
+    uintptr_t cr3 = paging_current_cr3();
     if (scanout_mapped_bytes)
         (void)paging_unmap_user_range(cr3, USER_DISPLAY_START, scanout_mapped_bytes);
     scanout_mapped_pid = 0;
@@ -580,8 +580,8 @@ int fb_map_scanout_user(int pid, struct fb_scanout_map *out) {
     if (scanout_mapped_pid == pid)
         (void)fb_unmap_scanout_user(pid);
 
-    uint32_t cr3 = paging_current_cr3();
-    uint32_t pte = PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_WT | PAGE_CD;
+    uintptr_t cr3 = paging_current_cr3();
+    uint64_t pte = PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_WT | PAGE_CD;
     if (paging_map_user_phys(cr3, USER_DISPLAY_START, phys, bytes, pte) < 0)
         return -1;
 

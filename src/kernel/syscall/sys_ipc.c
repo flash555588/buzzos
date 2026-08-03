@@ -122,14 +122,15 @@ static int futex_deadline_reached(uint32_t deadline) {
     return (int32_t)(timer_ticks() - deadline) >= 0;
 }
 
-int sys_pipe(uint32_t fds_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_pipe(uintptr_t fds_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
     if (!user_range_writable(fds_arg, sizeof(int) * 2))
         return -1;
     return vfs_pipe((int *)(uintptr_t)fds_arg);
 }
 
-static int futex_wait_common(uint32_t addr_arg, uint32_t expected, uint32_t timeout_ms, int use_timeout) {
+static int futex_wait_common(uintptr_t addr_arg, uint32_t expected,
+                             uint32_t timeout_ms, int use_timeout) {
     if (!user_range_ok(addr_arg, sizeof(int)))
         return -1;
     volatile int *addr = (volatile int *)(uintptr_t)addr_arg;
@@ -183,17 +184,17 @@ static int futex_wait_common(uint32_t addr_arg, uint32_t expected, uint32_t time
     return timed_out ? -2 : 0;
 }
 
-int sys_futex_wait(uint32_t addr_arg, uint32_t expected, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_futex_wait(uintptr_t addr_arg, uintptr_t expected, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
     return futex_wait_common(addr_arg, expected, 0, 0);
 }
 
-int sys_futex_wait_timeout(uint32_t addr_arg, uint32_t expected, uint32_t timeout_ms, uint32_t d, uint32_t e) {
+intptr_t sys_futex_wait_timeout(uintptr_t addr_arg, uintptr_t expected, uintptr_t timeout_ms, uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
     return futex_wait_common(addr_arg, expected, timeout_ms, 1);
 }
 
-int sys_futex_wake(uint32_t addr_arg, uint32_t count, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_futex_wake(uintptr_t addr_arg, uintptr_t count, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
     if (!user_range_ok(addr_arg, sizeof(int)))
         return -1;

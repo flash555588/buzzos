@@ -21,13 +21,13 @@ KERNEL_SRCS := \
 	src/kernel/core/kernel.c \
 	src/kernel/core/elf.c \
 	src/kernel/core/exec.c \
-	src/kernel/arch/i386/gdt.c \
-	src/kernel/arch/i386/idt.c \
-	src/kernel/arch/i386/irq.c \
-	src/kernel/arch/i386/apic.c \
-	src/kernel/arch/i386/paging.c \
-	src/kernel/arch/i386/fpu.c \
-	src/kernel/arch/i386/user.c \
+	src/kernel/arch/x86_64/gdt.c \
+	src/kernel/arch/x86_64/idt.c \
+	src/kernel/arch/x86_64/irq.c \
+	src/kernel/arch/x86_64/apic.c \
+	src/kernel/arch/x86_64/paging.c \
+	src/kernel/arch/x86_64/fpu.c \
+	src/kernel/arch/x86_64/user.c \
 	src/kernel/mm/pmm.c \
 	src/kernel/sched/task.c \
 	src/kernel/syscall/syscall.c \
@@ -71,10 +71,10 @@ KERNEL_SRCS := \
 	src/kernel/drv/ne2000.c
 
 KERNEL_ASMS := \
-	src/kernel/arch/i386/mb2_entry.asm \
-	src/kernel/arch/i386/isr.asm \
-	src/kernel/arch/i386/switch.asm \
-	src/kernel/arch/i386/setjmp.asm
+	src/kernel/arch/x86_64/mb2_entry.asm \
+	src/kernel/arch/x86_64/isr.asm \
+	src/kernel/arch/x86_64/switch.asm \
+	src/kernel/arch/x86_64/setjmp.asm
 
 KERNEL_C_OBJS  := $(patsubst src/kernel/%.c,$(OBJDIR)/%.o,$(KERNEL_SRCS))
 KERNEL_ASM_OBJS:= $(patsubst src/kernel/%.asm,$(OBJDIR)/%.o-asm,$(KERNEL_ASMS))
@@ -94,7 +94,7 @@ QEMU ?= C:/msys64/mingw64/bin/qemu-system-x86_64.exe
 QEMU_ACCEL ?= whpx
 # WHPX + "-cpu max" breaks on new Intel hosts (APX/MPX feature conflicts →
 # "Unexpected VP exit code 4"). BuzzOS only needs a plain 64-bit-capable
-# model; qemu64 is stable under WHPX and enough for the 32-bit kernel.
+# model; qemu64 supplies the long-mode, SSE2 and NX baseline BuzzOS requires.
 QEMU_CPU ?= qemu64
 # SDL+GL is much faster than default GTK under WHPX; clarity is acceptable.
 QEMU_DISPLAY ?= sdl,gl=on
@@ -102,9 +102,9 @@ QEMU_DISPLAY ?= sdl,gl=on
 # boot-time VBE framebuffer fallback.  Force the legacy path with
 #   make run QEMU_VIDEO="-vga std"
 # Smoke scripts that need deterministic VGA should set QEMU_VIDEO explicitly.
-QEMU_VIDEO ?= -vga none -device virtio-vga,xres=1600,yres=900
+QEMU_VIDEO ?= -vga none -device virtio-vga-gl,xres=1600,yres=900
 QEMU_INPUT ?= -device virtio-tablet-pci
-QEMU_BASE := -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 256 \
+QEMU_BASE := -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 4096 \
 	-drive format=raw,file=$(IMAGE) -no-reboot $(QEMU_VIDEO) \
 	$(QEMU_INPUT) -display $(QEMU_DISPLAY)
 QEMU_AUDIO_AC97 := -audiodev dsound,id=audio0 \
@@ -123,7 +123,7 @@ LIMINE_TOOL := $(LIMINE_DIR)/limine-tool-windows-x86/limine.exe
 KERNEL_INCLUDES := \
 	-Isrc/kernel \
 	-Isrc/kernel/core \
-	-Isrc/kernel/arch/i386 \
+	-Isrc/kernel/arch/x86_64 \
 	-Isrc/kernel/mm \
 	-Isrc/kernel/sched \
 	-Isrc/kernel/syscall \
@@ -134,17 +134,18 @@ KERNEL_INCLUDES := \
 	-Isrc/kernel/drv \
 	-I$(GENERATED_DIR)
 
-CFLAGS  := --target=i386-none-elf -std=c11 -ffreestanding -fno-builtin \
-	-fno-stack-protector -fno-pic -march=pentium3 -mtune=generic \
-	-fomit-frame-pointer -mno-sse -mno-mmx -O2 -Wall -Wextra \
+CFLAGS  := --target=x86_64-none-elf -std=c11 -ffreestanding -fno-builtin \
+	-fno-stack-protector -fno-pic -mcmodel=small -mno-red-zone \
+	-mno-stack-arg-probe -mgeneral-regs-only -fomit-frame-pointer \
+	-O2 -Wall -Wextra \
 	$(KERNEL_INCLUDES)
 
 # User programs may use x87 and SSE; the scheduler preserves full FXSAVE state.
-UCFLAGS := --target=i386-none-elf -std=c11 -ffreestanding -fno-builtin \
-	-fno-stack-protector -fno-pic -march=pentium3 -mtune=generic \
-	-fomit-frame-pointer -mno-sse -mno-mmx -mfpmath=387 -O3 \
+UCFLAGS := --target=x86_64-none-elf -std=c11 -ffreestanding -fno-builtin \
+	-fno-stack-protector -fno-pic -mcmodel=large -mno-red-zone \
+	-mno-stack-arg-probe -fomit-frame-pointer -O3 \
 	-Wall -Wextra -Isrc/user/libc
-LDFLAGS := -m elf_i386 -T linker.ld -nostdlib
+LDFLAGS := -m elf_x86_64 -z max-page-size=0x1000 -T linker.ld -nostdlib
 
 # User programs (linked with crt0 + libc)
 USER_ELF := $(BUILD)/user/hello.elf
@@ -259,20 +260,20 @@ help:
 $(OBJDIR):
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(OBJDIR)' | Out-Null"
 
-$(OBJDIR)/%.o: src/kernel/%.c | $(OBJDIR)
+$(OBJDIR)/%.o: src/kernel/%.c Makefile | $(OBJDIR)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force (Split-Path '$@' -Parent) | Out-Null"
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/core/kernel.o: $(INITRD_H) $(APP_REGISTRY_H) src/kernel/drv/console.h
-$(OBJDIR)/core/exec.o: src/kernel/arch/i386/user.h src/kernel/arch/i386/user_bounds.h src/kernel/core/exec.h src/kernel/fs/vfs.h
-$(OBJDIR)/syscall/sys_proc.o: src/kernel/arch/i386/user.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/drv/timer.h src/kernel/drv/console.h src/kernel/drv/fb.h
-$(OBJDIR)/syscall/syscall.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/syscall/syscall.h
-$(OBJDIR)/syscall/sys_net.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/net/net.h
-$(OBJDIR)/syscall/sys_file.o: src/kernel/fs/minifs/minifs.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h
-$(OBJDIR)/syscall/sys_gfx.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/drv/font_unicode.h src/kernel/drv/console.h src/kernel/drv/fb.h src/kernel/sched/task.h
-$(OBJDIR)/syscall/sys_shm.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/arch/i386/paging.h src/kernel/mm/pmm.h src/kernel/sched/task.h
+$(OBJDIR)/core/exec.o: src/kernel/arch/x86_64/user.h src/kernel/arch/x86_64/user_bounds.h src/kernel/core/exec.h src/kernel/fs/vfs.h
+$(OBJDIR)/syscall/sys_proc.o: src/kernel/arch/x86_64/user.h src/kernel/syscall/syscall_internal.h src/kernel/arch/x86_64/user_bounds.h src/kernel/drv/timer.h src/kernel/drv/console.h src/kernel/drv/fb.h
+$(OBJDIR)/syscall/syscall.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/x86_64/user_bounds.h src/kernel/syscall/syscall.h
+$(OBJDIR)/syscall/sys_net.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/x86_64/user_bounds.h src/kernel/net/net.h
+$(OBJDIR)/syscall/sys_file.o: src/kernel/fs/minifs/minifs.h src/kernel/syscall/syscall_internal.h src/kernel/arch/x86_64/user_bounds.h
+$(OBJDIR)/syscall/sys_gfx.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/x86_64/user_bounds.h src/kernel/drv/font_unicode.h src/kernel/drv/console.h src/kernel/drv/fb.h src/kernel/sched/task.h
+$(OBJDIR)/syscall/sys_shm.o: src/kernel/syscall/syscall_internal.h src/kernel/arch/x86_64/user_bounds.h src/kernel/arch/x86_64/paging.h src/kernel/mm/pmm.h src/kernel/sched/task.h
 $(OBJDIR)/sched/task.o: src/kernel/syscall/sys_ipc.h src/kernel/syscall/syscall.h src/kernel/sched/task.h
-$(OBJDIR)/syscall/sys_ipc.o: src/kernel/syscall/sys_ipc.h src/kernel/syscall/syscall_internal.h src/kernel/arch/i386/user_bounds.h src/kernel/sched/task.h src/kernel/drv/timer.h
+$(OBJDIR)/syscall/sys_ipc.o: src/kernel/syscall/sys_ipc.h src/kernel/syscall/syscall_internal.h src/kernel/arch/x86_64/user_bounds.h src/kernel/sched/task.h src/kernel/drv/timer.h
 $(OBJDIR)/fs/minifs/minifs.o: src/kernel/fs/minifs/minifs.h src/kernel/sched/task.h
 $(OBJDIR)/fs/vfs.o: src/kernel/sched/task.h src/kernel/fs/vfs.h
 $(OBJDIR)/fs/devfs.o: src/kernel/drv/console.h
@@ -280,9 +281,9 @@ $(OBJDIR)/block/cache.o: src/kernel/sched/task.h
 $(OBJDIR)/fs/procfs.o: src/kernel/mm/pmm.h src/kernel/sched/task.h src/kernel/net/net.h src/kernel/syscall/sys_ipc.h
 $(OBJDIR)/net/net.o: src/kernel/net/net.h src/kernel/net/netdev.h src/kernel/sched/task.h src/kernel/drv/timer.h
 $(OBJDIR)/drv/timer.o: src/kernel/drv/timer.h
-$(OBJDIR)/core/elf.o: src/kernel/core/elf.h src/kernel/arch/i386/user_bounds.h
-$(OBJDIR)/arch/i386/paging.o: src/kernel/arch/i386/paging.h src/kernel/mm/pmm.h src/kernel/arch/i386/user_bounds.h
-$(OBJDIR)/arch/i386/user.o: src/kernel/arch/i386/user.h src/kernel/arch/i386/user_bounds.h
+$(OBJDIR)/core/elf.o: src/kernel/core/elf.h src/kernel/arch/x86_64/user_bounds.h
+$(OBJDIR)/arch/x86_64/paging.o: src/kernel/arch/x86_64/paging.h src/kernel/mm/pmm.h src/kernel/arch/x86_64/user_bounds.h
+$(OBJDIR)/arch/x86_64/user.o: src/kernel/arch/x86_64/user.h src/kernel/arch/x86_64/user_bounds.h
 $(OBJDIR)/mm/pmm.o: src/kernel/mm/pmm.h
 $(OBJDIR)/drv/surface.o: src/kernel/drv/surface.h
 $(OBJDIR)/drv/console.o: $(FONT_H) src/kernel/drv/console.h src/kernel/drv/fb.h src/kernel/drv/surface.h src/kernel/mm/pmm.h
@@ -295,9 +296,9 @@ $(FONT_H): tools/gen_kernel_font.ps1
 $(UNICODE_FONT_H): tools/gen_unicode_font.ps1
 	powershell -NoProfile -ExecutionPolicy Bypass -File tools/gen_unicode_font.ps1 -Out $(UNICODE_FONT_H)
 
-$(OBJDIR)/%.o-asm: src/kernel/%.asm | $(OBJDIR)
+$(OBJDIR)/%.o-asm: src/kernel/%.asm Makefile | $(OBJDIR)
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force (Split-Path '$@' -Parent) | Out-Null"
-	$(NASM) -f elf32 $< -o $@
+	$(NASM) -f elf64 $< -o $@
 
 $(OBJDIR)/kernel.elf: $(KERNEL_OBJS) linker.ld | $(OBJDIR)
 	$(LD) $(LDFLAGS) -o $@ $(KERNEL_OBJS)
@@ -318,7 +319,7 @@ $(BUILD)/user:
 
 $(BUILD)/user/user.ld: Makefile | $(BUILD)/user
 	@echo 'ENTRY(_start)' > $@
-	@echo 'SECTIONS { . = 0x20000000; .text : { *(.text.entry) *(.text*) } .rodata : { *(.rodata*) } .data : { *(.data*) } .bss : { *(.bss*) *(COMMON) } }' >> $@
+	@echo 'SECTIONS { . = 0x0000000100000000; .text : { *(.text.entry) *(.text*) } .rodata : { *(.rodata*) } .data : { *(.data*) } .bss : { *(.bss*) *(COMMON) } }' >> $@
 
 $(BUILD)/user/crt0.o: src/user/libc/crt0.c src/user/libc/libc.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/libc/crt0.c -o $(BUILD)/user/crt0.o
@@ -349,7 +350,8 @@ $(BUILD)/user/bcc.o: src/user/bin/bcc.c src/user/bin/basm.h src/user/libc/libc.h
 
 # Regenerate with: python tools/gen_pinyin_data.py
 # (needs assets/pinyin/pinyin.txt or pypinyin + GB2312)
-$(BUILD)/user/gui.o: src/user/bin/gui.c src/user/bin/pinyin_data.h $(USER_HEADERS) | $(BUILD)/user
+$(BUILD)/user/gui.o: src/user/bin/gui.c src/user/bin/pinyin_data.h \
+		src/user/libc/gpucomp.h $(USER_HEADERS) | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/bin/gui.c -o $(BUILD)/user/gui.o
 
 $(LODEPNG_OBJ): $(LODEPNG_DIR)/lodepng.c $(LODEPNG_DIR)/lodepng.h src/user/libc/libc.h | $(BUILD)/user
@@ -366,7 +368,7 @@ $(BUILD)/user/music.o: src/user/bin/music.c $(USER_HEADERS) $(MINIMP3_DIR)/minim
 
 $(BUILD)/user/music.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
 		$(BUILD)/user/music.o $(MINIMP3_OBJ) $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
 		$(BUILD)/user/music.o $(MINIMP3_OBJ)
 	$(OBJCOPY) --strip-sections $@
@@ -383,39 +385,39 @@ $(BUILD)/user/%.o: src/user/bin/%.c $(USER_HEADERS) | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(USER_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/hello.o $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/hello.o
 	$(OBJCOPY) --strip-sections $@
 
 $(SHELL_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/shell.o $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/shell.o
 	$(OBJCOPY) --strip-sections $@
 
 $(NANO_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/nano.o $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/nano.o
 	$(OBJCOPY) --strip-sections $@
 
 $(BASM_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/basm.o $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/basm.o
 	$(OBJCOPY) --strip-sections $@
 
 $(BCC_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/bcc.o $(BUILD)/user/basm_engine.o $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
 		$(BUILD)/user/bcc.o $(BUILD)/user/basm_engine.o
 	$(OBJCOPY) --strip-sections $@
 
 $(GUI_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/gui.o $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/gui.o
 	$(OBJCOPY) --strip-sections $@
 
 $(BUILD)/user/browser.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
 		$(BUILD)/user/browser.o $(LODEPNG_OBJ) $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
 		$(BUILD)/user/browser.o $(LODEPNG_OBJ)
 	$(OBJCOPY) --strip-sections $@
@@ -443,13 +445,13 @@ $(BUILD)/user/gameboy.o: src/user/bin/gameboy.c $(USER_HEADERS) $(BINJGB_DIR)/em
 
 $(BUILD)/user/gameboy.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
 		$(BUILD)/user/gameboy.o $(BINJGB_OBJS) $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
 		$(BUILD)/user/gameboy.o $(BINJGB_OBJS)
 	$(OBJCOPY) --strip-sections $@
 
 $(SETJMP_OBJ): src/user/libc/setjmp.asm | $(BUILD)/user
-	$(NASM) -f elf32 $< -o $@
+	$(NASM) -f elf64 $< -o $@
 
 $(BUILD)/user/lua:
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)/user/lua' | Out-Null"
@@ -459,7 +461,7 @@ $(BUILD)/user/lua/%.o: $(LUA_DIR)/%.c $(LUA_PORT_H) $(USER_HEADERS) | $(BUILD)/u
 
 $(LUA_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(SETJMP_OBJ) \
 		$(LUA_OBJS) $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(SETJMP_OBJ) $(LUA_OBJS)
 	$(OBJCOPY) --strip-sections $@
 
@@ -470,14 +472,14 @@ $(BUILD)/user/luaide.o: src/user/bin/luaide.c $(USER_HEADERS) $(LUA_PORT_H) \
 $(BUILD)/user/luaide.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		$(BUILD)/user/guiapp.o $(SETJMP_OBJ) $(BUILD)/user/luaide.o \
 		$(LUA_LIB_OBJS) $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o \
 		$(SETJMP_OBJ) $(BUILD)/user/luaide.o $(LUA_LIB_OBJS)
 	$(OBJCOPY) --strip-sections $@
 
 $(NSPORTTEST_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		$(BUILD)/user/nsporttest.o $(NETSURF_PORT_OBJ) $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		$(BUILD)/user/nsporttest.o $(NETSURF_PORT_OBJ)
 	$(OBJCOPY) --strip-sections $@
@@ -518,7 +520,7 @@ $(NETSURF_ELF): $(NSHTMLTEST_ELF) $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 $(NSMONKEY_ELF): $(NETSURF_ELF)
 
 $(BUILD)/user/%.elf: $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/%.o $(BUILD)/user/user.ld | $(BUILD)/user
-	$(LD) -m elf_i386 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
+	$(LD) -m elf_x86_64 -z max-page-size=0x1000 -T $(BUILD)/user/user.ld -nostdlib -o $@ \
 		$(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/guiapp.o $(BUILD)/user/$*.o
 	$(OBJCOPY) --strip-sections $@
 
@@ -561,7 +563,7 @@ doctor:
 	$(PYTHON) tools/doctor.py --python "$(PYTHON)" --make "$(MAKE)" --qemu "$(QEMU)"
 
 run: $(IMAGE)
-	$(QEMU) $(QEMU_COMMON) -serial stdio -device virtio-vga-gl
+	$(QEMU) $(QEMU_COMMON) -serial stdio
 
 run-hda: $(IMAGE)
 	$(QEMU) $(QEMU_HDA_COMMON) -serial stdio

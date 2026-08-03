@@ -12,8 +12,11 @@
 /* ------------------------------------------------------------------ */
 /*  Assembly helper                                                     */
 /* ------------------------------------------------------------------ */
-extern void switch_context(uint32_t *old_esp_ptr, uint32_t *new_esp);
-extern tss32_t tss;
+extern void switch_context(uintptr_t *old_rsp_ptr, uintptr_t new_rsp);
+extern tss64_t tss;
+extern uint8_t __boot_stack_top;
+
+#define KERNEL_STACK_PAGES 8u
 
 /* ------------------------------------------------------------------ */
 /*  Globals                                                             */
@@ -81,7 +84,7 @@ static int process_has_live_tasks(int owner) {
     return 0;
 }
 
-static int process_cr3_referenced(uint32_t cr3, int owner) {
+static int process_cr3_referenced(uintptr_t cr3, int owner) {
     for (int i = 0; i < num_tasks; i++) {
         if (task_process_owner(&tasks[i]) != owner && tasks[i].cr3 == cr3)
             return 1;
@@ -96,9 +99,10 @@ static void task_reap_one(int id) {
         return;
 
     if (tasks[id].kstack) {
-        pmm_free_pages((uintptr_t)(tasks[id].kstack - 2 * PAGE_SIZE), 2);
+        pmm_free_pages(tasks[id].kstack - KERNEL_STACK_PAGES * PAGE_SIZE,
+                       KERNEL_STACK_PAGES);
         tasks[id].kstack = 0;
-        tasks[id].esp = 0;
+        tasks[id].rsp = 0;
         tasks[id].esp0 = 0;
     }
 
@@ -107,7 +111,7 @@ static void task_reap_one(int id) {
         syscall_release_thread(id);
     if (owner == id && !process_has_live_tasks(id)) {
         syscall_cleanup_process(id);
-        uint32_t cr3 = tasks[id].cr3;
+        uintptr_t cr3 = tasks[id].cr3;
         if (cr3 && cr3 != paging_kernel_cr3() && !process_cr3_referenced(cr3, id)) {
             paging_destroy_user_space(cr3);
             for (int i = 0; i < num_tasks; i++) {
@@ -149,11 +153,11 @@ void sched_init(void) {
     num_tasks  = 0;
     current_id = 0;
 
-    /* Task 0 = idle, reusing the boot stack (0x90000) */
+    /* Task 0 = idle, reusing the linker-owned bootstrap stack. */
     tasks[0].id     = 0;
     tasks[0].state  = TASK_RUNNING;
-    tasks[0].kstack = 0x90000;
-    tasks[0].esp0   = 0x90000;
+    tasks[0].kstack = (uintptr_t)&__boot_stack_top;
+    tasks[0].esp0   = tasks[0].kstack;
     tasks[0].cr3    = paging_current_cr3();
     tasks[0].exit_code = 0;
     tasks[0].console_silent = 0;
@@ -204,29 +208,38 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
         id = num_tasks++;
     if (id < 0) return -1;
 
-    /* Allocate 2 pages (8 KiB) for the kernel stack */
-    uintptr_t stack_base = pmm_alloc_pages(2);
+    /* 64-bit interrupt frames and C calls need more headroom than i386. */
+    uintptr_t stack_base = pmm_alloc_pages(KERNEL_STACK_PAGES);
     if (!stack_base) return -1;
 
     /* Stack grows down from the top */
-    uintptr_t stack_top = stack_base + 2 * 4096;
-    uint32_t *sp = (uint32_t *)stack_top;
+    uintptr_t stack_top = stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
+    uint64_t *sp = (uint64_t *)stack_top;
 
     /* Build initial stack frame for switch_context */
-    *--sp = (uint32_t)entry;   /* "return address" */
-    *--sp = 0x00000202;        /* eflags (IF=1) */
-    *--sp = 0;                 /* eax */
-    *--sp = 0;                 /* ecx */
-    *--sp = 0;                 /* edx */
-    *--sp = 0;                 /* ebx */
-    *--sp = 0;                 /* ebp */
-    *--sp = 0;                 /* esi */
-    *--sp = 0;                 /* edi */
+    *--sp = 0;                         /* return target if entry returns */
+    *--sp = (uint64_t)(uintptr_t)entry;/* switch_context return address */
+    *--sp = UINT64_C(0x00000202);      /* RFLAGS (IF=1) */
+    *--sp = 0; /* rax */
+    *--sp = 0; /* rcx */
+    *--sp = 0; /* rdx */
+    *--sp = 0; /* rbx */
+    *--sp = 0; /* rbp */
+    *--sp = 0; /* rsi */
+    *--sp = 0; /* rdi */
+    *--sp = 0; /* r8  */
+    *--sp = 0; /* r9  */
+    *--sp = 0; /* r10 */
+    *--sp = 0; /* r11 */
+    *--sp = 0; /* r12 */
+    *--sp = 0; /* r13 */
+    *--sp = 0; /* r14 */
+    *--sp = 0; /* r15 */
 
     tasks[id].id     = id;
-    tasks[id].esp    = (uint32_t)sp;
-    tasks[id].kstack = (uint32_t)stack_top;
-    tasks[id].esp0   = (uint32_t)stack_top;
+    tasks[id].rsp    = (uintptr_t)sp;
+    tasks[id].kstack = stack_top;
+    tasks[id].esp0   = stack_top;
     tasks[id].cr3    = current_task ? current_task->cr3 : paging_current_cr3();
     tasks[id].exit_code = 0;
     tasks[id].console_silent = console_silent ? 1 : 0;
@@ -266,8 +279,8 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
         serial_puthex(id);
         serial_puts(" '");
         serial_puts(name);
-        serial_puts("' created, esp=0x");
-        serial_puthex((uint32_t)sp);
+        serial_puts("' created, rsp=");
+        serial_puthex64((uintptr_t)sp);
         serial_puts("\n");
     }
 
@@ -341,13 +354,13 @@ static void schedule(void) {
     task->state = TASK_RUNNING;
     current_id  = next;
     current_task = task;
-    tss.esp0 = task->esp0;
+    tss.rsp0 = task->esp0;
     if (paging_current_cr3() != task->cr3)
         paging_switch(task->cr3);
 
     fpu_state_save(prev->fpu_state);
     fpu_state_restore(task->fpu_state);
-    switch_context(&prev->esp, (uint32_t *)(uintptr_t)task->esp);
+    switch_context(&prev->rsp, task->rsp);
 
     irq_restore(irq_flags);
 }
@@ -573,7 +586,7 @@ int task_wait_pid(int pid, int *status, int options) {
     }
 }
 
-void task_set_cr3(int id, uint32_t cr3) {
+void task_set_cr3(int id, uintptr_t cr3) {
     if (id < 0 || id >= num_tasks) return;
     tasks[id].cr3 = cr3;
 }

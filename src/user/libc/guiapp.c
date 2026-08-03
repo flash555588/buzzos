@@ -299,6 +299,23 @@ int guiapp_canvas_rect(struct guiapp_canvas *canvas, int x, int y, int w,
     return 0;
 }
 
+int guiapp_canvas_line(struct guiapp_canvas *canvas, int x0, int y0, int x1,
+                       int y1, int thickness, uint32_t color) {
+    if (!canvas || thickness <= 0)
+        return -1;
+    struct guiapp_canvas_command *command =
+        canvas_push(canvas, GUIAPP_CANVAS_LINE);
+    if (!command)
+        return -1;
+    command->x = (int16_t)canvas_i16(x0);
+    command->y = (int16_t)canvas_i16(y0);
+    command->w = (int16_t)canvas_i16(x1);
+    command->h = (int16_t)canvas_i16(y1);
+    command->radius = (int16_t)canvas_i16(thickness);
+    command->color = color & 0x00FFFFFFu;
+    return 0;
+}
+
 int guiapp_canvas_text(struct guiapp_canvas *canvas, int x, int y, int w,
                        int h, const char *value, int pixel_size,
                        uint32_t color, uint16_t flags) {

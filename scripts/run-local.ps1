@@ -103,7 +103,7 @@ $QemuDisplay = if (-not [string]::IsNullOrWhiteSpace($env:QEMU_DISPLAY)) {
 $QemuVideo = if (-not [string]::IsNullOrWhiteSpace($env:QEMU_VIDEO)) {
     $env:QEMU_VIDEO.Trim()
 } else {
-    "-vga none -device virtio-vga,xres=1600,yres=900"
+    "-vga none -device virtio-vga-gl,xres=1600,yres=900"
 }
 $QemuInput = if (-not [string]::IsNullOrWhiteSpace($env:QEMU_INPUT)) {
     $env:QEMU_INPUT.Trim()
@@ -113,7 +113,7 @@ $QemuInput = if (-not [string]::IsNullOrWhiteSpace($env:QEMU_INPUT)) {
 $argLine = '-drive "format=raw,file=' + $imagePath + '"' +
     ' -accel ' + $QemuAccel +
     ' -cpu ' + $QemuCpu +
-    ' -m 256' +
+    ' -m 4096' +
     ' -serial "file:' + $serialPath + '"' +
     ' -monitor "tcp:127.0.0.1:' + $monitorPort + ',server,nowait"' +
     ' -no-reboot' +

@@ -35,6 +35,7 @@
 #include "libc.h"
 #include "virgl.h"
 #include "palette.h"
+#include "../../kernel/drv/font_builtin.h"
 
 enum {
     GPUCOMP_MAX_LAYERS = 24,
@@ -45,6 +46,7 @@ enum {
     GPUCOMP_H_FS_SOLID = 35,
     GPUCOMP_H_FS_GLYPH = 36,
     GPUCOMP_H_FS_ACRYLIC = 37,
+    GPUCOMP_H_FS_LINE = 38,
     GPUCOMP_H_VIEW_BASE = 40,  /* one sampler view per layer */
     GPUCOMP_H_FONT_VIEW = 72,
     GPUCOMP_H_CANVAS_SURFACE_BASE = 80,
@@ -189,6 +191,45 @@ static const char *GPUCOMP_FS_SOLID =
     " 18: MOV OUT[0], CONST[1]\n"
     " 19: MUL OUT[0].w, CONST[1].wwww, TEMP[2].xxxx\n"
     " 20: END\n";
+
+/* Antialiased round-capped line segment.  The quad is only the segment's
+ * padded bounding box; the fragment shader computes the distance to the
+ * closest point on the segment, so diagonal lines need exactly one draw.
+ *
+ * CONST[0] = (box_w, box_h, p0_x, p0_y), with p0 box-local/top-down.
+ * CONST[1] = (delta_x, delta_y, inverse_length_squared, half_width).
+ * CONST[2] = line colour. */
+static const char *GPUCOMP_FS_LINE =
+    "FRAG\n"
+    "DCL IN[0], GENERIC[0], PERSPECTIVE\n"
+    "DCL OUT[0], COLOR\n"
+    "DCL CONST[0..2]\n"
+    "DCL TEMP[0..3]\n"
+    "IMM[0] FLT32 { 0.0000, 1.0000, 0.5000, 0.0000}\n"
+    /* Convert the quad texcoord into top-down box-local pixels. */
+    "  0: MOV TEMP[0].x, IN[0].xxxx\n"
+    "  1: ADD TEMP[0].y, IMM[0].yyyy, -IN[0].yyyy\n"
+    "  2: MUL TEMP[0].xy, TEMP[0].xyyy, CONST[0].xyyy\n"
+    /* pa = pixel - p0; t = clamp(dot(pa, delta) / length^2). */
+    "  3: ADD TEMP[0].xy, TEMP[0].xyyy, -CONST[0].zwww\n"
+    "  4: DP2 TEMP[1].x, TEMP[0].xyyy, CONST[1].xyyy\n"
+    "  5: MUL TEMP[1].x, TEMP[1].xxxx, CONST[1].zzzz\n"
+    "  6: MOV_SAT TEMP[1].x, TEMP[1].xxxx\n"
+    /* q = pa - delta * t; distance = length(q). */
+    "  7: MUL TEMP[2].xy, TEMP[1].xxxx, CONST[1].xyyy\n"
+    "  8: ADD TEMP[2].xy, TEMP[0].xyyy, -TEMP[2].xyyy\n"
+    "  9: DP2 TEMP[3].x, TEMP[2].xyyy, TEMP[2].xyyy\n"
+    " 10: RSQ TEMP[3].y, TEMP[3].xxxx\n"
+    " 11: RCP TEMP[3].y, TEMP[3].yyyy\n"
+    " 12: SGT TEMP[3].z, TEMP[3].xxxx, IMM[0].xxxx\n"
+    " 13: MUL TEMP[3].y, TEMP[3].yyyy, TEMP[3].zzzz\n"
+    /* One-pixel linear coverage around the requested half width. */
+    " 14: ADD TEMP[3].x, TEMP[3].yyyy, -CONST[1].wwww\n"
+    " 15: SUB TEMP[3].x, IMM[0].zzzz, TEMP[3].xxxx\n"
+    " 16: MOV_SAT TEMP[3].x, TEMP[3].xxxx\n"
+    " 17: MOV OUT[0], CONST[2]\n"
+    " 18: MUL OUT[0].w, CONST[2].wwww, TEMP[3].xxxx\n"
+    " 19: END\n";
 
 /* Alpha-only glyph atlas tinted by CONST[0].  CONST[1] maps the unit quad
  * into one atlas cell. */
@@ -347,6 +388,8 @@ static inline int gpucomp_init(int screen_w, int screen_h) {
                         VIRGL_SHADER_FRAGMENT, GPUCOMP_FS_SOLID);
     virgl_create_shader(&g->cmds, GPUCOMP_H_FS_GLYPH,
                         VIRGL_SHADER_FRAGMENT, GPUCOMP_FS_GLYPH);
+    virgl_create_shader(&g->cmds, GPUCOMP_H_FS_LINE,
+                        VIRGL_SHADER_FRAGMENT, GPUCOMP_FS_LINE);
     if (virgl_flush(&g->cmds) < 0) {
         (void)gpu3d_resource_destroy(verts.id);
         g->layers[0].texture = 0;
@@ -492,6 +535,21 @@ static inline int gpucomp_layer_import(int index, uint32_t resource,
     return 0;
 }
 
+/* Imported textures may be deliberately larger than their live contents so
+ * resize can reuse the allocation.  Keep allocation stride and sampled area
+ * separate, exactly like grow-only compositor-owned layers. */
+static inline int gpucomp_layer_source_size(int index, int w, int h) {
+    struct gpucomp_layer *l;
+    if (index < 1 || index >= GPUCOMP_MAX_LAYERS || w <= 0 || h <= 0)
+        return -1;
+    l = &gpucomp_state.layers[index];
+    if (!l->texture || w > l->tex_w || h > l->tex_h)
+        return -1;
+    l->src_w = w;
+    l->src_h = h;
+    return 0;
+}
+
 static inline void gpucomp_layer_place(int index, int x, int y, int w, int h,
                                        int radius, int opacity) {
     struct gpucomp_layer *l;
@@ -569,7 +627,7 @@ static inline void gpucomp_rect_consts_target(uint32_t *out, int x, int y,
 static inline int gpucomp_canvas_ensure(int index, int w, int h) {
     return gpucomp_layer_ensure_bind(
         index, w, h, VIRGL_FORMAT_B8G8R8X8_UNORM,
-        VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW, 1, 0);
+        VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW, 1, 1);
 }
 
 static inline int gpucomp_target_ensure(int index, int w, int h) {
@@ -583,7 +641,6 @@ static inline int gpucomp_font_ensure(void) {
            TEX_H = GPUCOMP_FONT_CELL * GPUCOMP_FONT_ROWS };
     struct gpucomp *g = &gpucomp_state;
     struct gpu3d_resource atlas;
-    uint8_t bits[FONT_GLYPH_BYTES];
     if (g->font_texture)
         return 0;
     if (!g->ready || gpu3d_resource_create(
@@ -592,21 +649,27 @@ static inline int gpucomp_font_ensure(void) {
         return -1;
     memset(atlas.pixels, 0, (size_t)atlas.bytes);
     for (int i = 0; i < 96; i++) {
-        memset(bits, 0, sizeof(bits));
-        int glyph_w = font_glyph((uint32_t)(i + 32), bits, sizeof(bits));
-        if (glyph_w <= 0 || glyph_w > FONT_GLYPH_MAX_WIDTH)
-            glyph_w = font_glyph('?', bits, sizeof(bits));
-        if (glyph_w <= 0)
-            glyph_w = 8;
+        uint32_t codepoint = (uint32_t)(i + 32);
+        int source = codepoint >= KFONT_FIRST &&
+                     codepoint < KFONT_FIRST + KFONT_COUNT
+                         ? (int)codepoint - KFONT_FIRST
+                         : '?' - KFONT_FIRST;
+        int glyph_w = KFONT_WIDTH;
         g->glyph_width[i] = (uint8_t)glyph_w;
-        g->glyph_codepoint[i] = (uint32_t)(i + 32);
+        g->glyph_codepoint[i] = codepoint;
         int ox = (i % GPUCOMP_FONT_COLS) * GPUCOMP_FONT_CELL;
         int oy = (i / GPUCOMP_FONT_COLS) * GPUCOMP_FONT_CELL;
-        for (int y = 0; y < FONT_GLYPH_HEIGHT; y++)
-            for (int x = 0; x < glyph_w; x++)
-                if (bits[y * FONT_GLYPH_STRIDE + x / 8] &
-                    (uint8_t)(0x80u >> (x & 7)))
-                    atlas.pixels[(oy + y) * TEX_W + ox + x] = 0xFFFFFFFFu;
+        /* ASCII is not present in font_unicode_lookup(): normal UI text gets
+         * it from the built-in antialiased face.  Populate the GPU atlas from
+         * that same face instead of accepting a width with an empty bitmap. */
+        for (int y = 0; y < KFONT_HEIGHT; y++) {
+            for (int x = 0; x < glyph_w; x++) {
+                uint32_t alpha = kfont_alpha[source][y][x];
+                if (alpha)
+                    atlas.pixels[(oy + y) * TEX_W + ox + x] =
+                        (alpha << 24) | 0x00FFFFFFu;
+            }
+        }
     }
     if (gpu3d_upload(atlas.id, 0, 0, TEX_W, TEX_H) < 0) {
         (void)gpu3d_resource_destroy(atlas.id);
@@ -806,6 +869,57 @@ static inline int gpucomp_canvas_rect(int index, int x, int y, int w, int h,
     fs[3] = gpucomp_f32(1.0f);
     gpucomp_color_constants(&fs[4], color);
     virgl_set_constants(&g->cmds, VIRGL_SHADER_FRAGMENT, fs, 8);
+    virgl_draw(&g->cmds, 0, 4, VIRGL_PRIM_TRIANGLE_STRIP);
+    return 0;
+}
+
+static inline int gpucomp_canvas_line(int index, int x0, int y0, int x1,
+                                      int y1, int thickness,
+                                      uint32_t color) {
+    struct gpucomp *g = &gpucomp_state;
+    struct gpucomp_layer *l;
+    uint32_t vs[4], fs[12];
+    int min_x, min_y, max_x, max_y, pad, box_w, box_h;
+    float dx, dy, length_squared;
+    if (!g->ready || index < 1 || index >= GPUCOMP_MAX_LAYERS ||
+        thickness <= 0)
+        return -1;
+    l = &g->layers[index];
+    if (!l->render_target || gpucomp_canvas_room(g, 52) < 0)
+        return -1;
+    if (thickness > 64)
+        thickness = 64;
+
+    /* The extra pixel contains the analytic antialias fringe. */
+    pad = (thickness + 1) / 2 + 1;
+    min_x = (x0 < x1 ? x0 : x1) - pad;
+    min_y = (y0 < y1 ? y0 : y1) - pad;
+    max_x = (x0 > x1 ? x0 : x1) + pad;
+    max_y = (y0 > y1 ? y0 : y1) + pad;
+    box_w = max_x - min_x + 1;
+    box_h = max_y - min_y + 1;
+    dx = (float)(x1 - x0);
+    dy = (float)(y1 - y0);
+    length_squared = dx * dx + dy * dy;
+
+    gpucomp_canvas_scissor(l, 0, 0, l->src_w, l->src_h);
+    virgl_bind_shader(&g->cmds, GPUCOMP_H_FS_LINE,
+                      VIRGL_SHADER_FRAGMENT);
+    gpucomp_rect_consts_target(vs, min_x, min_y, box_w, box_h,
+                               l->tex_w, l->tex_h);
+    virgl_set_constants(&g->cmds, VIRGL_SHADER_VERTEX, vs, 4);
+    fs[0] = gpucomp_f32((float)box_w);
+    fs[1] = gpucomp_f32((float)box_h);
+    fs[2] = gpucomp_f32((float)(x0 - min_x));
+    fs[3] = gpucomp_f32((float)(y0 - min_y));
+    fs[4] = gpucomp_f32(dx);
+    fs[5] = gpucomp_f32(dy);
+    fs[6] = gpucomp_f32(length_squared > 0.0f
+                            ? 1.0f / length_squared
+                            : 0.0f);
+    fs[7] = gpucomp_f32((float)thickness * 0.5f);
+    gpucomp_color_constants(&fs[8], color);
+    virgl_set_constants(&g->cmds, VIRGL_SHADER_FRAGMENT, fs, 12);
     virgl_draw(&g->cmds, 0, 4, VIRGL_PRIM_TRIANGLE_STRIP);
     return 0;
 }
@@ -1190,6 +1304,8 @@ static inline void gpucomp_shutdown(void) {
                              VIRGL_H_SURFACE);
         virgl_destroy_object(&g->cmds, VIRGL_OBJECT_SHADER,
                              GPUCOMP_H_FS_GLYPH);
+        virgl_destroy_object(&g->cmds, VIRGL_OBJECT_SHADER,
+                             GPUCOMP_H_FS_LINE);
         virgl_destroy_object(&g->cmds, VIRGL_OBJECT_SHADER,
                              GPUCOMP_H_FS_ACRYLIC);
         virgl_destroy_object(&g->cmds, VIRGL_OBJECT_SHADER,

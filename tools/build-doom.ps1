@@ -24,9 +24,9 @@ $names = @(
     "i_video", "doomgeneric"
 )
 $flags = @(
-    "--target=i386-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
-    "-fno-stack-protector", "-fno-pic", "-march=pentium3", "-mtune=generic",
-    "-fomit-frame-pointer", "-mno-sse", "-mno-mmx", "-mfpmath=387",
+    "--target=x86_64-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
+    "-fno-stack-protector", "-fno-pic", "-mcmodel=large", "-mno-red-zone",
+    "-mno-stack-arg-probe", "-fomit-frame-pointer",
     "-O3", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-unused-variable",
     "-Wno-unused-function", "-DNORMALUNIX", "-DLINUX", "-D__BUZZOS__", "-D_DEFAULT_SOURCE",
     "-DDOOMGENERIC_RESX=320", "-DDOOMGENERIC_RESY=200", "-DFEATURE_SOUND",
@@ -49,7 +49,7 @@ $audioObject = Join-Path $build "doom_audio.o"
 if ($LASTEXITCODE -ne 0) { throw "Doom BuzzOS audio compile failed" }
 $objects += $audioObject
 
-& ld.lld -m elf_i386 -T build/user/user.ld -nostdlib -o $Output `
+& ld.lld -m elf_x86_64 -z max-page-size=0x1000 -T build/user/user.ld -nostdlib -o $Output `
     build/user/crt0.o build/user/libc.o build/user/guiapp.o @objects
 if ($LASTEXITCODE -ne 0) { throw "Doom link failed" }
 & llvm-objcopy --strip-sections $Output

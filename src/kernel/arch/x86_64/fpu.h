@@ -1,5 +1,5 @@
-#ifndef BUZZOS_I386_FPU_H
-#define BUZZOS_I386_FPU_H
+#ifndef BUZZOS_X86_64_FPU_H
+#define BUZZOS_X86_64_FPU_H
 
 #include <stdint.h>
 

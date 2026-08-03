@@ -6,8 +6,11 @@
 /*  Bitmap (1 bit per 4 KiB page)                                      */
 /* ------------------------------------------------------------------ */
 
-#define MAX_PAGES          65536      /* bitmap capacity: 256 MiB */
-#define PMM_MANAGED_LIMIT  0x10000000u /* current paging maps low 256 MiB */
+#define MAX_PAGES          1048576u   /* bitmap capacity: 4 GiB */
+/* Keep the PCI/firmware hole at the top of the 32-bit physical aperture out
+ * of the allocator.  QEMU's 4 GiB guest still supplies roughly 3.5 GiB below
+ * this boundary, all covered by the kernel's permanent identity map. */
+#define PMM_MANAGED_LIMIT  UINT64_C(0xE0000000)
 #define PMM_MANAGED_PAGES  (PMM_MANAGED_LIMIT / PAGE_SIZE)
 #define BITMAP_WORDS       (MAX_PAGES / 32)
 #define PAGE_MASK          ((uint64_t)PAGE_SIZE - 1u)

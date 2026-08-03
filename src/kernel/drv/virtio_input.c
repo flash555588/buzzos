@@ -173,13 +173,15 @@ static uintptr_t input_bar_address(const struct pci_device *device,
     if (!bar || (bar & 1u))
         return 0;
     uint32_t type = (bar >> 1) & 3u;
+    uintptr_t address = (uintptr_t)(bar & ~0x0Fu);
     if (type == 2u) {
-        if (index + 1u >= 6u || pci_bar(device, index + 1u) != 0)
+        if (index + 1u >= 6u)
             return 0;
+        address |= (uintptr_t)pci_bar(device, index + 1u) << 32;
     } else if (type == 3u) {
         return 0;
     }
-    return (uintptr_t)(bar & ~0x0Fu);
+    return address;
 }
 
 static void *input_map_capability(const struct pci_device *device,
@@ -187,7 +189,7 @@ static void *input_map_capability(const struct pci_device *device,
     uint8_t bar_index = pci_config_read8(device, capability + 4u);
     uint32_t offset = pci_config_read32(device, capability + 8u);
     uintptr_t bar = input_bar_address(device, bar_index);
-    if (!bar || !length || offset > 0xFFFFFFFFu - (uint32_t)bar)
+    if (!bar || !length || bar > UINTPTR_MAX - (uintptr_t)offset)
         return 0;
     return paging_map_mmio(bar + offset, length);
 }
@@ -525,8 +527,7 @@ int virtio_input_init(void) {
         input_negotiate_features() < 0 ||
         input_read_axis_ranges() < 0 ||
         input_setup_eventq() < 0 ||
-        irq_register_handler(input_pci->irq_line, input_interrupt, 0, 1) < 0 ||
-        pci_enable_intx(input_pci) < 0) {
+        irq_register_handler(input_pci->irq_line, input_interrupt, 0, 1) < 0) {
         input_status_failed();
         pci_disable_intx(input_pci);
         serial_puts("[input] virtio tablet setup failed; PS/2 fallback\n");
@@ -540,6 +541,17 @@ int virtio_input_init(void) {
     input_ready = 1;
     input_status_add(VIRTIO_STATUS_DRIVER_OK);
     input_kick_eventq();
+    /* INTx stays masked until every handler-visible field and DRIVER_OK are
+     * published.  WHPX may deliver a pending level interrupt immediately
+     * when PCI_COMMAND.INTX_DISABLE is cleared. */
+    if (pci_enable_intx(input_pci) < 0) {
+        input_ready = 0;
+        input_status_failed();
+        pci_disable_intx(input_pci);
+        mouse_set_absolute_mode(0);
+        serial_puts("[input] virtio tablet IRQ unavailable; PS/2 fallback\n");
+        return -1;
+    }
     serial_puts("[input] virtio tablet absolute pointer ready\n");
     return 0;
 }

@@ -14,5 +14,6 @@ void serial_puts(const char *s);
 /* Cheap non-blocking write of a hex-formatted 32-bit value. Useful for
  * debugging values before printf exists. */
 void serial_puthex(uint32_t v);
+void serial_puthex64(uint64_t v);
 
 #endif /* BUZZOS_SERIAL_H */

@@ -195,8 +195,8 @@ enum {
 };
 
 /* IEEE-754 binary32 bit patterns for the constants the kernel-side encoder
- * needs.  The kernel is built with -mno-sse and must not touch the FPU, so
- * float literals are spelled as bits. */
+ * needs.  The kernel is built with -mgeneral-regs-only and must not touch the
+ * FPU/SIMD register file, so float literals are spelled as bits. */
 enum {
     VIRGL_F32_NEG_1 = 0xBF800000u,
     VIRGL_F32_0 = 0x00000000u,

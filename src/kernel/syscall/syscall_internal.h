@@ -5,117 +5,118 @@
 #include "syscall.h"
 #include "user_bounds.h"
 
-typedef int (*syscall_handler_fn)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+typedef intptr_t (*syscall_handler_fn)(uintptr_t, uintptr_t, uintptr_t,
+                                       uintptr_t, uintptr_t);
 
-int user_range_ok(uint32_t ptr, uint32_t len);
-int user_range_writable(uint32_t ptr, uint32_t len);
+int user_range_ok(uintptr_t ptr, size_t len);
+int user_range_writable(uintptr_t ptr, size_t len);
 int user_string_ok(const char *s);
 
-int sys_open_console_aware(uint32_t path_arg, uint32_t flags, uint32_t c, uint32_t d, uint32_t e);
-int sys_close(uint32_t fd, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_read(uint32_t fd, uint32_t buf, uint32_t count, uint32_t d, uint32_t e);
-int sys_write(uint32_t fd, uint32_t buf, uint32_t count, uint32_t d, uint32_t e);
-int sys_dup(uint32_t fd, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_dup2(uint32_t oldfd, uint32_t newfd, uint32_t c, uint32_t d, uint32_t e);
-int sys_stat(uint32_t path, uint32_t st, uint32_t c, uint32_t d, uint32_t e);
-int sys_getdents(uint32_t fd, uint32_t ents, uint32_t count, uint32_t d, uint32_t e);
-int sys_mkdir(uint32_t path, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_unlink(uint32_t path, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_create(uint32_t path, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_lseek(uint32_t fd, uint32_t offset, uint32_t whence, uint32_t d, uint32_t e);
-int sys_rmdir(uint32_t path, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_rename(uint32_t old_path, uint32_t new_path, uint32_t c, uint32_t d, uint32_t e);
-int sys_fsstat(uint32_t info_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
+intptr_t sys_open_console_aware(uintptr_t path_arg, uintptr_t flags, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_close(uintptr_t fd, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_read(uintptr_t fd, uintptr_t buf, uintptr_t count, uintptr_t d, uintptr_t e);
+intptr_t sys_write(uintptr_t fd, uintptr_t buf, uintptr_t count, uintptr_t d, uintptr_t e);
+intptr_t sys_dup(uintptr_t fd, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_dup2(uintptr_t oldfd, uintptr_t newfd, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_stat(uintptr_t path, uintptr_t st, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_getdents(uintptr_t fd, uintptr_t ents, uintptr_t count, uintptr_t d, uintptr_t e);
+intptr_t sys_mkdir(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_unlink(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_create(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_lseek(uintptr_t fd, uintptr_t offset, uintptr_t whence, uintptr_t d, uintptr_t e);
+intptr_t sys_rmdir(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_rename(uintptr_t old_path, uintptr_t new_path, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_fsstat(uintptr_t info_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
 
-int sys_exit(uint32_t code, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_spawn_proc(uint32_t path_arg, uint32_t flags, uint32_t c, uint32_t d, uint32_t e);
-int sys_spawn_proc_args(uint32_t path_arg, uint32_t argv_arg, uint32_t argc_arg,
-                        uint32_t flags, uint32_t e);
-int sys_ps(uint32_t buf, uint32_t size, uint32_t show_dead, uint32_t d, uint32_t e);
-int sys_reboot(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_spawn(uint32_t func_addr, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_yield(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_join(uint32_t tid_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_sleep(uint32_t ms, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_kill(uint32_t pid, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_getpid(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_gettid(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_chdir(uint32_t path, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_getcwd(uint32_t buf, uint32_t size, uint32_t c, uint32_t d, uint32_t e);
-int sys_waitpid(uint32_t pid, uint32_t status, uint32_t options, uint32_t d, uint32_t e);
-int sys_sbrk(uint32_t increment, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_monotonic_ms(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_realtime(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_shm_create(uint32_t size, uint32_t out_arg, uint32_t c, uint32_t d, uint32_t e);
-int sys_shm_map(uint32_t token, uint32_t out_arg, uint32_t c, uint32_t d, uint32_t e);
-int sys_shm_unmap(uint32_t token, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_audio_write(uint32_t data_arg, uint32_t size, uint32_t c, uint32_t d, uint32_t e);
-int sys_audio_config(uint32_t rate, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_audio_queued(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_audio_flush(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
+intptr_t sys_exit(uintptr_t code, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_spawn_proc(uintptr_t path_arg, uintptr_t flags, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_spawn_proc_args(uintptr_t path_arg, uintptr_t argv_arg, uintptr_t argc_arg,
+                        uintptr_t flags, uintptr_t e);
+intptr_t sys_ps(uintptr_t buf, uintptr_t size, uintptr_t show_dead, uintptr_t d, uintptr_t e);
+intptr_t sys_reboot(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_spawn(uintptr_t func_addr, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_yield(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_join(uintptr_t tid_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_sleep(uintptr_t ms, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_kill(uintptr_t pid, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_getpid(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_gettid(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_chdir(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_getcwd(uintptr_t buf, uintptr_t size, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_waitpid(uintptr_t pid, uintptr_t status, uintptr_t options, uintptr_t d, uintptr_t e);
+intptr_t sys_sbrk(uintptr_t increment, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_monotonic_ms(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_realtime(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_shm_create(uintptr_t size, uintptr_t out_arg, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_shm_map(uintptr_t token, uintptr_t out_arg, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_shm_unmap(uintptr_t token, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_audio_write(uintptr_t data_arg, uintptr_t size, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_audio_config(uintptr_t rate, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_audio_queued(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_audio_flush(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
 
-int sys_socket(uint32_t domain, uint32_t type, uint32_t protocol, uint32_t d, uint32_t e);
-int sys_connect(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen, uint32_t d, uint32_t e);
-int sys_send(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32_t e);
-int sys_recv(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32_t e);
-int sys_bind(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen, uint32_t d, uint32_t e);
-int sys_sendto(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t addr_arg, uint32_t addrlen);
-int sys_recvfrom(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t addr_arg, uint32_t addrlen);
-int sys_closesocket(uint32_t sd_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_dns_resolve(uint32_t host_arg, uint32_t ip_out_arg, uint32_t c, uint32_t d, uint32_t e);
-int sys_netinfo(uint32_t mac_arg, uint32_t ip_arg, uint32_t c, uint32_t d, uint32_t e);
+intptr_t sys_socket(uintptr_t domain, uintptr_t type, uintptr_t protocol, uintptr_t d, uintptr_t e);
+intptr_t sys_connect(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen, uintptr_t d, uintptr_t e);
+intptr_t sys_send(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t flags, uintptr_t e);
+intptr_t sys_recv(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t flags, uintptr_t e);
+intptr_t sys_bind(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen, uintptr_t d, uintptr_t e);
+intptr_t sys_sendto(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t addr_arg, uintptr_t addrlen);
+intptr_t sys_recvfrom(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t addr_arg, uintptr_t addrlen);
+intptr_t sys_closesocket(uintptr_t sd_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_dns_resolve(uintptr_t host_arg, uintptr_t ip_out_arg, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_netinfo(uintptr_t mac_arg, uintptr_t ip_arg, uintptr_t c, uintptr_t d, uintptr_t e);
 void sys_net_cleanup_owner(int owner);
 
-int sys_pipe(uint32_t fds_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_futex_wait(uint32_t addr_arg, uint32_t expected, uint32_t c, uint32_t d, uint32_t e);
-int sys_futex_wait_timeout(uint32_t addr_arg, uint32_t expected, uint32_t timeout_ms, uint32_t d, uint32_t e);
-int sys_futex_wake(uint32_t addr_arg, uint32_t count, uint32_t c, uint32_t d, uint32_t e);
-int sys_gfx_clear(uint32_t color, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_gfx_putpixel(uint32_t x, uint32_t y, uint32_t color, uint32_t d, uint32_t e);
-int sys_gfx_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
-int sys_gfx_text(uint32_t x, uint32_t y, uint32_t s_arg, uint32_t fg, uint32_t bg);
-int sys_fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t pixels_arg);
-int sys_fb_blit_stride(uint32_t x, uint32_t y, uint32_t packed_wh,
-                       uint32_t pixels_arg, uint32_t stride);
-int sys_mouse_get(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_gfx_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_font_glyph(uint32_t codepoint, uint32_t out_arg, uint32_t cap,
-                   uint32_t d, uint32_t e);
-int sys_gfx_acquire(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_gfx_release(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e);
-int sys_gfx_set_mode(uint32_t width, uint32_t height, uint32_t c,
-                     uint32_t d, uint32_t e);
-int sys_gfx_map_surface(uint32_t out_arg, uint32_t b, uint32_t c,
-                        uint32_t d, uint32_t e);
-int sys_gfx_present(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                    uint32_t e);
-int sys_gfx_cursor_define(uint32_t pixels_arg, uint32_t packed_wh,
-                          uint32_t packed_hot, uint32_t packed_xy,
-                          uint32_t e);
-int sys_gfx_cursor_move(uint32_t x, uint32_t y, uint32_t visible,
-                        uint32_t d, uint32_t e);
+intptr_t sys_pipe(uintptr_t fds_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_futex_wait(uintptr_t addr_arg, uintptr_t expected, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_futex_wait_timeout(uintptr_t addr_arg, uintptr_t expected, uintptr_t timeout_ms, uintptr_t d, uintptr_t e);
+intptr_t sys_futex_wake(uintptr_t addr_arg, uintptr_t count, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_clear(uintptr_t color, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_putpixel(uintptr_t x, uintptr_t y, uintptr_t color, uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_fill_rect(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h, uintptr_t color);
+intptr_t sys_gfx_text(uintptr_t x, uintptr_t y, uintptr_t s_arg, uintptr_t fg, uintptr_t bg);
+intptr_t sys_fb_blit(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h, uintptr_t pixels_arg);
+intptr_t sys_fb_blit_stride(uintptr_t x, uintptr_t y, uintptr_t packed_wh,
+                       uintptr_t pixels_arg, uintptr_t stride);
+intptr_t sys_mouse_get(uintptr_t out_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_info(uintptr_t out_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_font_glyph(uintptr_t codepoint, uintptr_t out_arg, uintptr_t cap,
+                   uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_acquire(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_release(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_set_mode(uintptr_t width, uintptr_t height, uintptr_t c,
+                     uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_map_surface(uintptr_t out_arg, uintptr_t b, uintptr_t c,
+                        uintptr_t d, uintptr_t e);
+intptr_t sys_gfx_present(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h,
+                    uintptr_t e);
+intptr_t sys_gfx_cursor_define(uintptr_t pixels_arg, uintptr_t packed_wh,
+                          uintptr_t packed_hot, uintptr_t packed_xy,
+                          uintptr_t e);
+intptr_t sys_gfx_cursor_move(uintptr_t x, uintptr_t y, uintptr_t visible,
+                        uintptr_t d, uintptr_t e);
 
-int sys_gpu3d_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d,
-                   uint32_t e);
-int sys_gpu3d_resource_create(uint32_t io_arg, uint32_t b, uint32_t c,
-                              uint32_t d, uint32_t e);
-int sys_gpu3d_resource_destroy(uint32_t id, uint32_t b, uint32_t c,
-                               uint32_t d, uint32_t e);
-int sys_gpu3d_import_shm(uint32_t io_arg, uint32_t b, uint32_t c,
-                         uint32_t d, uint32_t e);
-int sys_gui_event_sequence(uint32_t a, uint32_t b, uint32_t c,
-                           uint32_t d, uint32_t e);
-int sys_gui_event_wait(uint32_t expected, uint32_t timeout_ms, uint32_t c,
-                       uint32_t d, uint32_t e);
-int sys_gui_event_signal(uint32_t a, uint32_t b, uint32_t c,
-                         uint32_t d, uint32_t e);
-int sys_gpu3d_upload(uint32_t id, uint32_t packed_xy, uint32_t packed_wh,
-                     uint32_t d, uint32_t e);
-int sys_gpu3d_submit(uint32_t cmds_arg, uint32_t dwords, uint32_t c,
-                     uint32_t d, uint32_t e);
-int sys_gpu3d_present(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                      uint32_t e);
-int sys_gpu3d_scanout(uint32_t enable, uint32_t b, uint32_t c, uint32_t d,
-                      uint32_t e);
+intptr_t sys_gpu3d_info(uintptr_t out_arg, uintptr_t b, uintptr_t c, uintptr_t d,
+                   uintptr_t e);
+intptr_t sys_gpu3d_resource_create(uintptr_t io_arg, uintptr_t b, uintptr_t c,
+                              uintptr_t d, uintptr_t e);
+intptr_t sys_gpu3d_resource_destroy(uintptr_t id, uintptr_t b, uintptr_t c,
+                               uintptr_t d, uintptr_t e);
+intptr_t sys_gpu3d_import_shm(uintptr_t io_arg, uintptr_t b, uintptr_t c,
+                         uintptr_t d, uintptr_t e);
+intptr_t sys_gui_event_sequence(uintptr_t a, uintptr_t b, uintptr_t c,
+                           uintptr_t d, uintptr_t e);
+intptr_t sys_gui_event_wait(uintptr_t expected, uintptr_t timeout_ms, uintptr_t c,
+                       uintptr_t d, uintptr_t e);
+intptr_t sys_gui_event_signal(uintptr_t a, uintptr_t b, uintptr_t c,
+                         uintptr_t d, uintptr_t e);
+intptr_t sys_gpu3d_upload(uintptr_t id, uintptr_t packed_xy, uintptr_t packed_wh,
+                     uintptr_t d, uintptr_t e);
+intptr_t sys_gpu3d_submit(uintptr_t cmds_arg, uintptr_t dwords, uintptr_t c,
+                     uintptr_t d, uintptr_t e);
+intptr_t sys_gpu3d_present(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h,
+                      uintptr_t e);
+intptr_t sys_gpu3d_scanout(uintptr_t enable, uintptr_t b, uintptr_t c, uintptr_t d,
+                      uintptr_t e);
 
 #endif

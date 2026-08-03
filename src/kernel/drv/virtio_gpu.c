@@ -288,13 +288,15 @@ static uintptr_t gpu_bar_address(const struct pci_device *device,
     if (!bar || (bar & 1u))
         return 0;
     uint32_t type = (bar >> 1) & 3u;
+    uintptr_t address = (uintptr_t)(bar & ~0x0Fu);
     if (type == 2u) {
-        if (index + 1u >= 6u || pci_bar(device, index + 1u) != 0)
+        if (index + 1u >= 6u)
             return 0;
+        address |= (uintptr_t)pci_bar(device, index + 1u) << 32;
     } else if (type == 3u) {
         return 0;
     }
-    return (uintptr_t)(bar & ~0x0Fu);
+    return address;
 }
 
 static void *gpu_map_capability(const struct pci_device *device,
@@ -302,7 +304,7 @@ static void *gpu_map_capability(const struct pci_device *device,
     uint8_t bar_index = pci_config_read8(device, capability + 4u);
     uint32_t offset = pci_config_read32(device, capability + 8u);
     uintptr_t bar = gpu_bar_address(device, bar_index);
-    if (!bar || !length || offset > 0xFFFFFFFFu - (uint32_t)bar)
+    if (!bar || !length || bar > UINTPTR_MAX - (uintptr_t)offset)
         return 0;
     return paging_map_mmio(bar + offset, length);
 }

@@ -32,8 +32,8 @@ static int token_index(uint32_t token) {
 static uint32_t object_token(int i) {
     return ((uint32_t)objects[i].generation << 8) | (uint32_t)(i + 1);
 }
-static uint32_t object_va(int i) {
-    return USER_SHM_START + (uint32_t)i * USER_SHM_SLOT_SIZE;
+static uintptr_t object_va(int i) {
+    return USER_SHM_START + (uintptr_t)i * USER_SHM_SLOT_SIZE;
 }
 static struct shm_object *lookup(uint32_t token, int *index) {
     int i = token_index(token);
@@ -54,7 +54,7 @@ static void maybe_free_object(struct shm_object *o) {
         free_object(o);
 }
 
-int sys_shm_create(uint32_t size, uint32_t out_arg, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_shm_create(uintptr_t size, uintptr_t out_arg, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
     if (!size || size > USER_SHM_SLOT_SIZE ||
         !user_range_writable(out_arg, sizeof(struct syscall_shm_mapping))) return -1;
@@ -82,7 +82,7 @@ int sys_shm_create(uint32_t size, uint32_t out_arg, uint32_t c, uint32_t d, uint
         uint8_t *p = (uint8_t *)(uintptr_t)o->pages[i];
         for (uint32_t j = 0; j < PAGE_SIZE; j++) p[j] = 0;
     }
-    uint32_t va = object_va(index);
+    uintptr_t va = object_va(index);
     if (paging_map_shared_pages(va, o->pages, o->page_count) < 0) {
         shm_lock(); free_object(o); shm_unlock(); return -1;
     }
@@ -95,7 +95,7 @@ int sys_shm_create(uint32_t size, uint32_t out_arg, uint32_t c, uint32_t d, uint
     return 0;
 }
 
-int sys_shm_map(uint32_t token, uint32_t out_arg, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_shm_map(uintptr_t token, uintptr_t out_arg, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
     if (!user_range_writable(out_arg, sizeof(struct syscall_shm_mapping))) return -1;
     int owner = task_get_pid(), index;
@@ -114,7 +114,7 @@ int sys_shm_map(uint32_t token, uint32_t out_arg, uint32_t c, uint32_t d, uint32
     return 0;
 }
 
-int sys_shm_unmap(uint32_t token, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_shm_unmap(uintptr_t token, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
     int owner = task_get_pid(), index;
     if (owner <= 0 || owner >= MAX_TASKS) return -1;

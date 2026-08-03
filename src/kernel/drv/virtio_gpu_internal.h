@@ -31,6 +31,11 @@ enum {
 
     /* virtio_gpu_resource_create_3d.target -- PIPE_TEXTURE_2D. */
     VGPU_PIPE_TEXTURE_2D = 2,
+
+    /* virtio_gpu_resource_create_3d.flags.  This makes transfer boxes,
+     * framebuffer coordinates and QEMU scanout damage share the desktop's
+     * top-left origin. */
+    VGPU_RESOURCE_FLAG_Y_0_TOP = 1u << 0,
 };
 
 struct vgpu_ctrl_hdr {

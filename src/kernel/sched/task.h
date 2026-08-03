@@ -7,10 +7,10 @@
 /* Process Control Block. The saved register context is stored on the
  * task's own kernel stack; the PCB only holds the stack pointer. */
 struct task {
-    uint32_t esp;        /* saved stack pointer */
-    uint32_t kstack;     /* allocated kernel stack top */
-    uint32_t esp0;       /* ring3 -> ring0 entry stack pointer */
-    uint32_t cr3;        /* page directory used while this task runs */
+    uintptr_t rsp;       /* saved x86_64 stack pointer */
+    uintptr_t kstack;    /* allocated kernel stack top */
+    uintptr_t esp0;      /* ring3 -> ring0 entry stack pointer */
+    uintptr_t cr3;       /* PML4 physical address used while this task runs */
     int      exit_code;
     int      console_silent;
     int      fd_owner;
@@ -67,7 +67,7 @@ int task_get_tid(void);
 int task_get_cwd(char *buf, int size);
 int task_set_cwd(const char *path);
 int task_wait_pid(int pid, int *status, int options);
-void task_set_cr3(int id, uint32_t cr3);
+void task_set_cr3(int id, uintptr_t cr3);
 void task_set_console_silent(int id, int silent);
 void task_set_fd_owner(int id, int owner);
 int task_kill(int id);

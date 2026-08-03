@@ -43,8 +43,9 @@ foreach ($line in Get-Content (Join-Path $propertyRoot "properties.gen")) {
 }
 
 $common = @(
-    "--target=i386-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
-    "-fno-stack-protector", "-fno-pic", "-mno-sse", "-mno-mmx", "-O2",
+    "--target=x86_64-none-elf", "-std=c11", "-ffreestanding", "-fno-builtin",
+    "-fno-stack-protector", "-fno-pic", "-mcmodel=large", "-mno-red-zone",
+    "-mno-stack-arg-probe", "-O2",
     "-DNDEBUG", "-DWITHOUT_ICONV_FILTER", "-D__serenity__",
     "-D_ALIGNED=__attribute__((aligned))", "-DSTMTEXPR=1",
     "-Isrc/user/libc"
@@ -106,7 +107,8 @@ if ($LASTEXITCODE -ne 0) { throw "Could not compile nshtmltest" }
 $objects = @("build/user/crt0.o", "build/user/libc.o",
              (Join-Path $BuildDir "nshtmltest.o")) + @($compiledObjects)
 $responseFile = Join-Path $BuildDir "link-nshtmltest.rsp"
-$linkArguments = @("-m", "elf_i386", "-T", "build/user/user.ld",
+$linkArguments = @("-m", "elf_x86_64", "-z", "max-page-size=0x1000",
+                   "-T", "build/user/user.ld",
                    "-nostdlib", "-o", $Output) + $objects
 $linkArguments | ForEach-Object { '"' + $_ + '"' } |
     Set-Content -Encoding Ascii $responseFile

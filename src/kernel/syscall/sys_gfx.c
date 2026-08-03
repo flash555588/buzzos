@@ -45,15 +45,15 @@ static int user_owns_display(void) {
     return fb_display_user_allowed(task_get_pid());
 }
 
-int sys_font_glyph(uint32_t codepoint, uint32_t out_arg, uint32_t cap,
-                   uint32_t d, uint32_t e) {
+intptr_t sys_font_glyph(uintptr_t codepoint, uintptr_t out_arg, uintptr_t cap,
+                   uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
     if (cap < UFONT_BYTES || !user_range_writable(out_arg, UFONT_BYTES))
         return -1;
     return font_unicode_lookup(codepoint, (uint8_t *)(uintptr_t)out_arg);
 }
 
-int sys_gfx_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_gfx_info(uintptr_t out_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
     if (!user_range_writable(out_arg, sizeof(struct syscall_gfx_info)))
         return -1;
@@ -68,27 +68,27 @@ int sys_gfx_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t 
     return 0;
 }
 
-int sys_gfx_clear(uint32_t color, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_gfx_clear(uintptr_t color, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
     if (!user_owns_display())
         return -1;
     return fb_clear(color);
 }
 
-int sys_gfx_putpixel(uint32_t x, uint32_t y, uint32_t color, uint32_t d, uint32_t e) {
+intptr_t sys_gfx_putpixel(uintptr_t x, uintptr_t y, uintptr_t color, uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
     if (!user_owns_display())
         return -1;
     return fb_putpixel((int)x, (int)y, color);
 }
 
-int sys_gfx_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+intptr_t sys_gfx_fill_rect(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h, uintptr_t color) {
     if (!user_owns_display())
         return -1;
     return fb_fill_rect((int)x, (int)y, (int)w, (int)h, color);
 }
 
-int sys_gfx_text(uint32_t x, uint32_t y, uint32_t s_arg, uint32_t fg, uint32_t bg) {
+intptr_t sys_gfx_text(uintptr_t x, uintptr_t y, uintptr_t s_arg, uintptr_t fg, uintptr_t bg) {
     const char *s = (const char *)(uintptr_t)s_arg;
     if (!user_owns_display() || !user_string_ok(s))
         return -1;
@@ -96,7 +96,7 @@ int sys_gfx_text(uint32_t x, uint32_t y, uint32_t s_arg, uint32_t fg, uint32_t b
     return fb_text((int)x, (int)y, s, fg, (int)bg);
 }
 
-int sys_fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t pixels_arg) {
+intptr_t sys_fb_blit(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h, uintptr_t pixels_arg) {
     struct gfx_info info;
     if (!user_owns_display())
         return -1;
@@ -116,8 +116,8 @@ int sys_fb_blit(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t pixels_
     return fb_blit32((int)x, (int)y, (int)w, (int)h, pixels);
 }
 
-int sys_fb_blit_stride(uint32_t x, uint32_t y, uint32_t packed_wh,
-                       uint32_t pixels_arg, uint32_t stride) {
+intptr_t sys_fb_blit_stride(uintptr_t x, uintptr_t y, uintptr_t packed_wh,
+                       uintptr_t pixels_arg, uintptr_t stride) {
     struct gfx_info info;
     if (!user_owns_display())
         return -1;
@@ -137,7 +137,7 @@ int sys_fb_blit_stride(uint32_t x, uint32_t y, uint32_t packed_wh,
                             pixels, (int)stride);
 }
 
-int sys_mouse_get(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_mouse_get(uintptr_t out_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
     if (!user_range_writable(out_arg, sizeof(struct mouse_state)))
         return -1;
@@ -146,8 +146,8 @@ int sys_mouse_get(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t
     return 0;
 }
 
-int sys_gfx_acquire(uint32_t a, uint32_t b, uint32_t c,
-                    uint32_t d, uint32_t e) {
+intptr_t sys_gfx_acquire(uintptr_t a, uintptr_t b, uintptr_t c,
+                    uintptr_t d, uintptr_t e) {
     (void)a; (void)b; (void)c; (void)d; (void)e;
     int result = fb_display_acquire(task_get_pid());
     if (result == 0)
@@ -155,8 +155,8 @@ int sys_gfx_acquire(uint32_t a, uint32_t b, uint32_t c,
     return result;
 }
 
-int sys_gfx_release(uint32_t a, uint32_t b, uint32_t c,
-                    uint32_t d, uint32_t e) {
+intptr_t sys_gfx_release(uintptr_t a, uintptr_t b, uintptr_t c,
+                    uintptr_t d, uintptr_t e) {
     (void)a; (void)b; (void)c; (void)d; (void)e;
     int pid = task_get_pid();
     if (!user_owns_display())
@@ -170,8 +170,8 @@ int sys_gfx_release(uint32_t a, uint32_t b, uint32_t c,
     return 0;
 }
 
-int sys_gfx_set_mode(uint32_t width, uint32_t height, uint32_t c,
-                     uint32_t d, uint32_t e) {
+intptr_t sys_gfx_set_mode(uintptr_t width, uintptr_t height, uintptr_t c,
+                     uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
     if (!user_owns_display() || fb_set_mode(width, height) < 0)
         return -1;
@@ -179,8 +179,8 @@ int sys_gfx_set_mode(uint32_t width, uint32_t height, uint32_t c,
     return 0;
 }
 
-int sys_gfx_map_surface(uint32_t out_arg, uint32_t b, uint32_t c,
-                        uint32_t d, uint32_t e) {
+intptr_t sys_gfx_map_surface(uintptr_t out_arg, uintptr_t b, uintptr_t c,
+                        uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
     if (!user_owns_display() ||
         !user_range_writable(out_arg, sizeof(struct syscall_gfx_surface)))
@@ -199,17 +199,17 @@ int sys_gfx_map_surface(uint32_t out_arg, uint32_t b, uint32_t c,
     return 0;
 }
 
-int sys_gfx_present(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                    uint32_t e) {
+intptr_t sys_gfx_present(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h,
+                    uintptr_t e) {
     (void)e;
     if (!user_owns_display())
         return -1;
     return fb_present_rect(task_get_pid(), (int)x, (int)y, (int)w, (int)h);
 }
 
-int sys_gfx_cursor_define(uint32_t pixels_arg, uint32_t packed_wh,
-                          uint32_t packed_hot, uint32_t packed_xy,
-                          uint32_t e) {
+intptr_t sys_gfx_cursor_define(uintptr_t pixels_arg, uintptr_t packed_wh,
+                          uintptr_t packed_hot, uintptr_t packed_xy,
+                          uintptr_t e) {
     uint32_t width = packed_wh & 0xFFFFu;
     uint32_t height = packed_wh >> 16;
     uint32_t hot_x = packed_hot & 0xFFFFu;
@@ -229,16 +229,16 @@ int sys_gfx_cursor_define(uint32_t pixels_arg, uint32_t packed_wh,
         hot_x, hot_y, x, y);
 }
 
-int sys_gfx_cursor_move(uint32_t x, uint32_t y, uint32_t visible,
-                        uint32_t d, uint32_t e) {
+intptr_t sys_gfx_cursor_move(uintptr_t x, uintptr_t y, uintptr_t visible,
+                        uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
     if (!user_owns_display())
         return -1;
     return virtio_gpu_cursor_move(x, y, visible ? 1 : 0);
 }
 
-int sys_gui_event_sequence(uint32_t a, uint32_t b, uint32_t c,
-                           uint32_t d, uint32_t e) {
+intptr_t sys_gui_event_sequence(uintptr_t a, uintptr_t b, uintptr_t c,
+                           uintptr_t d, uintptr_t e) {
     (void)a; (void)b; (void)c; (void)d; (void)e;
     if (!user_owns_display())
         return -1;
@@ -248,8 +248,8 @@ int sys_gui_event_sequence(uint32_t a, uint32_t b, uint32_t c,
     return (int)sequence;
 }
 
-int sys_gui_event_wait(uint32_t expected, uint32_t timeout_ms, uint32_t c,
-                       uint32_t d, uint32_t e) {
+intptr_t sys_gui_event_wait(uintptr_t expected, uintptr_t timeout_ms, uintptr_t c,
+                       uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
     if (!user_owns_display() || !current_task || current_task->id <= 0 ||
         current_task->id >= MAX_TASKS)
@@ -275,8 +275,8 @@ int sys_gui_event_wait(uint32_t expected, uint32_t timeout_ms, uint32_t c,
     return (int)sequence;
 }
 
-int sys_gui_event_signal(uint32_t a, uint32_t b, uint32_t c,
-                         uint32_t d, uint32_t e) {
+intptr_t sys_gui_event_signal(uintptr_t a, uintptr_t b, uintptr_t c,
+                         uintptr_t d, uintptr_t e) {
     (void)a; (void)b; (void)c; (void)d; (void)e;
     if (!user_owns_display())
         return -1;

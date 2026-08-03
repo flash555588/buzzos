@@ -78,7 +78,7 @@ static void socket_clear(struct socket_entry *s) {
     s->connected = 0;
 }
 
-int sys_socket(uint32_t domain, uint32_t type, uint32_t protocol, uint32_t d, uint32_t e) {
+intptr_t sys_socket(uintptr_t domain, uintptr_t type, uintptr_t protocol, uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
     if ((int)domain != AF_INET_K)
         return -1;
@@ -107,8 +107,8 @@ int sys_socket(uint32_t domain, uint32_t type, uint32_t protocol, uint32_t d, ui
     return -1;
 }
 
-int sys_connect(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen,
-                uint32_t d, uint32_t e) {
+intptr_t sys_connect(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen,
+                uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
     if (addrlen < sizeof(struct k_sockaddr_in) ||
         !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in))) {
@@ -169,7 +169,7 @@ int sys_connect(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen,
     return -1;
 }
 
-int sys_send(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32_t e) {
+intptr_t sys_send(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t flags, uintptr_t e) {
     (void)flags; (void)e;
     if (!user_range_ok(buf, len))
         return -1;
@@ -197,7 +197,7 @@ int sys_send(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32
     return ret < 0 ? ret : (int)len;
 }
 
-int sys_recv(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32_t e) {
+intptr_t sys_recv(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t flags, uintptr_t e) {
     (void)flags; (void)e;
     if (!user_range_writable(buf, len))
         return -1;
@@ -221,8 +221,8 @@ int sys_recv(uint32_t sd_arg, uint32_t buf, uint32_t len, uint32_t flags, uint32
     return -1;
 }
 
-int sys_bind(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen,
-             uint32_t d, uint32_t e) {
+intptr_t sys_bind(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen,
+             uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
     if (addrlen < sizeof(struct k_sockaddr_in) ||
         !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in)))
@@ -241,8 +241,8 @@ int sys_bind(uint32_t sd_arg, uint32_t addr_arg, uint32_t addrlen,
     return 0;
 }
 
-int sys_sendto(uint32_t sd_arg, uint32_t buf, uint32_t len,
-               uint32_t addr_arg, uint32_t addrlen) {
+intptr_t sys_sendto(uintptr_t sd_arg, uintptr_t buf, uintptr_t len,
+               uintptr_t addr_arg, uintptr_t addrlen) {
     if (!user_range_ok(buf, len) || addrlen < sizeof(struct k_sockaddr_in) ||
         !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in)))
         return -1;
@@ -268,8 +268,8 @@ int sys_sendto(uint32_t sd_arg, uint32_t buf, uint32_t len,
     return ret < 0 ? ret : (int)len;
 }
 
-int sys_recvfrom(uint32_t sd_arg, uint32_t buf, uint32_t len,
-                 uint32_t addr_arg, uint32_t addrlen) {
+intptr_t sys_recvfrom(uintptr_t sd_arg, uintptr_t buf, uintptr_t len,
+                 uintptr_t addr_arg, uintptr_t addrlen) {
     if (!user_range_writable(buf, len))
         return -1;
     if (addr_arg && (addrlen < sizeof(struct k_sockaddr_in) ||
@@ -305,7 +305,7 @@ int sys_recvfrom(uint32_t sd_arg, uint32_t buf, uint32_t len,
     return ret;
 }
 
-int sys_closesocket(uint32_t sd_arg, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_closesocket(uintptr_t sd_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
@@ -360,8 +360,8 @@ void sys_net_cleanup_owner(int owner) {
     }
 }
 
-int sys_dns_resolve(uint32_t host_arg, uint32_t ip_out_arg, uint32_t c,
-                    uint32_t d, uint32_t e) {
+intptr_t sys_dns_resolve(uintptr_t host_arg, uintptr_t ip_out_arg, uintptr_t c,
+                    uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
     const char *host = (const char *)(uintptr_t)host_arg;
     if (!user_string_ok(host) || !user_range_writable(ip_out_arg, sizeof(uint32_t)))
@@ -369,7 +369,7 @@ int sys_dns_resolve(uint32_t host_arg, uint32_t ip_out_arg, uint32_t c,
     return net_dns_resolve(host, (uint32_t *)(uintptr_t)ip_out_arg);
 }
 
-int sys_netinfo(uint32_t mac_arg, uint32_t ip_arg, uint32_t c, uint32_t d, uint32_t e) {
+intptr_t sys_netinfo(uintptr_t mac_arg, uintptr_t ip_arg, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
     if (mac_arg && !user_range_writable(mac_arg, 6))
         return -1;

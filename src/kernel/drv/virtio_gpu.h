@@ -55,7 +55,7 @@ int virtio_gpu_3d_query(struct gpu3d_info *out);
 int virtio_gpu_3d_resource_create(uint32_t target, uint32_t format,
                                   uint32_t bind, uint32_t width,
                                   uint32_t height, uint32_t *out_id,
-                                  uint32_t *out_user_va, uint32_t *out_bytes);
+                                  uintptr_t *out_user_va, uint32_t *out_bytes);
 /* Create a texture whose guest backing aliases an existing SHM byte range.
  * The SHM object is pinned until the GPU resource is destroyed. */
 int virtio_gpu_3d_resource_import_shm(uint32_t shm_token, int owner,

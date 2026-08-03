@@ -216,7 +216,7 @@ struct gpu3d_caps {
 struct gpu3d_resource {
     uint32_t id;
     uint32_t *pixels;
-    uint32_t bytes;
+    size_t bytes;
     uint32_t width;
     uint32_t height;
 };

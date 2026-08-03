@@ -26,15 +26,15 @@ int fpu_init(void) {
     if ((edx & required) != required)
         return 0;
 
-    uint32_t cr0;
-    uint32_t cr4;
+    uint64_t cr0;
+    uint64_t cr4;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~((1u << 2) | (1u << 3)); /* EM=0, TS=0 (eager switching). */
-    cr0 |= (1u << 1) | (1u << 5);    /* MP=1, NE=1. */
+    cr0 &= ~((1ull << 2) | (1ull << 3)); /* EM=0, TS=0. */
+    cr0 |= (1ull << 1) | (1ull << 5);    /* MP=1, NE=1. */
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
 
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1u << 9) | (1u << 10);   /* OSFXSR, OSXMMEXCPT. */
+    cr4 |= (1ull << 9) | (1ull << 10); /* OSFXSR, OSXMMEXCPT. */
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
 
     __asm__ volatile("fninit\n\tfxsave %0" : "=m"(initial_state) : : "memory");

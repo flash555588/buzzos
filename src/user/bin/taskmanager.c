@@ -1187,9 +1187,8 @@ static void canvas_footer(struct guiapp_canvas *canvas) {
                           can_end_selected() ? 0 : APPUI_STATE_DISABLED);
 }
 
-/* The CPU path strokes a polyline; without a line primitive the same samples
- * become a filled column chart, which is also how the reference monitor
- * presents them. */
+/* The desktop translates each LINE command into one analytic GPU draw, so the
+ * Canvas path now uses the same straight polyline as the software fallback. */
 static void canvas_history_graph(struct guiapp_canvas *canvas,
                                  struct appui_rect area, const int *history,
                                  uint32_t color) {
@@ -1200,18 +1199,18 @@ static void canvas_history_graph(struct guiapp_canvas *canvas,
         return;
     for (int i = 1; i < 4; i++)
         canvas_separator(canvas, plot.x, plot.y + plot.h * i / 4, plot.w);
-    for (int i = 0; i < HISTORY_SAMPLES; i++) {
-        int x0 = plot.x + i * plot.w / HISTORY_SAMPLES;
-        int x1 = plot.x + (i + 1) * plot.w / HISTORY_SAMPLES;
-        int bar_h = history[i] * plot.h / 1000;
-        if (x1 <= x0)
-            x1 = x0 + 1;
-        if (bar_h < 2)
-            bar_h = 2; /* keep a visible baseline at 0% */
-        canvas_box(canvas,
-                   (struct appui_rect){x0, plot.y + plot.h - bar_h,
-                                       x1 - x0, bar_h},
-                   0, color);
+    int previous_x = plot.x;
+    int previous_y = plot.y + plot.h - 1 -
+                     history[0] * appui_max(1, plot.h - 1) / 1000;
+    for (int i = 1; i < HISTORY_SAMPLES; i++) {
+        int x = plot.x + i * appui_max(1, plot.w - 1) /
+                         (HISTORY_SAMPLES - 1);
+        int y = plot.y + plot.h - 1 -
+                history[i] * appui_max(1, plot.h - 1) / 1000;
+        (void)guiapp_canvas_line(canvas, previous_x, previous_y, x, y, 2,
+                                 color);
+        previous_x = x;
+        previous_y = y;
     }
 }
 

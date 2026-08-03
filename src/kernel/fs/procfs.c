@@ -121,9 +121,9 @@ static int proc_entry_count(void) {
 static int proc_about_text(char *buf, int cap) {
     int pos = 0;
     append_text(buf, &pos, cap, "name BuzzOS\n");
-    append_text(buf, &pos, cap, "kind lightweight-i386-posix-like-os\n");
+    append_text(buf, &pos, cap, "kind native-x86_64-posix-os\n");
     append_text(buf, &pos, cap, "status experimental\n");
-    append_text(buf, &pos, cap, "arch i386\n");
+    append_text(buf, &pos, cap, "arch x86_64\n");
     append_text(buf, &pos, cap, "mode protected32\n");
     append_text(buf, &pos, cap, "entrypoints shell,gui,procfs,fs,apps,report\n");
     append_text(buf, &pos, cap, "docs README.md,README.en.md,docs/project-status.md\n");

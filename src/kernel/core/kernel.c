@@ -103,7 +103,8 @@ static void copy_multiboot_mmap(uint32_t info_addr) {
             }
             return;
         }
-        tag = (struct multiboot2_tag *)(uintptr_t)(((uint32_t)(uintptr_t)tag + tag->size + 7u) & ~7u);
+        tag = (struct multiboot2_tag *)(((uintptr_t)tag + tag->size + 7u) &
+                                       ~(uintptr_t)7u);
     }
 }
 
@@ -136,7 +137,8 @@ static void copy_multiboot_framebuffer(uint32_t info_addr) {
             }
             return;
         }
-        tag = (struct multiboot2_tag *)(uintptr_t)(((uint32_t)(uintptr_t)tag + tag->size + 7u) & ~7u);
+        tag = (struct multiboot2_tag *)(((uintptr_t)tag + tag->size + 7u) &
+                                       ~(uintptr_t)7u);
     }
     serial_puts("[boot] no multiboot2 framebuffer tag\n");
 }

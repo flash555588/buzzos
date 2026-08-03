@@ -38,7 +38,7 @@ int  fb_present_rgb32(int x, int y, int width, int height,
 /* Zero-copy scanout: map guest RGB surface into the display owner's VA and
  * present dirty rectangles (GPU: TRANSFER+FLUSH; linear FB: direct write). */
 struct fb_scanout_map {
-    uint32_t user_va;
+    uintptr_t user_va;
     uint32_t width;
     uint32_t height;
     uint32_t stride_pixels; /* pixels per row */

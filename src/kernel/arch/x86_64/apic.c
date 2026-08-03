@@ -110,8 +110,8 @@ static const struct acpi_rsdp *find_rsdp(uint32_t multiboot_info) {
             return candidate;
         if (tag->type == MULTIBOOT_TAG_ACPI_OLD)
             old = candidate;
-        tag = (struct multiboot_tag *)(uintptr_t)
-            (((uint32_t)(uintptr_t)tag + tag->size + 7u) & ~7u);
+        tag = (struct multiboot_tag *)
+            (((uintptr_t)tag + tag->size + 7u) & ~(uintptr_t)7u);
     }
     return old;
 }

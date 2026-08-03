@@ -7,7 +7,9 @@
 #define SYSCALL_VECTOR_LEGACY 0x30
 
 struct syscall_frame {
-    uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax;
+    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+    uint64_t rdi, rsi, rbp, rbx, rdx, rcx, rax;
+    uint64_t vector, error, rip, cs, rflags, rsp, ss;
 };
 
 struct syscall_gfx_info {
@@ -18,7 +20,7 @@ struct syscall_gfx_info {
     uint32_t backend;
 };
 struct syscall_gfx_surface {
-    uint32_t address;
+    uintptr_t address;
     uint32_t width;
     uint32_t height;
     uint32_t stride_pixels;
@@ -27,8 +29,8 @@ struct syscall_gfx_surface {
 };
 struct syscall_shm_mapping {
     uint32_t token;
-    uint32_t address;
-    uint32_t size;
+    uintptr_t address;
+    size_t size;
 };
 /* virgl 3D capability, and the resource handed back by gpu3d_resource_create.
  * `address` maps the resource's own backing store, so texture uploads are
@@ -48,8 +50,8 @@ struct syscall_gpu3d_resource {
     uint32_t width;   /* in: pixels, or bytes when target == 0 */
     uint32_t height;  /* in */
     uint32_t id;      /* out */
-    uint32_t address; /* out: mapped backing store */
-    uint32_t bytes;   /* out */
+    uintptr_t address; /* out: mapped backing store */
+    size_t bytes;      /* out */
 };
 struct syscall_gpu3d_import {
     uint32_t shm_token;  /* in: object already mapped by the caller */
@@ -94,7 +96,7 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);
 void syscall_reset_process(int task_id);
-void syscall_set_heap_start(int task_id, uint32_t start);
+void syscall_set_heap_start(int task_id, uintptr_t start);
 void syscall_cleanup_process(int task_id);
 void syscall_release_thread(int task_id);
 void syscall_process_exited(int task_id);
