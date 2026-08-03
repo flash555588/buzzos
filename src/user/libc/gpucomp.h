@@ -38,7 +38,7 @@
 #include "../../kernel/drv/font_builtin.h"
 
 enum {
-    GPUCOMP_MAX_LAYERS = 24,
+    GPUCOMP_MAX_LAYERS = 32,
     /* Handles above the ones virgl.h reserves for the shared pipeline. */
     GPUCOMP_H_FS_ROUND = 32,
     GPUCOMP_H_FS_BLUR = 33,
@@ -583,6 +583,18 @@ static inline uint32_t gpucomp_layer_resource(int index) {
     return gpucomp_state.layers[index].texture;
 }
 
+static inline int gpucomp_layer_capacity(int index, int *w, int *h) {
+    struct gpucomp_layer *l;
+    if (index < 1 || index >= GPUCOMP_MAX_LAYERS)
+        return -1;
+    l = &gpucomp_state.layers[index];
+    if (!l->texture)
+        return -1;
+    if (w) *w = l->tex_w;
+    if (h) *h = l->tex_h;
+    return 0;
+}
+
 /* Push only the damaged sub-rect of a layer to the host. */
 static inline int gpucomp_upload_rect(int index, int x, int y, int w, int h) {
     struct gpucomp_layer *l;
@@ -625,9 +637,14 @@ static inline void gpucomp_rect_consts_target(uint32_t *out, int x, int y,
 }
 
 static inline int gpucomp_canvas_ensure(int index, int w, int h) {
+    /* Keep a grow-only render target during live resize.  Recreating an exact
+     * virgl resource for every pointer sample serializes the compositor on
+     * host allocation and makes the mouse/window visibly stutter.  src_w/h
+     * still describe the committed canvas; shaders and sampling already keep
+     * that live rectangle separate from the allocation dimensions. */
     return gpucomp_layer_ensure_bind(
         index, w, h, VIRGL_FORMAT_B8G8R8X8_UNORM,
-        VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW, 1, 1);
+        VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW, 1, 0);
 }
 
 static inline int gpucomp_target_ensure(int index, int w, int h) {

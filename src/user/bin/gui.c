@@ -149,6 +149,8 @@ struct app_session {
     /* 1 after RESIZE/INIT sent until a frame arrives — paces configures to
      * the app's present rate (modern compositor in-flight limit). */
     volatile int resize_inflight;
+    uint32_t last_resize_sent_ms;
+    int gpu_sync_warned;
     int reader_tid;
     volatile int reader_dead;
     volatile int closing;
@@ -164,6 +166,7 @@ struct app_session {
     int gpu_content_w;
     int gpu_content_h;
     int gpu_resource_canvas;
+    int gpu_front_bank;
     int canvas_mode;
     uint16_t canvas_count;
     uint16_t canvas_string_bytes;
@@ -1158,6 +1161,15 @@ static int sync_app_size(int id, int force) {
     }
     if (!force && app_sessions[slot].resize_inflight)
         return 0;
+    if (!force && gpu_present_ready) {
+        uint32_t now = monotonic_ms();
+        /* DWM-style frame pacing: coalesce pointer-rate configures to at most
+         * one application layout/GPU commit per display interval.  Window
+         * chrome still follows every input packet in the compositor. */
+        if ((uint32_t)(now - app_sessions[slot].last_resize_sent_ms) < 16u)
+            return 0;
+        app_sessions[slot].last_resize_sent_ms = now;
+    }
     app_sessions[slot].want_w = target_w;
     app_sessions[slot].want_h = target_h;
     if (app_send_event(slot, GUIAPP_EVT_RESIZE, 0, 0, 0, 0, 0) < 0)
@@ -1279,6 +1291,8 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].surface_h = 0;
     app_sessions[slot].resize_dirty = 0;
     app_sessions[slot].resize_inflight = 0;
+    app_sessions[slot].last_resize_sent_ms = 0;
+    app_sessions[slot].gpu_sync_warned = 0;
     app_sessions[slot].reader_dead = 0;
     app_sessions[slot].closing = 0;
     app_sessions[slot].wants_tick = path && strstr(path, "taskmanager") != 0;
@@ -1287,6 +1301,7 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].gpu_resource = 0;
     app_sessions[slot].gpu_resource_w = 0;
     app_sessions[slot].gpu_resource_h = 0;
+    app_sessions[slot].gpu_front_bank = 0;
     app_sessions[slot].dirty_lock = 0;
     app_sessions[slot].dirty_valid = 0;
     app_sessions[slot].dirty_rect = (struct rect){0, 0, 0, 0};
@@ -1529,12 +1544,12 @@ static struct rect content_rect(int id) {
                          r.w - 30, r.h - WINDOW_TITLE_H - 44};
 }
 
-/* Fit the source aspect ratio into the current content rect (letterboxed). */
-static struct rect scaled_view_rect(int id, int slot) {
+/* Fit a committed source aspect ratio into the current content rect.  GPU
+ * composition passes the dimensions belonging to its front texture rather
+ * than producer-side metadata for a frame that may still be uploading. */
+static struct rect scaled_view_rect_for(int id, int source_w, int source_h) {
     struct rect c = content_rect(id);
-    int source_w = app_sessions[slot].source_w;
-    int source_h = app_sessions[slot].source_h;
-    if (!app_sessions[slot].scaled_surface || source_w <= 0 || source_h <= 0)
+    if (source_w <= 0 || source_h <= 0)
         return c;
     int vw = c.w;
     int vh = c.w * source_h / source_w;
@@ -1548,6 +1563,13 @@ static struct rect scaled_view_rect(int id, int slot) {
         vh = 1;
     return (struct rect){c.x + (c.w - vw) / 2,
                          c.y + (c.h - vh) / 2, vw, vh};
+}
+
+static struct rect scaled_view_rect(int id, int slot) {
+    if (!app_sessions[slot].scaled_surface)
+        return content_rect(id);
+    return scaled_view_rect_for(id, app_sessions[slot].source_w,
+                                app_sessions[slot].source_h);
 }
 
 /* Nearest-neighbor scale into dst.  Source size is taken from the shared
@@ -3193,7 +3215,8 @@ static int bind_scanout(void) {
 enum {
     GPU_FRAME_LAYER = 1,
     GPU_APP_LAYER_BASE = 2,
-    GPU_OVERLAY_LAYER = GPU_APP_LAYER_BASE + MAX_GUI_APPS,
+    GPU_APP_BACK_LAYER_BASE = GPU_APP_LAYER_BASE + MAX_GUI_APPS,
+    GPU_OVERLAY_LAYER = GPU_APP_BACK_LAYER_BASE + MAX_GUI_APPS,
     GPU_SCENE_LAYER,
     GPU_BLUR_PING_LAYER,
     GPU_BLUR_PONG_LAYER,
@@ -3202,18 +3225,23 @@ enum {
 _Static_assert(GPU_BLUR_PONG_LAYER < GPUCOMP_MAX_LAYERS,
                "GPU compositor layer table is too small");
 
+static int gpu_app_layer_bank(int slot, int bank) {
+    return (bank ? GPU_APP_BACK_LAYER_BASE : GPU_APP_LAYER_BASE) + slot;
+}
+
 static int gpu_app_layer(int slot) {
-    return GPU_APP_LAYER_BASE + slot;
+    return gpu_app_layer_bank(slot, app_sessions[slot].gpu_front_bank);
+}
+
+static int gpu_app_back_layer(int slot) {
+    return gpu_app_layer_bank(slot, !app_sessions[slot].gpu_front_bank);
 }
 
 static void gpu_app_texture_release(int slot) {
     if (slot < 0 || slot >= MAX_GUI_APPS)
         return;
-    if (app_sessions[slot].gpu_resource) {
-        (void)gpucomp_layer_release(gpu_app_layer(slot), 0);
-        if (!app_sessions[slot].gpu_resource_canvas)
-            (void)gpu3d_resource_destroy(app_sessions[slot].gpu_resource);
-    }
+    (void)gpucomp_layer_release(gpu_app_layer_bank(slot, 0), 0);
+    (void)gpucomp_layer_release(gpu_app_layer_bank(slot, 1), 0);
     app_sessions[slot].gpu_resource = 0;
     app_sessions[slot].gpu_pixels = 0;
     app_sessions[slot].gpu_resource_w = 0;
@@ -3221,6 +3249,7 @@ static void gpu_app_texture_release(int slot) {
     app_sessions[slot].gpu_content_w = 0;
     app_sessions[slot].gpu_content_h = 0;
     app_sessions[slot].gpu_resource_canvas = 0;
+    app_sessions[slot].gpu_front_bank = 0;
 }
 
 /* Translate one validated application display list into an offscreen virgl
@@ -3233,25 +3262,14 @@ static int gpu_canvas_render(int slot) {
     if (!gpu_present_ready || slot < 0 || slot >= MAX_GUI_APPS)
         return -1;
     session = &app_sessions[slot];
-    layer = gpu_app_layer(slot);
+    layer = gpu_app_back_layer(slot);
     if (!session->used || !session->canvas_mode ||
         session->source_w <= 0 || session->source_h <= 0)
         return -1;
-    if (!session->gpu_resource_canvas ||
-        session->gpu_resource_w != session->source_w ||
-        session->gpu_resource_h != session->source_h) {
-        if (session->gpu_resource && !session->gpu_resource_canvas)
-            gpu_app_texture_release(slot);
+    {
         if (gpucomp_canvas_ensure(layer, session->source_w,
                                   session->source_h) < 0)
             return -1;
-        session->gpu_resource = gpucomp_layer_resource(layer);
-        session->gpu_pixels = 0;
-        session->gpu_resource_w = session->source_w;
-        session->gpu_resource_h = session->source_h;
-        session->gpu_content_w = session->source_w;
-        session->gpu_content_h = session->source_h;
-        session->gpu_resource_canvas = 1;
     }
 
     app_dirty_lock(slot);
@@ -3297,6 +3315,19 @@ static int gpu_canvas_render(int slot) {
     }
     if (result == 0)
         result = gpucomp_canvas_end();
+    /* Publish the texture geometry only after every render command has been
+     * accepted.  gpu_draw_app therefore cannot combine a new application
+     * size with the previous completed canvas. */
+    if (result == 0) {
+        session->gpu_front_bank = !session->gpu_front_bank;
+        session->gpu_resource = gpucomp_layer_resource(layer);
+        session->gpu_pixels = 0;
+        (void)gpucomp_layer_capacity(layer, &session->gpu_resource_w,
+                                    &session->gpu_resource_h);
+        session->gpu_content_w = session->source_w;
+        session->gpu_content_h = session->source_h;
+        session->gpu_resource_canvas = 1;
+    }
     app_dirty_unlock(slot);
     return result;
 }
@@ -3311,10 +3342,8 @@ static int gpu_canvas_render(int slot) {
  * verify, and only then let the host read immutable backing. */
 static int gpu_app_texture_sync(int slot, struct rect dirty) {
     struct app_session *session;
-    struct gpu3d_resource candidate;
-    int width, height, stride, layer, need_new;
-    int allocation_w, allocation_h;
-    uint32_t sequence, old_resource;
+    int width, height, stride, layer, swap_bank;
+    uint32_t sequence;
     uint32_t *destination;
     const uint32_t *source;
     if (!gpu_present_ready || slot < 0 || slot >= MAX_GUI_APPS ||
@@ -3340,45 +3369,24 @@ static int gpu_app_texture_sync(int slot, struct rect dirty) {
         return 1;
     __sync_synchronize();
 
-    layer = gpu_app_layer(slot);
-    if (session->gpu_resource_canvas)
-        gpu_app_texture_release(slot);
-    need_new = !session->gpu_resource || !session->gpu_pixels ||
-               session->gpu_resource_w < width ||
-               session->gpu_resource_h < height;
-    if (session->gpu_content_w != width || session->gpu_content_h != height)
-        dirty = (struct rect){0, 0, width, height};
-    dirty = intersect_rect(dirty, (struct rect){0, 0, width, height});
-    if (dirty.w <= 0 || dirty.h <= 0)
-        return 0;
-
-    memset(&candidate, 0, sizeof(candidate));
-    if (need_new) {
-        /* Allocate the replacement without touching the currently displayed
-         * resource.  Only swap its sampler view after a stable full snapshot
-         * has uploaded successfully, so failed resize generations cannot
-         * flash a blank or half-written texture. */
-        allocation_w = width + width / 4;
-        allocation_h = height + height / 4;
-        if (allocation_w > GPUCOMP_TEXTURE_MAX_W)
-            allocation_w = GPUCOMP_TEXTURE_MAX_W;
-        if (allocation_h > GPUCOMP_TEXTURE_MAX_H)
-            allocation_h = GPUCOMP_TEXTURE_MAX_H;
-        if (gpu3d_resource_create(
-                VIRGL_TARGET_TEXTURE_2D, VIRGL_FORMAT_B8G8R8X8_UNORM,
-                VIRGL_BIND_SAMPLER_VIEW, (uint32_t)allocation_w,
-                (uint32_t)allocation_h, &candidate) < 0)
+    swap_bank = !session->gpu_resource || session->gpu_resource_canvas ||
+                session->gpu_content_w != width ||
+                session->gpu_content_h != height;
+    layer = swap_bank ? gpu_app_back_layer(slot) : gpu_app_layer(slot);
+    if (swap_bank) {
+        if (gpucomp_layer_ensure(layer, width, height) < 0)
             return -1;
-        destination = candidate.pixels;
-        stride = allocation_w;
+        destination = gpucomp_layer_pixels(layer, &stride);
         dirty = (struct rect){0, 0, width, height};
     } else {
         destination = session->gpu_pixels;
         stride = session->gpu_resource_w;
     }
+    dirty = intersect_rect(dirty, (struct rect){0, 0, width, height});
+    if (dirty.w <= 0 || dirty.h <= 0)
+        return 0;
+
     if (!destination || stride < width) {
-        if (candidate.id)
-            (void)gpu3d_resource_destroy(candidate.id);
         return -1;
     }
 
@@ -3394,39 +3402,21 @@ static int gpu_app_texture_sync(int slot, struct rect dirty) {
         /* The private copy may be mixed, but it has not reached the host.
          * Recopy the whole stable generation because the newer dirty region
          * need not overlap the one we just attempted. */
-        if (candidate.id)
-            (void)gpu3d_resource_destroy(candidate.id);
         app_note_dirty(slot, (struct rect){0, 0, width, height});
         return 1;
     }
 
-    if (need_new) {
-        if (gpu3d_upload(candidate.id, dirty.x, dirty.y,
-                         dirty.w, dirty.h) < 0) {
-            (void)gpu3d_resource_destroy(candidate.id);
-            return -1;
-        }
-        old_resource = session->gpu_resource;
-        if (gpucomp_layer_import(layer, candidate.id, allocation_w,
-                                 allocation_h,
-                                 VIRGL_FORMAT_B8G8R8X8_UNORM) < 0 ||
-            gpucomp_layer_source_size(layer, width, height) < 0) {
-            (void)gpu3d_resource_destroy(candidate.id);
-            return -1;
-        }
-        session->gpu_resource = candidate.id;
-        session->gpu_pixels = candidate.pixels;
-        session->gpu_resource_w = allocation_w;
-        session->gpu_resource_h = allocation_h;
-        session->gpu_resource_canvas = 0;
-        if (old_resource)
-            (void)gpu3d_resource_destroy(old_resource);
-    } else {
-        if (gpucomp_layer_source_size(layer, width, height) < 0 ||
-            gpu3d_upload(session->gpu_resource, dirty.x, dirty.y,
-                         dirty.w, dirty.h) < 0)
-            return -1;
+    if (gpucomp_layer_source_size(layer, width, height) < 0 ||
+        gpucomp_upload_rect(layer, dirty.x, dirty.y, dirty.w, dirty.h) < 0)
+        return -1;
+    if (swap_bank) {
+        session->gpu_front_bank = !session->gpu_front_bank;
+        session->gpu_resource = gpucomp_layer_resource(layer);
+        session->gpu_pixels = gpucomp_layer_pixels(layer, &stride);
+        (void)gpucomp_layer_capacity(layer, &session->gpu_resource_w,
+                                    &session->gpu_resource_h);
     }
+    session->gpu_resource_canvas = 0;
     session->gpu_content_w = width;
     session->gpu_content_h = height;
     return 0;
@@ -3617,13 +3607,25 @@ static void gpu_draw_app(int slot, struct rect damage) {
     session = &app_sessions[slot];
     id = WIN_APP_BASE + slot;
     if (!session->used || !session->gpu_resource ||
+        session->gpu_content_w <= 0 || session->gpu_content_h <= 0 ||
         !windows[id].visible || windows[id].minimized)
         return;
     content = content_rect(id);
-    destination = session->scaled_surface
-        ? scaled_view_rect(id, slot)
-        : (struct rect){content.x, content.y,
-                        session->source_w, session->source_h};
+    if (session->scaled_surface) {
+        destination = scaled_view_rect_for(id, session->gpu_content_w,
+                                           session->gpu_content_h);
+    } else if (resize_win == id || session->resize_inflight ||
+               session->resize_dirty) {
+        /* The window geometry is compositor-owned and advances every pointer
+         * sample.  Scale only the last committed front texture into it; a
+         * later completed app frame changes pixels/source geometry without
+         * making the quad jump between intermediate sizes. */
+        destination = content;
+    } else {
+        destination = (struct rect){content.x, content.y,
+                                    session->gpu_content_w,
+                                    session->gpu_content_h};
+    }
     visible[0] = intersect_rect(intersect_rect(destination, content), damage);
     if (visible[0].w <= 0 || visible[0].h <= 0)
         return;
@@ -3816,12 +3818,13 @@ done:
     return result;
 }
 
-static void gpu_fallback_to_software(void) {
+static void gpu_fallback_to_software(const char *reason) {
     gpu_present_shutdown();
     (void)bind_scanout();
     gpu_canvas_capability_set(0);
     desktop_dirty = 1;
-    gui_log("[gui] virgl compositor failed; software fallback");
+    gui_log(reason ? reason :
+            "[gui] virgl compositor failed; software fallback");
 }
 
 static int render_region(struct rect area) {
@@ -3829,9 +3832,14 @@ static int render_region(struct rect area) {
     if (area.w <= 0 || area.h <= 0)
         return 0;
     if (gpu_present_ready) {
-        if (gpu_shell_update(area) == 0 && gpu_present_scene(area) == 0)
+        if (gpu_shell_update(area) < 0)
+            gpu_fallback_to_software(
+                "[gui] virgl shell upload failed; software fallback");
+        else if (gpu_present_scene(area) < 0)
+            gpu_fallback_to_software(
+                "[gui] virgl scene/present failed; software fallback");
+        else
             return 0;
-        gpu_fallback_to_software();
         /* The old 2-D scanout may be stale after 3-D scanout was active. */
         area = (struct rect){0, 0, sw, sh};
     }
@@ -3858,6 +3866,10 @@ static struct rect app_damage_to_screen(int slot, struct rect dirty) {
     struct rect content = content_rect(id);
     struct rect screen = (struct rect){0, 0, sw, sh};
     if (!app_sessions[slot].scaled_surface) {
+        if (gpu_present_ready &&
+            (resize_win == id || app_sessions[slot].resize_inflight ||
+             app_sessions[slot].resize_dirty))
+            return intersect_rect(content, screen);
         struct rect area = {
             content.x + dirty.x, content.y + dirty.y, dirty.w, dirty.h
         };
@@ -5197,7 +5209,6 @@ int main(int argc, char **argv) {
         struct rect damage = {0, 0, 0, 0};
         int have_shell_damage = take_damage(&shell_damage);
         int have_damage = have_shell_damage;
-        int gpu_sync_failed = 0;
         if (have_shell_damage)
             damage = shell_damage;
         for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
@@ -5213,9 +5224,16 @@ int main(int argc, char **argv) {
                     continue;
                 }
                 if (sync < 0) {
-                    gpu_sync_failed = 1;
-                    break;
+                    /* A client back-buffer failure is not a compositor
+                     * failure.  Keep its last complete front buffer and wait
+                     * for a later frame instead of disabling VirGL globally. */
+                    if (!app_sessions[slot].gpu_sync_warned) {
+                        gui_log("[gui] app GPU frame dropped; retaining front buffer");
+                        app_sessions[slot].gpu_sync_warned = 1;
+                    }
+                    continue;
                 }
+                app_sessions[slot].gpu_sync_warned = 0;
             }
             struct rect area = app_damage_to_screen(slot, dirty);
             if (area.w <= 0 || area.h <= 0)
@@ -5224,10 +5242,6 @@ int main(int argc, char **argv) {
             have_damage = 1;
         }
         int full_dirty = __sync_lock_test_and_set(&desktop_dirty, 0);
-        if (gpu_sync_failed) {
-            gpu_fallback_to_software();
-            full_dirty = 1;
-        }
         if (full_dirty || (!gpu_present_ready &&
                            tick - last_render_tick >= 60u)) {
             render();
@@ -5242,7 +5256,8 @@ int main(int argc, char **argv) {
                     shell_damage = damage_with_pointer(shell_damage);
                     damage = union_rect(damage, shell_damage);
                     if (gpu_shell_update(shell_damage) < 0) {
-                        gpu_fallback_to_software();
+                        gpu_fallback_to_software(
+                            "[gui] virgl shell upload failed; software fallback");
                         render();
                         last_render_tick = tick;
                         note_pointer_drawn();
@@ -5250,7 +5265,8 @@ int main(int argc, char **argv) {
                     }
                 }
                 if (gpu_present_scene(damage) < 0) {
-                    gpu_fallback_to_software();
+                    gpu_fallback_to_software(
+                        "[gui] virgl scene/present failed; software fallback");
                     render();
                     last_render_tick = tick;
                 }
