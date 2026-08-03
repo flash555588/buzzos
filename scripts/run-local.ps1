@@ -105,6 +105,11 @@ $QemuVideo = if (-not [string]::IsNullOrWhiteSpace($env:QEMU_VIDEO)) {
 } else {
     "-vga none -device virtio-vga,xres=1600,yres=900"
 }
+$QemuInput = if (-not [string]::IsNullOrWhiteSpace($env:QEMU_INPUT)) {
+    $env:QEMU_INPUT.Trim()
+} else {
+    "-device virtio-tablet-pci"
+}
 $argLine = '-drive "format=raw,file=' + $imagePath + '"' +
     ' -accel ' + $QemuAccel +
     ' -cpu ' + $QemuCpu +
@@ -113,6 +118,7 @@ $argLine = '-drive "format=raw,file=' + $imagePath + '"' +
     ' -monitor "tcp:127.0.0.1:' + $monitorPort + ',server,nowait"' +
     ' -no-reboot' +
     ' ' + $QemuVideo +
+    ' ' + $QemuInput +
     ' -display ' + $QemuDisplay +
     ' -audiodev dsound,id=audio0' +
     ' -device AC97,audiodev=audio0' +
@@ -146,5 +152,6 @@ Write-Host "QEMU started: pid=$($script:qemuProcess.Id)"
 Write-Host "QEMU binary: $QemuPath"
 Write-Host "QEMU accel: $QemuAccel  cpu: $QemuCpu  display: $QemuDisplay"
 Write-Host "QEMU video: $QemuVideo"
+Write-Host "QEMU input: $QemuInput"
 Write-Host "Serial log: $serialPath"
 Write-Host "Monitor: 127.0.0.1:$monitorPort"

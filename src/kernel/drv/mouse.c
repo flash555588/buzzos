@@ -21,6 +21,7 @@ static volatile int mouse_wheel_total;
 static volatile uint32_t mouse_wheel_seq;
 static volatile uint32_t mouse_seq;
 static volatile int mouse_enabled;
+static volatile int mouse_absolute_mode;
 
 static uint8_t packet[4];
 static int packet_index;
@@ -183,6 +184,7 @@ void mouse_init(void) {
     mouse_wheel_seq = 0;
     mouse_seq = 0;
     mouse_enabled = 0;
+    mouse_absolute_mode = 0;
     packet_index = 0;
     packet_size = 3;
 
@@ -240,7 +242,7 @@ void mouse_init(void) {
 }
 
 void mouse_handler(uint8_t byte) {
-    if (!mouse_enabled)
+    if (!mouse_enabled || mouse_absolute_mode)
         return;
     if (packet_index == 0 && (byte & 0x08) == 0)
         return;
@@ -282,6 +284,37 @@ void mouse_handler(uint8_t byte) {
     mouse_buttons = buttons;
     mouse_dx = dx;
     mouse_dy = -dy;
+    if (wheel != 0) {
+        mouse_wheel_total += wheel;
+        mouse_wheel_seq++;
+    }
+    mouse_seq++;
+    gui_event_notify_display();
+}
+
+void mouse_set_absolute_mode(int enabled) {
+    uint32_t flags = irq_save();
+    mouse_absolute_mode = enabled != 0;
+    mouse_dx = 0;
+    mouse_dy = 0;
+    packet_index = 0;
+    irq_restore(flags);
+}
+
+void mouse_absolute_event(int x, int y, int buttons, int wheel) {
+    int screen_w = 1;
+    int screen_h = 1;
+    mouse_screen_bounds(&screen_w, &screen_h);
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= screen_w) x = screen_w - 1;
+    if (y >= screen_h) y = screen_h - 1;
+
+    mouse_dx = x - mouse_x;
+    mouse_dy = y - mouse_y;
+    mouse_x = x;
+    mouse_y = y;
+    mouse_buttons = buttons & 0x07;
     if (wheel != 0) {
         mouse_wheel_total += wheel;
         mouse_wheel_seq++;

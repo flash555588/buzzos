@@ -19,6 +19,7 @@
 #include "timer.h"
 #include "vfs.h"
 #include "fb.h"
+#include "virtio_input.h"
 #include "initrd.h"
 #include "app_registry.h"
 
@@ -273,6 +274,10 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
 
     sched_init();
     timer_init();
+    /* Prefer a real absolute tablet for graphical hosts.  This is initialized
+     * after the scheduler because its IRQ publishes GUI wakeups.  Machines
+     * without VirtIO input keep the PS/2 mouse initialized above. */
+    (void)virtio_input_init();
     (void)audio_start_worker();
     /* VMware's hosted NAT backend can take tens of milliseconds to attach.
      * Run DHCP only after the PIT and scheduler exist so receive waits use a

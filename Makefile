@@ -65,6 +65,7 @@ KERNEL_SRCS := \
 	src/kernel/drv/fb.c \
 	src/kernel/drv/virtio_gpu.c \
 	src/kernel/drv/virtio_gpu_3d.c \
+	src/kernel/drv/virtio_input.c \
 	src/kernel/drv/reboot.c \
 	src/kernel/drv/pcnet.c \
 	src/kernel/drv/ne2000.c
@@ -102,9 +103,10 @@ QEMU_DISPLAY ?= sdl,gl=on
 #   make run QEMU_VIDEO="-vga std"
 # Smoke scripts that need deterministic VGA should set QEMU_VIDEO explicitly.
 QEMU_VIDEO ?= -vga none -device virtio-vga,xres=1600,yres=900
+QEMU_INPUT ?= -device virtio-tablet-pci
 QEMU_BASE := -accel $(QEMU_ACCEL) -cpu $(QEMU_CPU) -m 256 \
 	-drive format=raw,file=$(IMAGE) -no-reboot $(QEMU_VIDEO) \
-	-display $(QEMU_DISPLAY)
+	$(QEMU_INPUT) -display $(QEMU_DISPLAY)
 QEMU_AUDIO_AC97 := -audiodev dsound,id=audio0 \
 	-device AC97,audiodev=audio0
 QEMU_AUDIO_HDA := -audiodev dsound,id=audio0 \
