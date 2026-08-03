@@ -3614,14 +3614,12 @@ static void gpu_draw_app(int slot, struct rect damage) {
     if (session->scaled_surface) {
         destination = scaled_view_rect_for(id, session->gpu_content_w,
                                            session->gpu_content_h);
-    } else if (resize_win == id || session->resize_inflight ||
-               session->resize_dirty) {
-        /* The window geometry is compositor-owned and advances every pointer
-         * sample.  Scale only the last committed front texture into it; a
-         * later completed app frame changes pixels/source geometry without
-         * making the quad jump between intermediate sizes. */
-        destination = content;
     } else {
+        /* Desktop UI is pixel-sized content, not a video surface.  Keep it
+         * 1:1 while resize configures are in flight; stretching each lagging
+         * intermediate frame to the newest window geometry makes glyphs
+         * visibly pulse as the scale ratio repeatedly changes.  The opaque
+         * shell layer already fills any newly exposed content margin. */
         destination = (struct rect){content.x, content.y,
                                     session->gpu_content_w,
                                     session->gpu_content_h};
@@ -3866,10 +3864,6 @@ static struct rect app_damage_to_screen(int slot, struct rect dirty) {
     struct rect content = content_rect(id);
     struct rect screen = (struct rect){0, 0, sw, sh};
     if (!app_sessions[slot].scaled_surface) {
-        if (gpu_present_ready &&
-            (resize_win == id || app_sessions[slot].resize_inflight ||
-             app_sessions[slot].resize_dirty))
-            return intersect_rect(content, screen);
         struct rect area = {
             content.x + dirty.x, content.y + dirty.y, dirty.w, dirty.h
         };
