@@ -32,6 +32,7 @@ enum {
     VRING_DESC_F_WRITE = 2,
     VRING_AVAIL_F_NO_INTERRUPT = 1,
     GPU_QUEUE_INDEX = 0,
+    GPU_CURSOR_QUEUE_INDEX = 1,
     GPU_QUEUE_MAX = 8,
     GPU_QUEUE_NO_VECTOR = 0xFFFF,
 
@@ -42,10 +43,17 @@ enum {
     VIRTIO_GPU_CMD_RESOURCE_FLUSH = 0x0104,
     VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D = 0x0105,
     VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING = 0x0106,
+    VIRTIO_GPU_CMD_UPDATE_CURSOR = 0x0300,
+    VIRTIO_GPU_CMD_MOVE_CURSOR = 0x0301,
     VIRTIO_GPU_RESP_OK_NODATA = 0x1100,
     VIRTIO_GPU_RESP_OK_DISPLAY_INFO = 0x1101,
     VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM = 2,
+    VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM = 1,
     VIRTIO_GPU_MAX_SCANOUTS = 16,
+
+    VIRTIO_GPU_CURSOR_SIZE = 64,
+    VIRTIO_GPU_CURSOR_BYTES = VIRTIO_GPU_CURSOR_SIZE *
+                              VIRTIO_GPU_CURSOR_SIZE * 4,
 
     /* virtio-gpu device feature bits (low feature dword). */
     VIRTIO_GPU_F_VIRGL_BIT = 1u << 0,
@@ -177,6 +185,34 @@ struct virtio_gpu_attach_one {
     struct virtio_gpu_mem_entry entry;
 } __attribute__((packed));
 
+struct virtio_gpu_cursor_pos {
+    uint32_t scanout_id;
+    uint32_t x;
+    uint32_t y;
+    uint32_t padding;
+} __attribute__((packed));
+
+struct virtio_gpu_update_cursor {
+    struct virtio_gpu_ctrl_hdr hdr;
+    struct virtio_gpu_cursor_pos pos;
+    uint32_t resource_id;
+    uint32_t hot_x;
+    uint32_t hot_y;
+    uint32_t padding;
+} __attribute__((packed));
+
+enum {
+    VIRTIO_GPU_MAX_BACKING_ENTRIES =
+        (GPU_BACKING_BYTES + PAGE_SIZE - 1u) / PAGE_SIZE,
+};
+
+struct virtio_gpu_attach_many {
+    struct virtio_gpu_resource_attach_backing command;
+    struct virtio_gpu_mem_entry entries[VIRTIO_GPU_MAX_BACKING_ENTRIES];
+} __attribute__((packed));
+
+static struct virtio_gpu_attach_many gpu_attach_many;
+
 struct virtio_gpu_display_one {
     struct virtio_gpu_rect r;
     uint32_t enabled;
@@ -203,6 +239,24 @@ static uint8_t *gpu_request;
 static uint8_t *gpu_response;
 static uint16_t gpu_queue_size;
 static uint16_t gpu_avail_index;
+
+/* Cursor commands have their own virtqueue in the virtio-gpu protocol.  A
+ * move therefore never waits behind a 3-D submit and never touches scanout
+ * pixels. */
+static struct virtq_desc *gpu_cursor_desc;
+static struct virtq_avail *gpu_cursor_avail;
+static struct virtq_used *gpu_cursor_used;
+static uint8_t *gpu_cursor_request;
+static volatile uint16_t *gpu_cursor_notify;
+static uint16_t gpu_cursor_queue_size;
+static uint16_t gpu_cursor_avail_index;
+static uint32_t *gpu_cursor_backing;
+static uintptr_t gpu_cursor_backing_phys;
+static uint32_t gpu_cursor_resource_id;
+static uint32_t gpu_cursor_hot_x;
+static uint32_t gpu_cursor_hot_y;
+static int gpu_cursor_queue_ready;
+static int gpu_cursor_visible;
 
 static uintptr_t gpu_backing_phys;
 static uint32_t *gpu_backing;
@@ -407,6 +461,110 @@ static int gpu_setup_queue(void) {
     return 0;
 }
 
+/* Queue 1 is deliberately kept separate from the control/3-D queue.  Cursor
+ * commands contain no response descriptor; completion is the used-ring entry
+ * itself.  Treat this queue as optional so an unusual host can still provide
+ * the normal framebuffer and virgl paths. */
+static int gpu_setup_cursor_queue(void) {
+    uintptr_t desc_page, avail_page, used_page, request_page;
+    uint16_t offered, chosen;
+    uint32_t notify_offset;
+
+    if (!gpu_common || gpu_common->num_queues <= GPU_CURSOR_QUEUE_INDEX)
+        return -1;
+    gpu_common->queue_select = GPU_CURSOR_QUEUE_INDEX;
+    offered = gpu_common->queue_size;
+    if (gpu_common->queue_enable || offered < 1u)
+        return -1;
+    chosen = GPU_QUEUE_MAX;
+    while (chosen > offered)
+        chosen >>= 1;
+    if (chosen < 1u)
+        return -1;
+
+    desc_page = pmm_alloc_pages(1);
+    avail_page = pmm_alloc_pages(1);
+    used_page = pmm_alloc_pages(1);
+    request_page = pmm_alloc_pages(1);
+    if (!desc_page || !avail_page || !used_page || !request_page)
+        return -1;
+
+    gpu_cursor_desc = (struct virtq_desc *)desc_page;
+    gpu_cursor_avail = (struct virtq_avail *)avail_page;
+    gpu_cursor_used = (struct virtq_used *)used_page;
+    gpu_cursor_request = (uint8_t *)request_page;
+    bytes_zero(gpu_cursor_desc, PAGE_SIZE);
+    bytes_zero(gpu_cursor_avail, PAGE_SIZE);
+    bytes_zero(gpu_cursor_used, PAGE_SIZE);
+    bytes_zero(gpu_cursor_request, PAGE_SIZE);
+    gpu_cursor_avail->flags = VRING_AVAIL_F_NO_INTERRUPT;
+    gpu_cursor_queue_size = chosen;
+    gpu_cursor_avail_index = 0;
+
+    gpu_common->queue_size = chosen;
+    gpu_common->queue_msix_vector = GPU_QUEUE_NO_VECTOR;
+    gpu_common->queue_desc_lo = (uint32_t)desc_page;
+    gpu_common->queue_desc_hi = 0;
+    gpu_common->queue_avail_lo = (uint32_t)avail_page;
+    gpu_common->queue_avail_hi = 0;
+    gpu_common->queue_used_lo = (uint32_t)used_page;
+    gpu_common->queue_used_hi = 0;
+
+    notify_offset = (uint32_t)gpu_common->queue_notify_off *
+                    gpu_notify_multiplier;
+    if (notify_offset > gpu_notify_length ||
+        gpu_notify_length - notify_offset < sizeof(uint16_t))
+        return -1;
+    gpu_cursor_notify =
+        (volatile uint16_t *)(gpu_notify_base + notify_offset);
+    io_dma_wmb();
+    gpu_common->queue_enable = 1;
+    if (gpu_common->queue_enable != 1)
+        return -1;
+    gpu_cursor_queue_ready = 1;
+    return 0;
+}
+
+static int gpu_cursor_submit(const void *request, uint32_t request_size) {
+    uint16_t used_before;
+    uint32_t irq_flags;
+    int complete = 0;
+
+    if (!gpu_cursor_queue_ready || !request || !request_size ||
+        request_size > PAGE_SIZE)
+        return -1;
+    irq_flags = irq_save();
+    bytes_copy(gpu_cursor_request, request, request_size);
+    gpu_cursor_desc[0].addr = (uint64_t)(uintptr_t)gpu_cursor_request;
+    gpu_cursor_desc[0].len = request_size;
+    gpu_cursor_desc[0].flags = 0;
+    gpu_cursor_desc[0].next = 0;
+    used_before = gpu_cursor_used->idx;
+    gpu_cursor_avail->ring[gpu_cursor_avail_index % gpu_cursor_queue_size] = 0;
+    __sync_synchronize();
+    gpu_cursor_avail_index++;
+    gpu_cursor_avail->idx = gpu_cursor_avail_index;
+    __sync_synchronize();
+    *gpu_cursor_notify = GPU_CURSOR_QUEUE_INDEX;
+    irq_restore(irq_flags);
+
+    for (uint32_t spin = 0; spin < 10000000u; spin++) {
+        if (gpu_cursor_used->idx != used_before) {
+            complete = 1;
+            break;
+        }
+        __asm__ volatile("pause");
+    }
+    if (!complete) {
+        serial_puts("[gpu] cursor command timeout\n");
+        return -1;
+    }
+    __sync_synchronize();
+    if (gpu_cursor_used->ring[used_before % gpu_cursor_queue_size].id != 0)
+        return -1;
+    return 0;
+}
+
 static int gpu_submit(const void *request, uint32_t request_size,
                       void *response, uint32_t response_size) {
     if (!request || request_size == 0 || request_size > PAGE_SIZE ||
@@ -560,6 +718,52 @@ int vgpu_attach_backing(uint32_t resource_id, uintptr_t phys, uint32_t bytes) {
     attach.entry.addr = (uint64_t)phys;
     attach.entry.length = bytes;
     return gpu_submit_expect(&attach, sizeof(attach),
+                             VIRTIO_GPU_RESP_OK_NODATA);
+}
+
+int vgpu_attach_backing_pages(uint32_t resource_id,
+                              const uintptr_t *pages, uint32_t page_count,
+                              uint32_t first_offset, uint32_t bytes) {
+    uint32_t remaining = bytes;
+    uint32_t entry_count = 0;
+    uint32_t offset = first_offset;
+    if (!resource_id || !pages || !page_count || !bytes ||
+        first_offset >= PAGE_SIZE ||
+        (uint64_t)page_count * PAGE_SIZE < (uint64_t)first_offset + bytes)
+        return -1;
+
+    bytes_zero(&gpu_attach_many, sizeof(gpu_attach_many));
+    gpu_attach_many.command.hdr.type =
+        VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+    gpu_attach_many.command.resource_id = resource_id;
+
+    for (uint32_t i = 0; i < page_count && remaining; i++) {
+        if (!pages[i])
+            return -1;
+        uint32_t available = PAGE_SIZE - offset;
+        uint32_t chunk = remaining < available ? remaining : available;
+        uint64_t address = (uint64_t)pages[i] + offset;
+        if (entry_count &&
+            gpu_attach_many.entries[entry_count - 1u].addr +
+                    gpu_attach_many.entries[entry_count - 1u].length == address) {
+            gpu_attach_many.entries[entry_count - 1u].length += chunk;
+        } else {
+            if (entry_count >= VIRTIO_GPU_MAX_BACKING_ENTRIES)
+                return -1;
+            gpu_attach_many.entries[entry_count].addr = address;
+            gpu_attach_many.entries[entry_count].length = chunk;
+            entry_count++;
+        }
+        remaining -= chunk;
+        offset = 0;
+    }
+    if (remaining || !entry_count)
+        return -1;
+    gpu_attach_many.command.nr_entries = entry_count;
+    uint32_t request_bytes =
+        (uint32_t)sizeof(gpu_attach_many.command) +
+        entry_count * (uint32_t)sizeof(gpu_attach_many.entries[0]);
+    return vgpu_submit_large(&gpu_attach_many, request_bytes,
                              VIRTIO_GPU_RESP_OK_NODATA);
 }
 
@@ -764,6 +968,8 @@ int virtio_gpu_init(uint32_t width, uint32_t height) {
         serial_puts("[gpu] virtio PCI setup failed\n");
         return -1;
     }
+    if (gpu_setup_cursor_queue() < 0)
+        serial_puts("[gpu] cursor queue unavailable; software cursor fallback\n");
     gpu_status_add(VIRTIO_STATUS_DRIVER_OK);
     if (gpu_get_display_info() < 0) {
         gpu_status_failed();
@@ -832,6 +1038,9 @@ int virtio_gpu_set_mode(uint32_t width, uint32_t height) {
         return 0;
     if (gpu_create_scanout(width, height) < 0)
         return -1;
+    /* The host GL scanout is a separate 3-D resource.  Recreate it after the
+     * 2-D mode succeeds; failure only disables the optional GPU compositor. */
+    (void)virtio_gpu_3d_resize(width, height);
     serial_puts("[gpu] scanout mode ");
     serial_puthex(width);
     serial_putc('x');
@@ -868,4 +1077,126 @@ int virtio_gpu_flush(int x, int y, int width, int height) {
         height = (int)gpu_height - y;
     return gpu_transfer_flush_resource(gpu_resource_id, gpu_width,
                                        x, y, width, height);
+}
+
+static int gpu_cursor_create_resource(void) {
+    struct virtio_gpu_resource_create_2d create = {0};
+    struct virtio_gpu_attach_one attach = {0};
+    enum { CURSOR_PAGES = VIRTIO_GPU_CURSOR_BYTES / PAGE_SIZE };
+
+    if (gpu_cursor_resource_id)
+        return 0;
+    for (int attempt = 0; attempt < 16 && !gpu_cursor_backing_phys; attempt++) {
+        uintptr_t phys = pmm_alloc_pages(CURSOR_PAGES);
+        if (!phys)
+            break;
+        if (phys >= 0x100000u) {
+            gpu_cursor_backing_phys = phys;
+            break;
+        }
+        pmm_free_pages(phys, CURSOR_PAGES);
+    }
+    if (!gpu_cursor_backing_phys)
+        return -1;
+    gpu_cursor_backing = (uint32_t *)gpu_cursor_backing_phys;
+    bytes_zero(gpu_cursor_backing, VIRTIO_GPU_CURSOR_BYTES);
+
+    gpu_cursor_resource_id = vgpu_alloc_resource_id();
+    create.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+    create.resource_id = gpu_cursor_resource_id;
+    create.format = VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+    create.width = VIRTIO_GPU_CURSOR_SIZE;
+    create.height = VIRTIO_GPU_CURSOR_SIZE;
+    if (gpu_submit_expect(&create, sizeof(create),
+                          VIRTIO_GPU_RESP_OK_NODATA) < 0)
+        goto fail;
+
+    attach.command.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+    attach.command.resource_id = gpu_cursor_resource_id;
+    attach.command.nr_entries = 1;
+    attach.entry.addr = (uint64_t)gpu_cursor_backing_phys;
+    attach.entry.length = VIRTIO_GPU_CURSOR_BYTES;
+    if (gpu_submit_expect(&attach, sizeof(attach),
+                          VIRTIO_GPU_RESP_OK_NODATA) < 0) {
+        (void)gpu_unref_resource(gpu_cursor_resource_id);
+        goto fail;
+    }
+    return 0;
+
+fail:
+    gpu_cursor_resource_id = 0;
+    gpu_cursor_backing = 0;
+    pmm_free_pages(gpu_cursor_backing_phys, CURSOR_PAGES);
+    gpu_cursor_backing_phys = 0;
+    return -1;
+}
+
+static int gpu_cursor_update_command(uint32_t resource_id, uint32_t x,
+                                     uint32_t y) {
+    struct virtio_gpu_update_cursor update = {0};
+    update.hdr.type = VIRTIO_GPU_CMD_UPDATE_CURSOR;
+    update.pos.scanout_id = 0;
+    update.pos.x = x;
+    update.pos.y = y;
+    update.resource_id = resource_id;
+    update.hot_x = gpu_cursor_hot_x;
+    update.hot_y = gpu_cursor_hot_y;
+    return gpu_cursor_submit(&update, sizeof(update));
+}
+
+int virtio_gpu_cursor_define(const uint32_t *pixels, uint32_t width,
+                             uint32_t height, uint32_t hot_x,
+                             uint32_t hot_y, uint32_t x, uint32_t y) {
+    if (!gpu_is_ready || !gpu_cursor_queue_ready || !pixels || !width ||
+        !height || width > VIRTIO_GPU_CURSOR_SIZE ||
+        height > VIRTIO_GPU_CURSOR_SIZE || hot_x >= width || hot_y >= height ||
+        gpu_cursor_create_resource() < 0)
+        return -1;
+
+    bytes_zero(gpu_cursor_backing, VIRTIO_GPU_CURSOR_BYTES);
+    for (uint32_t row = 0; row < height; row++)
+        bytes_copy(gpu_cursor_backing + row * VIRTIO_GPU_CURSOR_SIZE,
+                   pixels + row * width, width * sizeof(uint32_t));
+    if (gpu_transfer_flush_resource(gpu_cursor_resource_id,
+                                    VIRTIO_GPU_CURSOR_SIZE, 0, 0,
+                                    VIRTIO_GPU_CURSOR_SIZE,
+                                    VIRTIO_GPU_CURSOR_SIZE) < 0)
+        return -1;
+    gpu_cursor_hot_x = hot_x;
+    gpu_cursor_hot_y = hot_y;
+    if (gpu_cursor_update_command(gpu_cursor_resource_id, x, y) < 0)
+        return -1;
+    gpu_cursor_visible = 1;
+    return 0;
+}
+
+int virtio_gpu_cursor_move(uint32_t x, uint32_t y, int visible) {
+    struct virtio_gpu_update_cursor move = {0};
+    int result;
+    if (!gpu_is_ready || !gpu_cursor_queue_ready || !gpu_cursor_resource_id)
+        return -1;
+    if (!visible) {
+        result = gpu_cursor_update_command(0, x, y);
+        if (result == 0)
+            gpu_cursor_visible = 0;
+        return result;
+    }
+    if (!gpu_cursor_visible) {
+        result = gpu_cursor_update_command(gpu_cursor_resource_id, x, y);
+        if (result == 0)
+            gpu_cursor_visible = 1;
+        return result;
+    }
+    move.hdr.type = VIRTIO_GPU_CMD_MOVE_CURSOR;
+    move.pos.scanout_id = 0;
+    move.pos.x = x;
+    move.pos.y = y;
+    /* The virtio specification says the remaining MOVE_CURSOR fields are
+     * ignored, but QEMU's display path still passes resource_id as the
+     * cursor-visible flag to dpy_mouse_set().  Keep the active resource here
+     * or the first movement hides an otherwise valid hardware cursor. */
+    move.resource_id = gpu_cursor_resource_id;
+    move.hot_x = gpu_cursor_hot_x;
+    move.hot_y = gpu_cursor_hot_y;
+    return gpu_cursor_submit(&move, sizeof(move));
 }

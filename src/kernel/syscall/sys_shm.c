@@ -9,7 +9,7 @@
 
 struct shm_object {
     int used, ready;
-    uint16_t generation, page_count;
+    uint16_t generation, page_count, pins;
     uint32_t size, owners;
     uintptr_t pages[SHM_MAX_PAGES];
 };
@@ -45,8 +45,13 @@ static struct shm_object *lookup(uint32_t token, int *index) {
 static void free_object(struct shm_object *o) {
     for (uint32_t i = 0; i < o->page_count; i++)
         if (o->pages[i]) pmm_free_pages(o->pages[i], 1);
-    o->used = 0; o->ready = 0; o->page_count = 0;
+    o->used = 0; o->ready = 0; o->page_count = 0; o->pins = 0;
     o->size = 0; o->owners = 0;
+}
+
+static void maybe_free_object(struct shm_object *o) {
+    if (o && !o->owners && !o->pins)
+        free_object(o);
 }
 
 int sys_shm_create(uint32_t size, uint32_t out_arg, uint32_t c, uint32_t d, uint32_t e) {
@@ -64,7 +69,7 @@ int sys_shm_create(uint32_t size, uint32_t out_arg, uint32_t c, uint32_t d, uint
     if (++o->generation == 0) o->generation = 1;
     o->used = 1; o->ready = 0; o->size = size;
     o->page_count = (uint16_t)((size + PAGE_SIZE - 1u) / PAGE_SIZE);
-    o->owners = 0;
+    o->owners = 0; o->pins = 0;
     for (uint32_t i = 0; i < SHM_MAX_PAGES; i++)
         o->pages[i] = 0;
     shm_unlock();
@@ -121,9 +126,51 @@ int sys_shm_unmap(uint32_t token, uint32_t b, uint32_t c, uint32_t d, uint32_t e
         shm_unlock(); return -1;
     }
     o->owners &= ~bit;
-    if (!o->owners) free_object(o);
+    maybe_free_object(o);
     shm_unlock();
     return 0;
+}
+
+int shm_pin_pages(uint32_t token, int owner, uint32_t offset, uint32_t bytes,
+                  const uintptr_t **pages_out, uint32_t *page_count_out,
+                  uint32_t *first_offset_out) {
+    int index;
+    uint32_t first, last, end, bit;
+    if (owner <= 0 || owner >= MAX_TASKS || !bytes || !pages_out ||
+        !page_count_out || !first_offset_out)
+        return -1;
+    if (offset > 0xFFFFFFFFu - bytes)
+        return -1;
+    end = offset + bytes;
+    shm_lock();
+    struct shm_object *o = lookup(token, &index);
+    bit = 1u << (uint32_t)owner;
+    if (!o || !(o->owners & bit) || end > o->size || o->pins == 0xFFFFu) {
+        shm_unlock();
+        return -1;
+    }
+    first = offset / PAGE_SIZE;
+    last = (end + PAGE_SIZE - 1u) / PAGE_SIZE;
+    if (first >= o->page_count || last > o->page_count || last <= first) {
+        shm_unlock();
+        return -1;
+    }
+    o->pins++;
+    *pages_out = &o->pages[first];
+    *page_count_out = last - first;
+    *first_offset_out = offset & (PAGE_SIZE - 1u);
+    shm_unlock();
+    return 0;
+}
+
+void shm_unpin_pages(uint32_t token) {
+    shm_lock();
+    struct shm_object *o = lookup(token, 0);
+    if (o && o->pins) {
+        o->pins--;
+        maybe_free_object(o);
+    }
+    shm_unlock();
 }
 
 void shm_cleanup_owner(int owner) {
@@ -133,7 +180,7 @@ void shm_cleanup_owner(int owner) {
     for (int i = 0; i < SHM_MAX_OBJECTS; i++) {
         if (!objects[i].used || !(objects[i].owners & bit)) continue;
         objects[i].owners &= ~bit;
-        if (!objects[i].owners) free_object(&objects[i]);
+        maybe_free_object(&objects[i]);
     }
     shm_unlock();
 }

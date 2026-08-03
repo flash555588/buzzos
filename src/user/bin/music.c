@@ -47,11 +47,23 @@ static volatile int prev_mouse_buttons;
 static volatile int flush_audio;
 static volatile int flush_absolute;
 static volatile uint32_t flush_pos;
+static volatile int playback_wake_sequence;
 static volatile uint32_t ui_anchor_pos;
 static volatile uint32_t ui_anchor_ms;
 static volatile int ui_hold_pos_valid;
 static volatile uint32_t ui_hold_pos;
 static int playback_tid = -1;
+static volatile int ui_dirty = 1;
+
+static void invalidate_ui(void) {
+    __sync_lock_test_and_set(&ui_dirty, 1);
+    (void)futex_wake((int *)&ui_dirty, 1);
+}
+
+static void wake_playback(void) {
+    __sync_add_and_fetch(&playback_wake_sequence, 1);
+    (void)futex_wake((int *)&playback_wake_sequence, 1);
+}
 
 static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -113,8 +125,12 @@ static void set_title_from_path(const char *path) {
 }
 
 static void set_window_size(int w, int h) {
-    win_w = clamp_int(w, MIN_W, GUIAPP_MAX_W);
-    win_h = clamp_int(h, MIN_H, GUIAPP_MAX_H);
+    int next_w = clamp_int(w, MIN_W, GUIAPP_MAX_W);
+    int next_h = clamp_int(h, MIN_H, GUIAPP_MAX_H);
+    if (win_w != next_w || win_h != next_h)
+        invalidate_ui();
+    win_w = next_w;
+    win_h = next_h;
 }
 
 static void layout_sync_from_window(void) {
@@ -300,6 +316,8 @@ static void request_flush_absolute(uint32_t pos) {
     flush_pos = pos;
     flush_absolute = 1;
     flush_audio = 1;
+    __sync_synchronize();
+    wake_playback();
 }
 
 static void request_flush_rewind(void) {
@@ -309,6 +327,8 @@ static void request_flush_rewind(void) {
     ui_resync(hw);
     flush_absolute = 0;
     flush_audio = 1;
+    __sync_synchronize();
+    wake_playback();
 }
 
 static void apply_flush(void) {
@@ -662,13 +682,17 @@ static void playback_thread(void) {
             continue;
         }
         if (!playing) {
-            sleep_ms(10);
+            int expected = playback_wake_sequence;
+            __sync_synchronize();
+            if (!playing && !flush_audio && !closed)
+                (void)futex_wait((int *)&playback_wake_sequence, expected);
             continue;
         }
         if (position >= sample_count) {
             if (queued_samples() == 0) {
                 playing = 0;
                 ui_resync(sample_count);
+                invalidate_ui();
             }
             sleep_ms(10);
             continue;
@@ -701,19 +725,24 @@ static void toggle_play(void) {
             ui_resync(hardware_playhead());
         }
         playing = 1;
+        wake_playback();
     }
+    invalidate_ui();
 }
 
 static void restart(void) {
     if (!samples)
         return;
     playing = 1;
+    wake_playback();
     request_flush_absolute(0);
+    invalidate_ui();
 }
 
 static void stop_playback(void) {
     playing = 0;
     request_flush_absolute(0);
+    invalidate_ui();
 }
 
 static void seek_from_x(int x) {
@@ -729,6 +758,7 @@ static void seek_from_x(int x) {
      * pairing a new write cursor with the old queue made the playhead wrap
      * to zero and the track appear to restart. */
     request_flush_absolute(pos);
+    invalidate_ui();
 }
 
 static void handle_click(int x, int y) {
@@ -769,6 +799,9 @@ static void gui_event_reader(void) {
             else if (ev.key == 's' || ev.key == 'S')
                 stop_playback();
         } else if (ev.type == GUIAPP_EVT_MOUSE) {
+            if (mouse_x != ev.x || mouse_y != ev.y ||
+                prev_mouse_buttons != ev.buttons)
+                invalidate_ui();
             mouse_x = ev.x;
             mouse_y = ev.y;
             int clicked = (ev.buttons & 1) && !(prev_mouse_buttons & 1);
@@ -782,9 +815,13 @@ static void gui_event_reader(void) {
                 if (appui_inside(ev.x, ev.y, hit))
                     seek_from_x(ev.x);
             }
+        } else if (ev.type == GUIAPP_EVT_CAPABILITIES) {
+            invalidate_ui();
         }
     }
     closed = 1;
+    invalidate_ui();
+    wake_playback();
 }
 
 static void draw_vbar(int w, int h, int x, int y, int bw, int bh, int fill_h,
@@ -1053,9 +1090,239 @@ static void render_frame(int *out_w, int *out_h) {
     if (out_h) *out_h = h;
 }
 
+/* appui scales a 28-row glyph cell by ui_font_scale_pct and crops to the ink;
+ * the GPU atlas scales the whole cell to the requested size.  A CPU font token
+ * therefore maps to 28 * pct / 100 pixels, which is what keeps GPU text the
+ * same size as the CPU surface it can be swapped for at any frame. */
+enum {
+    GPU_FONT_CAPTION = 16,  /* UI_FONT_CAPTION,  58% */
+    GPU_FONT_BODY = 19,     /* UI_FONT_BODY,     68% */
+    GPU_FONT_BODY_LG = 22,  /* UI_FONT_BODY_LG,  79% */
+};
+
+static void canvas_box(struct guiapp_canvas *canvas, struct appui_rect r,
+                       int radius, uint32_t color) {
+    (void)guiapp_canvas_rect(canvas, r.x, r.y, r.w, r.h, radius, color);
+}
+
+/* appui centres the glyph ink in its box; the GPU centres the full cell, whose
+ * descender space sits below the ink.  Growing a tight box to the cell height
+ * keeps the same optical centre and stops the GPU scissor from shearing the
+ * bottom off large text. */
+static void canvas_label(struct guiapp_canvas *canvas, struct appui_rect r,
+                         const char *text, int size, uint32_t color,
+                         uint16_t flags) {
+    if (r.h < size) {
+        r.y -= (size - r.h) / 2;
+        r.h = size;
+    }
+    (void)guiapp_canvas_text(canvas, r.x, r.y, r.w, r.h, text, size,
+                             color, flags);
+}
+
+static uint32_t canvas_button_color(struct appui_rect r, int primary,
+                                    int enabled) {
+    int state = appui_pointer_state(r, mouse_x, mouse_y, prev_mouse_buttons);
+    if (!enabled)
+        return UI_CTRL_DISABLED;
+    if (state & APPUI_STATE_PRESSED)
+        return primary ? UI_ACCENT_DARK1 : UI_SUBTLE_PRESSED;
+    if (state & APPUI_STATE_HOVERED)
+        return primary ? UI_ACCENT_LIGHT1 : UI_SUBTLE_HOVER;
+    return primary ? UI_ACCENT_FILL : UI_BG_LAYER;
+}
+
+/* GPU-native Music surface.  This emits ~85 compact primitives; it never
+ * allocates or walks a width*height CPU framebuffer. */
+static int render_canvas_frame(void) {
+    enum { GPU_WAVE_BARS = 56 };
+    struct guiapp_canvas canvas;
+    struct appui_rect art, track, restart_btn, play_btn, stop_btn;
+    char cur[16], tot[16];
+    const char *status;
+    uint32_t status_color;
+    int w, h, m, art_size, header_h, text_x, text_w;
+    uint32_t pos;
+    int is_playing;
+
+    layout_sync_from_window();
+    w = layout_w;
+    h = layout_h;
+    pos = display_playhead();
+    is_playing = samples && playing && pos < sample_count;
+    m = layout_margin();
+    art_size = layout_art_size();
+    header_h = layout_header_h();
+    if (guiapp_canvas_begin(&gui, &canvas, w, h) < 0)
+        return -1;
+
+    canvas_box(&canvas, (struct appui_rect){0, 0, w, h}, 0, UI_BG_SOLID);
+    canvas_box(&canvas, (struct appui_rect){0, 0, w, header_h}, 0,
+               UI_BG_MICA);
+    canvas_box(&canvas, (struct appui_rect){0, header_h - 1, w, 1}, 0,
+               UI_STROKE_SURFACE);
+
+    art = art_rect();
+    canvas_box(&canvas, art, UI_RADIUS_OVERLAY, UI_ACCENT_DARK1);
+    canvas_box(&canvas,
+               (struct appui_rect){art.x + 3, art.y + 3,
+                                   art.w - 6, art.h - 6},
+               UI_RADIUS_OVERLAY - 2, UI_BG_MICA_ALT);
+    {
+        int disc = art.w - 20;
+        int dx = art.x + (art.w - disc) / 2;
+        int dy = art.y + (art.h - disc) / 2;
+        canvas_box(&canvas, (struct appui_rect){dx, dy, disc, disc},
+                   disc / 2, UI_ACCENT_BASE);
+        canvas_box(&canvas,
+                   (struct appui_rect){dx + disc / 7, dy + disc / 7,
+                                       disc - 2 * (disc / 7),
+                                       disc - 2 * (disc / 7)},
+                   disc / 2, UI_BG_MICA_ALT);
+        canvas_box(&canvas,
+                   (struct appui_rect){dx + disc / 3, dy + disc / 3,
+                                       disc / 3, disc / 3},
+                   disc / 6, UI_ACCENT_FILL);
+        canvas_label(&canvas, (struct appui_rect){dx, dy, disc, disc},
+                     "Music", clamp_int(disc / 7, 10, 18),
+                     UI_TEXT_PRIMARY, GUIAPP_CANVAS_ALIGN_CENTER |
+                                      GUIAPP_CANVAS_TEXT_BOLD);
+    }
+
+    text_x = m + art_size + m;
+    text_w = w - text_x - m;
+    if (text_w < 80) {
+        text_x = m;
+        text_w = w - 2 * m;
+    }
+    canvas_label(&canvas,
+                 (struct appui_rect){text_x, m + 4, text_w, 30},
+                 track_title, GPU_FONT_BODY_LG, UI_TEXT_PRIMARY,
+                 GUIAPP_CANVAS_ALIGN_LEFT | GUIAPP_CANVAS_TEXT_BOLD);
+    canvas_label(&canvas,
+                 (struct appui_rect){text_x, m + 34, text_w, 24},
+                 track_artist, GPU_FONT_BODY, UI_TEXT_SECONDARY,
+                 GUIAPP_CANVAS_ALIGN_LEFT);
+    if (!samples) {
+        status = "No audio loaded";
+        status_color = UI_SYS_CRITICAL;
+    } else if (pos >= sample_count) {
+        status = "Finished";
+        status_color = UI_TEXT_TERTIARY;
+    } else if (is_playing) {
+        status = "Now Playing";
+        status_color = UI_SYS_SUCCESS;
+    } else {
+        status = "Paused";
+        status_color = UI_SYS_CAUTION;
+    }
+    canvas_label(&canvas,
+                 (struct appui_rect){text_x, m + 62, text_w, 24},
+                 status, GPU_FONT_BODY, status_color,
+                 GUIAPP_CANVAS_ALIGN_LEFT);
+    if (text_w >= 80 && art_size >= 100)
+        canvas_label(&canvas,
+                     (struct appui_rect){text_x, m + 88, text_w, 22},
+                     track_format, GPU_FONT_CAPTION, UI_TEXT_TERTIARY,
+                     GUIAPP_CANVAS_ALIGN_LEFT);
+
+    {
+        int base_x = m;
+        int base_y = layout_wave_y();
+        int area_w = w - 2 * m;
+        int area_h = layout_wave_h();
+        int gap = 2;
+        int bar_w = (area_w - gap * (GPU_WAVE_BARS - 1)) /
+                    GPU_WAVE_BARS;
+        int play_bar = sample_count
+            ? (int)scale_u32(pos, GPU_WAVE_BARS, sample_count) : 0;
+        uint32_t now = monotonic_ms();
+        if (bar_w < 2) { bar_w = 2; gap = 1; }
+        if (play_bar >= GPU_WAVE_BARS) play_bar = GPU_WAVE_BARS - 1;
+        canvas_box(&canvas,
+                   (struct appui_rect){base_x - 6, base_y - 6,
+                                       area_w + 12, area_h + 12},
+                   UI_RADIUS_OVERLAY, UI_BG_LAYER);
+        for (int i = 0; i < GPU_WAVE_BARS; i++) {
+            int src = i * WAVE_BARS / GPU_WAVE_BARS;
+            int bh = 6 + wave_peak[src] * (area_h - 10) / 128;
+            uint32_t color = !samples ? UI_CTRL_DISABLED :
+                i < play_bar ? UI_ACCENT_FILL :
+                i == play_bar ? UI_TEXT_PRIMARY : UI_STROKE_SURFACE;
+            if (is_playing && i <= play_bar)
+                bh = clamp_int(bh + (int)((now / 40u + i * 3u) % 7u) - 3,
+                               4, area_h);
+            canvas_box(&canvas,
+                       (struct appui_rect){base_x + i * (bar_w + gap),
+                                           base_y + area_h - bh,
+                                           bar_w, bh},
+                       bar_w / 2, color);
+        }
+    }
+
+    track = progress_track();
+    format_time(cur, sizeof(cur), pos);
+    format_time(tot, sizeof(tot), sample_count);
+    canvas_label(&canvas,
+                 (struct appui_rect){track.x, track.y - 30,
+                                     track.w / 2, 22},
+                 cur, GPU_FONT_CAPTION, UI_TEXT_SECONDARY,
+                 GUIAPP_CANVAS_ALIGN_LEFT);
+    canvas_label(&canvas,
+                 (struct appui_rect){track.x + track.w / 2, track.y - 30,
+                                     track.w - track.w / 2, 22},
+                 tot, GPU_FONT_CAPTION, UI_TEXT_SECONDARY,
+                 GUIAPP_CANVAS_ALIGN_RIGHT);
+    canvas_box(&canvas, track, track.h / 2, UI_STROKE_CONTROL);
+    {
+        int fill_w = sample_count
+            ? (int)scale_u32(pos, (uint32_t)track.w, sample_count) : 0;
+        int thumb_x;
+        if (fill_w > track.w) fill_w = track.w;
+        if (fill_w > 0)
+            canvas_box(&canvas,
+                       (struct appui_rect){track.x, track.y, fill_w, track.h},
+                       track.h / 2, UI_ACCENT_FILL);
+        thumb_x = track.x + fill_w;
+        canvas_box(&canvas,
+                   (struct appui_rect){thumb_x - 9,
+                                       track.y + track.h / 2 - 9, 18, 18},
+                   9, UI_BG_SOLID);
+        canvas_box(&canvas,
+                   (struct appui_rect){thumb_x - 7,
+                                       track.y + track.h / 2 - 7, 14, 14},
+                   7, UI_ACCENT_FILL);
+    }
+
+    layout_buttons(&restart_btn, &play_btn, &stop_btn);
+    canvas_box(&canvas, restart_btn, UI_RADIUS_CONTROL,
+               canvas_button_color(restart_btn, 0, samples != 0));
+    canvas_label(&canvas, restart_btn, "<<", GPU_FONT_BODY, UI_TEXT_PRIMARY,
+                 GUIAPP_CANVAS_ALIGN_CENTER | GUIAPP_CANVAS_TEXT_BOLD);
+    canvas_box(&canvas, play_btn, play_btn.h / 2,
+               canvas_button_color(play_btn, 1, samples != 0));
+    canvas_label(&canvas, play_btn, is_playing ? "Pause" : "Play",
+                 GPU_FONT_BODY, UI_TEXT_ON_ACCENT,
+                 GUIAPP_CANVAS_ALIGN_CENTER | GUIAPP_CANVAS_TEXT_BOLD);
+    canvas_box(&canvas, stop_btn, UI_RADIUS_CONTROL,
+               canvas_button_color(stop_btn, 0, samples != 0));
+    canvas_label(&canvas, stop_btn, "X", GPU_FONT_BODY, UI_TEXT_PRIMARY,
+                 GUIAPP_CANVAS_ALIGN_CENTER | GUIAPP_CANVAS_TEXT_BOLD);
+
+    canvas_label(&canvas,
+                 (struct appui_rect){m, layout_help_y(), w - 2 * m, 22},
+                 w >= 680
+                    ? "Space: play/pause   R: restart   S: stop   Click: seek"
+                    : "Space play/pause   R restart   S stop",
+                 GPU_FONT_CAPTION, UI_TEXT_TERTIARY,
+                 GUIAPP_CANVAS_ALIGN_LEFT);
+    return guiapp_canvas_present(&canvas, "Music");
+}
+
 int main(int argc, char **argv) {
     const char *path_arg = (argc > 4 && argv[4] && argv[4][0]) ? argv[4] : 0;
     int exit_status = 0;
+    int gpu_mode;
 
     if (guiapp_parse_args(argc, argv, &gui) < 0)
         return 1;
@@ -1079,24 +1346,46 @@ int main(int argc, char **argv) {
         exit_status = 1;
     }
 
+    gpu_mode = guiapp_has_capability(&gui, GUIAPP_CAP_GPU_CANVAS);
     {
         int w = 0, h = 0;
-        render_frame(&w, &h);
-        if (guiapp_send_frame(&gui, "Music", w, h, pixels) < 0)
-            closed = 1;
+        if (gpu_mode) {
+            if (render_canvas_frame() < 0)
+                closed = 1;
+        } else {
+            render_frame(&w, &h);
+            if (guiapp_send_frame(&gui, "Music", w, h, pixels) < 0)
+                closed = 1;
+        }
+        __sync_lock_test_and_set(&ui_dirty, 0);
     }
 
     while (!closed) {
+        int next_gpu_mode =
+            guiapp_has_capability(&gui, GUIAPP_CAP_GPU_CANVAS);
+        if (next_gpu_mode != gpu_mode) {
+            gpu_mode = next_gpu_mode;
+            invalidate_ui();
+        }
+        if (!playing && !ui_dirty) {
+            (void)futex_wait((int *)&ui_dirty, 0);
+            continue;
+        }
         int w = 0, h = 0;
-        render_frame(&w, &h);
-        if (guiapp_send_frame(&gui, "Music", w, h, pixels) < 0) {
+        __sync_lock_test_and_set(&ui_dirty, 0);
+        int sent = gpu_mode
+            ? render_canvas_frame()
+            : (render_frame(&w, &h),
+               guiapp_send_frame(&gui, "Music", w, h, pixels));
+        if (sent < 0) {
             closed = 1;
             break;
         }
-        sleep_ms(FRAME_MS);
+        sleep_ms(playing ? FRAME_MS : 10);
     }
 
     closed = 1;
+    wake_playback();
     if (playback_tid >= 0)
         (void)join(playback_tid);
     (void)audio_flush();

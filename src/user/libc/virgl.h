@@ -56,6 +56,7 @@ enum {
     VIRGL_CCMD_DRAW_VBO = 8,
     VIRGL_CCMD_SET_SAMPLER_VIEWS = 10,
     VIRGL_CCMD_SET_CONSTANT_BUFFER = 12,
+    VIRGL_CCMD_SET_SCISSOR_STATE = 15,
     VIRGL_CCMD_BIND_SAMPLER_STATES = 18,
     VIRGL_CCMD_BIND_SHADER = 31,
 };
@@ -125,6 +126,7 @@ enum {
 #define VIRGL_OBJ_RS_S0_CULL_FACE(x) (((x) & 0x3) << 8)
 #define VIRGL_OBJ_RS_S0_FILL_FRONT(x) (((x) & 0x3) << 10)
 #define VIRGL_OBJ_RS_S0_FILL_BACK(x) (((x) & 0x3) << 12)
+#define VIRGL_OBJ_RS_S0_SCISSOR(x) (((x) & 0x1) << 14)
 #define VIRGL_OBJ_RS_S0_HALF_PIXEL_CENTER(x) (((x) & 0x1) << 29)
 #define VIRGL_OBJ_RS_S0_BOTTOM_EDGE_RULE(x) (((x) & 0x1) << 30)
 
@@ -240,6 +242,7 @@ static inline void virgl_create_rasterizer(struct virgl_cmdbuf *b,
                   VIRGL_OBJ_RS_S0_CULL_FACE(0) |   /* PIPE_FACE_NONE */
                   VIRGL_OBJ_RS_S0_FILL_FRONT(0) |  /* FILL */
                   VIRGL_OBJ_RS_S0_FILL_BACK(0) |
+                  VIRGL_OBJ_RS_S0_SCISSOR(1) |
                   VIRGL_OBJ_RS_S0_HALF_PIXEL_CENTER(1) |
                   VIRGL_OBJ_RS_S0_BOTTOM_EDGE_RULE(1);
     virgl_packet(b, VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_RASTERIZER, 9);
@@ -362,6 +365,12 @@ static inline void virgl_bind(struct virgl_cmdbuf *b, uint32_t object,
     virgl_put(b, handle);
 }
 
+static inline void virgl_destroy_object(struct virgl_cmdbuf *b,
+                                        uint32_t object, uint32_t handle) {
+    virgl_packet(b, VIRGL_CCMD_DESTROY_OBJECT, object, 1);
+    virgl_put(b, handle);
+}
+
 static inline void virgl_bind_shader(struct virgl_cmdbuf *b, uint32_t handle,
                                      uint32_t stage) {
     virgl_packet(b, VIRGL_CCMD_BIND_SHADER, 0, 2);
@@ -395,6 +404,17 @@ static inline void virgl_set_viewport(struct virgl_cmdbuf *b, int width,
     virgl_put(b, virgl_f32(half_w));
     virgl_put(b, virgl_f32(half_h));
     virgl_put(b, virgl_f32(0.0f));
+}
+
+/* Gallium scissors use render-target coordinates (bottom-left origin). */
+static inline void virgl_set_scissor(struct virgl_cmdbuf *b, int min_x,
+                                     int min_y, int max_x, int max_y) {
+    virgl_packet(b, VIRGL_CCMD_SET_SCISSOR_STATE, 0, 3);
+    virgl_put(b, 0); /* start slot */
+    virgl_put(b, ((uint32_t)min_x & 0xFFFFu) |
+                 (((uint32_t)min_y & 0xFFFFu) << 16));
+    virgl_put(b, ((uint32_t)max_x & 0xFFFFu) |
+                 (((uint32_t)max_y & 0xFFFFu) << 16));
 }
 
 static inline void virgl_clear(struct virgl_cmdbuf *b, float r, float g,

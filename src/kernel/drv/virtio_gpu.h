@@ -6,10 +6,9 @@
 /*
  * Minimal virtio-gpu 2D scanout backend.
  *
- * BuzzOS keeps rendering in software, but the display resource, scanout and
- * damage uploads are owned by virtio-gpu instead of a legacy linear VGA
- * framebuffer.  The caller can keep the existing framebuffer path as a
- * fallback when no compatible device is present.
+ * The 2-D resource remains the software fallback.  When virgl is offered, a
+ * separate 3-D module owns the render target used by the per-surface GPU
+ * compositor and validated app Canvas path.
  */
 int virtio_gpu_init(uint32_t width, uint32_t height);
 int virtio_gpu_ready(void);
@@ -19,6 +18,14 @@ uint32_t virtio_gpu_stride(void);
 uintptr_t virtio_gpu_backing_phys(void);
 uint32_t virtio_gpu_backing_bytes(void);
 int virtio_gpu_flush(int x, int y, int width, int height);
+
+/* Hardware cursor plane.  The image is ARGB8888 and may be up to the
+ * virtio-gpu mandated 64x64 cursor resource.  Moving it uses cursorq only and
+ * never damages or uploads the scanout. */
+int virtio_gpu_cursor_define(const uint32_t *pixels, uint32_t width,
+                             uint32_t height, uint32_t hot_x,
+                             uint32_t hot_y, uint32_t x, uint32_t y);
+int virtio_gpu_cursor_move(uint32_t x, uint32_t y, int visible);
 
 /* ---- virgl 3D pipeline ----
  *
@@ -39,6 +46,7 @@ struct gpu3d_info {
  * hosts without virgl, where the software compositor path is used. */
 int virtio_gpu_3d_ready(void);
 int virtio_gpu_3d_init(void);
+int virtio_gpu_3d_resize(uint32_t width, uint32_t height);
 int virtio_gpu_3d_query(struct gpu3d_info *out);
 
 /* Create a GPU resource with a guest backing store mapped into the calling
@@ -48,6 +56,13 @@ int virtio_gpu_3d_resource_create(uint32_t target, uint32_t format,
                                   uint32_t bind, uint32_t width,
                                   uint32_t height, uint32_t *out_id,
                                   uint32_t *out_user_va, uint32_t *out_bytes);
+/* Create a texture whose guest backing aliases an existing SHM byte range.
+ * The SHM object is pinned until the GPU resource is destroyed. */
+int virtio_gpu_3d_resource_import_shm(uint32_t shm_token, int owner,
+                                     uint32_t shm_offset, uint32_t target,
+                                     uint32_t format, uint32_t bind,
+                                     uint32_t width, uint32_t height,
+                                     uint32_t *out_id);
 int virtio_gpu_3d_resource_destroy(uint32_t id);
 int virtio_gpu_3d_resource_upload(uint32_t id, int x, int y, int w, int h);
 int virtio_gpu_3d_submit(const uint32_t *dwords, uint32_t count);

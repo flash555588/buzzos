@@ -89,6 +89,11 @@ int sys_gfx_map_surface(uint32_t out_arg, uint32_t b, uint32_t c,
                         uint32_t d, uint32_t e);
 int sys_gfx_present(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                     uint32_t e);
+int sys_gfx_cursor_define(uint32_t pixels_arg, uint32_t packed_wh,
+                          uint32_t packed_hot, uint32_t packed_xy,
+                          uint32_t e);
+int sys_gfx_cursor_move(uint32_t x, uint32_t y, uint32_t visible,
+                        uint32_t d, uint32_t e);
 
 int sys_gpu3d_info(uint32_t out_arg, uint32_t b, uint32_t c, uint32_t d,
                    uint32_t e);
@@ -96,6 +101,14 @@ int sys_gpu3d_resource_create(uint32_t io_arg, uint32_t b, uint32_t c,
                               uint32_t d, uint32_t e);
 int sys_gpu3d_resource_destroy(uint32_t id, uint32_t b, uint32_t c,
                                uint32_t d, uint32_t e);
+int sys_gpu3d_import_shm(uint32_t io_arg, uint32_t b, uint32_t c,
+                         uint32_t d, uint32_t e);
+int sys_gui_event_sequence(uint32_t a, uint32_t b, uint32_t c,
+                           uint32_t d, uint32_t e);
+int sys_gui_event_wait(uint32_t expected, uint32_t timeout_ms, uint32_t c,
+                       uint32_t d, uint32_t e);
+int sys_gui_event_signal(uint32_t a, uint32_t b, uint32_t c,
+                         uint32_t d, uint32_t e);
 int sys_gpu3d_upload(uint32_t id, uint32_t packed_xy, uint32_t packed_wh,
                      uint32_t d, uint32_t e);
 int sys_gpu3d_submit(uint32_t cmds_arg, uint32_t dwords, uint32_t c,

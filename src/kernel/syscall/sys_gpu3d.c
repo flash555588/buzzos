@@ -75,6 +75,23 @@ int sys_gpu3d_resource_destroy(uint32_t id, uint32_t b, uint32_t c,
     return virtio_gpu_3d_resource_destroy(id);
 }
 
+int sys_gpu3d_import_shm(uint32_t io_arg, uint32_t b, uint32_t c,
+                         uint32_t d, uint32_t e) {
+    (void)b; (void)c; (void)d; (void)e;
+    if (!user_owns_display() ||
+        !user_range_writable(io_arg, sizeof(struct syscall_gpu3d_import)))
+        return -1;
+    struct syscall_gpu3d_import *io =
+        (struct syscall_gpu3d_import *)(uintptr_t)io_arg;
+    uint32_t id = 0;
+    if (virtio_gpu_3d_resource_import_shm(
+            io->shm_token, task_get_pid(), io->shm_offset, io->target,
+            io->format, io->bind, io->width, io->height, &id) < 0)
+        return -1;
+    io->id = id;
+    return 0;
+}
+
 /* Coordinates are packed two-per-dword to fit the five-argument syscall ABI. */
 int sys_gpu3d_upload(uint32_t id, uint32_t packed_xy, uint32_t packed_wh,
                      uint32_t d, uint32_t e) {

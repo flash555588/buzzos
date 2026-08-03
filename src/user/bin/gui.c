@@ -155,6 +155,15 @@ struct app_session {
     int wants_tick;
     uint32_t shm_token;
     struct guiapp_shared_surface *shared;
+    uint32_t gpu_resource;
+    int gpu_resource_w;
+    int gpu_resource_h;
+    int gpu_resource_canvas;
+    int canvas_mode;
+    uint16_t canvas_count;
+    uint16_t canvas_string_bytes;
+    struct guiapp_canvas_command canvas[GUIAPP_CANVAS_MAX_COMMANDS];
+    char canvas_strings[GUIAPP_CANVAS_STRING_BYTES];
     volatile int dirty_lock;
     int dirty_valid;
     struct rect dirty_rect;
@@ -225,23 +234,48 @@ static int hover_start_tile = -1;
 static int pointer_drawn_x;
 static int pointer_drawn_y;
 static int pointer_drawn_valid;
+static int hardware_cursor_ready;
 static int keyevent_fd = -1;
 static unsigned int tick;
 static unsigned int last_render_tick;
 static uint32_t last_app_tick_ms;
+static uint32_t last_clock_second = (uint32_t)-1;
 static volatile int desktop_dirty = 1;
 static volatile uint32_t app_frame_dirty_mask;
+static int gpu_present_ready;
 
 static int find_caret_window(void);
 static struct rect get_caret_area(void);
+static struct rect pointer_damage_rect(int x, int y);
+enum {
+    SNAP_NONE = 0,
+    SNAP_LEFT,
+    SNAP_RIGHT,
+    SNAP_MAX,
+    SNAP_EDGE = 12,
+};
 static void draw_ime(void);
 static void draw_snap_preview(void);
+static int snap_zone_at(int x, int y);
+static struct rect snap_target_rect(int zone);
 static int bind_scanout(void);
 static void gpu_present_init(void);
 static void gpu_present_shutdown(void);
 
 static uint32_t scaled_scanline[APP_SURFACE_MAX_W];
 static struct rect compose_clip = {0, 0, MAX_SW, MAX_SH};
+enum {
+    COMPOSE_ALL = 0,
+    COMPOSE_GPU_BASE,
+    COMPOSE_GPU_OVERLAY,
+};
+/* The GPU shell is split into an opaque base and a straight-alpha overlay.
+ * App pixels are sampled straight from imported SHM textures between them. */
+static int compose_skip_app_pixels;
+static int compose_pass;
+static uint32_t *gpu_overlay_pixels;
+static int gpu_overlay_stride;
+static int gpu_blur_valid;
 static struct rect pending_damage;
 static int pending_damage_valid;
 static int damage_lock;
@@ -561,11 +595,22 @@ static int write_full(int fd, const void *buf, int size) {
  * there is one clip rect, not two that could drift apart.  The scanout may be
  * wider than the visible width, hence the explicit stride. */
 static struct ui_surface ui_target(void) {
-    struct ui_surface s = ui_surface_stride(fb, sw, sh, fb_stride);
+    struct ui_surface s = compose_pass == COMPOSE_GPU_OVERLAY
+        ? ui_surface_alpha_stride(fb, sw, sh, fb_stride)
+        : ui_surface_stride(fb, sw, sh, fb_stride);
     s.clip = ui_rect_intersect(s.clip,
                                ui_rect_make(compose_clip.x, compose_clip.y,
                                             compose_clip.w, compose_clip.h));
     return s;
+}
+
+static int shell_acrylic(struct ui_surface *s, struct ui_rect r, int radius,
+                          uint32_t tint, int tint_alpha) {
+    /* The GPU overlay contains only controls, strokes, text and shadows.  Its
+     * acrylic backdrop is generated later from the completed scene texture. */
+    if (compose_pass == COMPOSE_GPU_OVERLAY)
+        return 0;
+    return ui_acrylic(s, r, radius, tint, tint_alpha);
 }
 
 static struct ui_rect ui_of(struct rect r) {
@@ -613,7 +658,8 @@ static int window_icon(int id) {
 }
 
 static void fill(struct rect r, int color) {
-    uint32_t c = (uint32_t)color & 0x00FFFFFFu;
+    uint32_t c = ((uint32_t)color & 0x00FFFFFFu) |
+                 (compose_pass == COMPOSE_GPU_OVERLAY ? 0xFF000000u : 0u);
     if (r.x < 0) { r.w += r.x; r.x = 0; }
     if (r.y < 0) { r.h += r.y; r.y = 0; }
     if (r.x + r.w > sw) r.w = sw - r.x;
@@ -631,7 +677,9 @@ static void fill(struct rect r, int color) {
 static void pixel(int x, int y, int color) {
     if (x >= 0 && y >= 0 && x < sw && y < sh &&
         inside(x, y, compose_clip))
-        fb[y * fb_stride + x] = (uint32_t)color & 0x00FFFFFFu;
+        fb[y * fb_stride + x] =
+            ((uint32_t)color & 0x00FFFFFFu) |
+            (compose_pass == COMPOSE_GPU_OVERLAY ? 0xFF000000u : 0u);
 }
 
 static uint32_t gui_utf8_next(const char **text) {
@@ -888,6 +936,7 @@ static int app_read_frame(int slot) {
             if (context_open)
                 queue_damage((struct rect){context_x, context_y,
                                            CONTEXT_MENU_W, CONTEXT_MENU_H});
+            (void)gui_event_signal();
             continue;
         }
         if (frame.type == GUIAPP_FRAME_CARET) {
@@ -899,6 +948,7 @@ static int app_read_frame(int slot) {
             if (focus == WIN_APP_BASE + slot && ime_enabled && ime_length > 0 &&
                 (old_x != frame.x || old_y != frame.y))
                 ime_damage();
+            (void)gui_event_signal();
             continue;
         }
         if (frame.type == GUIAPP_FRAME_EXEC) {
@@ -906,6 +956,7 @@ static int app_read_frame(int slot) {
                 run_app_with_arg("/fs/apps/terminal", frame.target);
             else
                 gui_log("[gui] exec request rejected");
+            (void)gui_event_signal();
             continue;
         }
         if (frame.type != GUIAPP_FRAME_LAUNCH)
@@ -914,13 +965,15 @@ static int app_read_frame(int slot) {
             run_app_with_arg(frame.target, frame.argument[0] ? frame.argument : 0);
         else
             gui_log("[gui] launch request rejected");
+        (void)gui_event_signal();
     }
     if (frame.width <= 0 || frame.height <= 0 ||
         frame.width > APP_SURFACE_MAX_W || frame.height > APP_SURFACE_MAX_H)
         return -1;
     if ((frame.type != GUIAPP_FRAME_FULL &&
          frame.type != GUIAPP_FRAME_DIRTY &&
-         frame.type != GUIAPP_FRAME_SCALED) ||
+         frame.type != GUIAPP_FRAME_SCALED &&
+         frame.type != GUIAPP_FRAME_CANVAS) ||
         !app_sessions[slot].shared)
         return -1;
     frame.title[GUIAPP_TITLE_MAX - 1] = 0;
@@ -930,6 +983,10 @@ static int app_read_frame(int slot) {
          frame.dirty_w > APP_SURFACE_MAX_W || frame.dirty_h > APP_SURFACE_MAX_H))
         return -1;
     int scaled = frame.type == GUIAPP_FRAME_SCALED;
+    int canvas = frame.type == GUIAPP_FRAME_CANVAS;
+    if (canvas &&
+        !(app_sessions[slot].shared->capabilities & GUIAPP_CAP_GPU_CANVAS))
+        return 0;
     int source_w = scaled ? frame.dirty_w : frame.width;
     int source_h = scaled ? frame.dirty_h : frame.height;
     if ((uint32_t)source_w >
@@ -941,6 +998,27 @@ static int app_read_frame(int slot) {
     if (app_sessions[slot].shared->width != (uint32_t)source_w ||
         app_sessions[slot].shared->height != (uint32_t)source_h)
         return -1;
+    if (canvas) {
+        uint16_t count = app_sessions[slot].shared->canvas_count;
+        uint16_t strings = app_sessions[slot].shared->canvas_string_bytes;
+        if (count > GUIAPP_CANVAS_MAX_COMMANDS ||
+            strings > GUIAPP_CANVAS_STRING_BYTES)
+            return -1;
+        app_dirty_lock(slot);
+        memcpy(app_sessions[slot].canvas,
+               app_sessions[slot].shared->canvas,
+               (size_t)count * sizeof(app_sessions[slot].canvas[0]));
+        memcpy(app_sessions[slot].canvas_strings,
+               app_sessions[slot].shared->canvas_strings, strings);
+        __sync_synchronize();
+        if (app_sessions[slot].shared->sequence != frame.sequence) {
+            app_dirty_unlock(slot);
+            return 0;
+        }
+        app_sessions[slot].canvas_count = count;
+        app_sessions[slot].canvas_string_bytes = strings;
+        app_dirty_unlock(slot);
+    }
     if (frame.type == GUIAPP_FRAME_DIRTY &&
         (app_sessions[slot].scaled_surface ||
          app_sessions[slot].surface_w != frame.width ||
@@ -953,12 +1031,22 @@ static int app_read_frame(int slot) {
     int full_change = app_sessions[slot].surface_w != frame.width ||
         app_sessions[slot].surface_h != frame.height ||
         app_sessions[slot].scaled_surface != scaled ||
+        app_sessions[slot].canvas_mode != canvas ||
         app_sessions[slot].source_w != source_w ||
         app_sessions[slot].source_h != source_h ||
         title_changed;
     app_sessions[slot].surface_w = frame.width;
     app_sessions[slot].surface_h = frame.height;
     app_sessions[slot].scaled_surface = scaled;
+    app_sessions[slot].canvas_mode = canvas;
+    __sync_synchronize();
+    if (canvas &&
+        !(app_sessions[slot].shared->capabilities & GUIAPP_CAP_GPU_CANVAS)) {
+        app_sessions[slot].canvas_mode = 0;
+        app_sessions[slot].surface_w = 0;
+        app_sessions[slot].surface_h = 0;
+        return 0;
+    }
     app_sessions[slot].source_w = source_w;
     app_sessions[slot].source_h = source_h;
     app_sessions[slot].last_sequence = frame.sequence;
@@ -984,9 +1072,9 @@ static int app_read_frame(int slot) {
          * mark the content dirty so we do not fight a second full redraw. */
         if (title_changed)
             taskbar_damage();
-        if (resize_win == WIN_APP_BASE + slot)
+        if (gpu_present_ready || resize_win == WIN_APP_BASE + slot)
             app_note_dirty(slot, (struct rect){0, 0, source_w, source_h});
-        else
+        if (resize_win != WIN_APP_BASE + slot)
             win_damage(WIN_APP_BASE + slot);
     } else {
         struct rect dirty = frame.type == GUIAPP_FRAME_DIRTY
@@ -1001,11 +1089,16 @@ static void app_reader_loop(int slot) {
     while (app_sessions[slot].used && !app_sessions[slot].closing) {
         if (app_read_frame(slot) < 0)
             break;
+        /* app_read_frame runs on a pipe-reader thread.  Publish only after
+         * its dirty state is visible so the sleeping compositor cannot miss
+         * a completed frame. */
+        (void)gui_event_signal();
     }
     if (!app_sessions[slot].closing) {
         app_sessions[slot].reader_dead = 1;
         win_damage(WIN_APP_BASE + slot);
         taskbar_damage();
+        (void)gui_event_signal();
     }
 }
 
@@ -1099,6 +1192,9 @@ static void run_app_with_arg(const char *path, const char *argument) {
     shared->height = 0;
     shared->configure_width = 0;
     shared->configure_height = 0;
+    shared->capabilities = gpu_present_ready ? GUIAPP_CAP_GPU_CANVAS : 0;
+    shared->canvas_count = 0;
+    shared->canvas_string_bytes = 0;
 
     int ev_pipe[2] = {-1, -1};
     int frame_pipe[2] = {-1, -1};
@@ -1183,6 +1279,9 @@ static void run_app_with_arg(const char *path, const char *argument) {
     app_sessions[slot].wants_tick = path && strstr(path, "taskmanager") != 0;
     app_sessions[slot].shm_token = mapping.token;
     app_sessions[slot].shared = shared;
+    app_sessions[slot].gpu_resource = 0;
+    app_sessions[slot].gpu_resource_w = 0;
+    app_sessions[slot].gpu_resource_h = 0;
     app_sessions[slot].dirty_lock = 0;
     app_sessions[slot].dirty_valid = 0;
     app_sessions[slot].dirty_rect = (struct rect){0, 0, 0, 0};
@@ -1856,8 +1955,15 @@ static int switch_display_mode(int index) {
         return 0;
     int old_sw = sw;
     int old_sh = sh;
+    /* Destroy virgl surfaces before the kernel replaces their scanout
+     * resource.  Reusing object handles that still reference the old target
+     * is rejected by virglrenderer on the next frame. */
+    gpu_present_shutdown();
+    (void)bind_scanout();
     if (gfx_set_mode(display_modes[index].width,
                      display_modes[index].height) < 0) {
+        gpu_present_init();
+        desktop_dirty = 1;
         mode_error_until = tick + 180u;
         win_damage(WIN_STATUS);
         return -1;
@@ -1872,13 +1978,15 @@ static int switch_display_mode(int index) {
     sh = (int)info.height;
     display_backend = info.backend;
     mode_error_until = 0;
-    /* The GPU frame texture and its viewport are sized to the old mode, and
-     * gpu_present_init retargets the compose buffer, so tear the GPU path
-     * down before rebinding and bring it back up against the new size. */
-    gpu_present_shutdown();
+    /* gpu_present_init now binds the kernel's new 3-D render target. */
     (void)bind_scanout();
     gpu_present_init();
     relayout_after_mode_change(old_sw, old_sh);
+    pointer_x = clamp_i(pointer_x, 0, sw - 1);
+    pointer_y = clamp_i(pointer_y, 0, sh - 1);
+    if (hardware_cursor_ready &&
+        gfx_cursor_move(pointer_x, pointer_y, 1) < 0)
+        hardware_cursor_ready = 0;
     return 0;
 }
 
@@ -2121,6 +2229,8 @@ static void draw_app_window(int id) {
         return;
     draw_window_frame(id);
     struct rect c = content_rect(id);
+    if (compose_skip_app_pixels)
+        return;
     struct rect clip = c;
     int ox = c.x;
     int oy = c.y;
@@ -2284,6 +2394,18 @@ static int taskbar_items(struct tb_item *out) {
     return n;
 }
 
+static void taskbar_clock_damage(void) {
+    struct tb_item items[TB_MAX_ITEMS];
+    int count = taskbar_items(items);
+    for (int i = 0; i < count; i++) {
+        if (items[i].kind != TB_TRAY_CLOCK)
+            continue;
+        queue_damage((struct rect){items[i].r.x - 2, items[i].r.y - 2,
+                                   items[i].r.w + 4, items[i].r.h + 4});
+        return;
+    }
+}
+
 /* Windows hidden behind the overflow button, in taskbar order. */
 static int taskbar_hidden_windows(int ids[MAX_GUI_APPS]) {
     struct tb_item items[TB_MAX_ITEMS];
@@ -2312,19 +2434,28 @@ static struct rect taskbar_overflow_panel(int hidden) {
                          sh - TASKBAR_H - panel_h - 8, panel_w, panel_h};
 }
 
-static void draw_taskbar_tooltip(void) {
-    struct ui_surface s = ui_target();
+static struct rect taskbar_tooltip_rect(void) {
     const char *title;
     int tw, tx, ty;
-    struct ui_rect tip;
     if (taskbar_hover < 0 || taskbar_hover >= WIN_COUNT ||
         !windows[taskbar_hover].visible)
-        return;
+        return (struct rect){0, 0, 0, 0};
     title = windows[taskbar_hover].title;
     tw = min_i(sw - 16, ui_text_width(title, UI_FONT_BODY) + 24);
     tx = clamp_i(pointer_x - tw / 2, 8, max_i(8, sw - tw - 8));
     ty = sh - TASKBAR_H - 38;
-    tip = ui_rect_make(tx, ty, tw, 30);
+    return (struct rect){tx, ty, tw, 30};
+}
+
+static void draw_taskbar_tooltip(void) {
+    struct ui_surface s = ui_target();
+    const char *title;
+    struct rect tip_rect = taskbar_tooltip_rect();
+    struct ui_rect tip;
+    if (tip_rect.w <= 0 || tip_rect.h <= 0)
+        return;
+    title = windows[taskbar_hover].title;
+    tip = ui_of(tip_rect);
     ui_shadow(&s, tip, UI_RADIUS_CONTROL, 8, UI_ELEV_CARD_A, 2);
     ui_fill_round(&s, tip, UI_RADIUS_CONTROL, UI_BG_LAYER);
     ui_stroke_round(&s, tip, UI_RADIUS_CONTROL, 1, UI_STROKE_CONTROL, 255);
@@ -2360,7 +2491,7 @@ static void draw_taskbar(void) {
 
     /* Acrylic: the wallpaper and any window edge under the bar show through
      * blurred, which is the single strongest the theme cue. */
-    ui_acrylic(&s, ui_of(bar), 0, UI_BG_ACRYLIC_THIN, 190);
+    shell_acrylic(&s, ui_of(bar), 0, UI_BG_ACRYLIC_THIN, 190);
     ui_fill_a(&s, ui_rect_make(bar.x, bar.y, bar.w, 1), UI_STROKE_SURFACE,
               150);
 
@@ -2416,7 +2547,7 @@ static void draw_taskbar(void) {
             struct ui_rect p = ui_of(panel);
             ui_shadow(&s, p, UI_RADIUS_OVERLAY, UI_ELEV_FLYOUT_R,
                       UI_ELEV_FLYOUT_A, 4);
-            ui_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 205);
+            shell_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 205);
             ui_stroke_round(&s, p, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE,
                             255);
             for (int i = 0; i < hidden; i++) {
@@ -2497,7 +2628,7 @@ static void draw_start_menu(void) {
 
     ui_shadow(&s, p, UI_RADIUS_OVERLAY, UI_ELEV_DIALOG_R, UI_ELEV_DIALOG_A,
               6);
-    ui_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
+    shell_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
     ui_stroke_round(&s, p, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE, 255);
 
     head = ui_style(UI_FONT_BODY, UI_TEXT_PRIMARY);
@@ -2811,26 +2942,15 @@ static struct rect get_caret_area(void) {
                          80, 24};
 }
 
-static void draw_ime(void) {
-    struct ui_surface s = ui_target();
-    char comp[96];
-    char cands[192];
-    struct rect caret, panel;
-    struct ui_rect p;
-    int need_w, panel_w, panel_h, panel_x, panel_y;
-
-    /* The tray badge is painted by draw_taskbar; only the composition panel
-     * is drawn here, and only while composing. */
-    if (!ime_enabled || ime_length == 0)
-        return;
-
-    copy_text(comp, ime_buffer, sizeof(comp));
+static void ime_panel_text(char *comp, size_t comp_cap,
+                           char *cands, size_t cands_cap) {
+    copy_text(comp, ime_buffer, comp_cap);
     if (ime_cand_count > IME_PAGE_SIZE) {
-        append_text(comp, "  (", sizeof(comp));
-        append_uint(comp, (unsigned int)(ime_page + 1), sizeof(comp));
-        append_text(comp, "/", sizeof(comp));
-        append_uint(comp, (unsigned int)ime_page_count(), sizeof(comp));
-        append_text(comp, ")", sizeof(comp));
+        append_text(comp, "  (", comp_cap);
+        append_uint(comp, (unsigned int)(ime_page + 1), comp_cap);
+        append_text(comp, "/", comp_cap);
+        append_uint(comp, (unsigned int)ime_page_count(), comp_cap);
+        append_text(comp, ")", comp_cap);
     }
 
     cands[0] = 0;
@@ -2840,12 +2960,17 @@ static void draw_ime(void) {
         if (!ime_candidate_at(i, item))
             break;
         if (i)
-            append_text(cands, "  ", sizeof(cands));
-        append_text(cands, number, sizeof(cands));
-        append_text(cands, item, sizeof(cands));
+            append_text(cands, "  ", cands_cap);
+        append_text(cands, number, cands_cap);
+        append_text(cands, item, cands_cap);
     }
     if (!cands[0])
-        copy_text(cands, "(no match — Space commits pinyin)", sizeof(cands));
+        copy_text(cands, "(no match — Space commits pinyin)", cands_cap);
+}
+
+static struct rect ime_panel_rect_for(const char *comp, const char *cands) {
+    struct rect caret;
+    int need_w, panel_w, panel_h, panel_x, panel_y;
 
     need_w = max_i(ui_text_width(comp, UI_FONT_BODY),
                    ui_text_width(cands, UI_FONT_BODY)) + 32;
@@ -2866,17 +2991,51 @@ static void draw_ime(void) {
         panel_y = WORK_TOP + 4;
     if (panel_y + panel_h > sh - 8)
         panel_y = sh - 8 - panel_h;
-    panel = (struct rect){panel_x, panel_y, panel_w, panel_h};
+    return (struct rect){panel_x, panel_y, panel_w, panel_h};
+}
+
+static struct rect ime_panel_rect(void) {
+    char comp[96];
+    char cands[192];
+    if (!ime_enabled || ime_length == 0)
+        return (struct rect){0, 0, 0, 0};
+    ime_panel_text(comp, sizeof(comp), cands, sizeof(cands));
+    return ime_panel_rect_for(comp, cands);
+}
+
+static void draw_ime(void) {
+    struct ui_surface s = ui_target();
+    char comp[96];
+    char cands[192];
+    struct rect panel;
+    struct ui_rect p;
+
+    /* The tray badge is painted by draw_taskbar; only the composition panel
+     * is drawn here, and only while composing. */
+    if (!ime_enabled || ime_length == 0)
+        return;
+
+    ime_panel_text(comp, sizeof(comp), cands, sizeof(cands));
+    panel = ime_panel_rect_for(comp, cands);
     p = ui_of(panel);
 
     ui_shadow(&s, p, UI_RADIUS_OVERLAY, UI_ELEV_FLYOUT_R,
               UI_ELEV_FLYOUT_A, 3);
-    ui_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
+    shell_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
     ui_stroke_round(&s, p, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE, 255);
     ui_text_in(&s, ui_rect_make(panel.x + 12, panel.y + 6, panel.w - 24, 24),
                comp, ui_style(UI_FONT_BODY, UI_ACCENT_FILL));
     ui_text_in(&s, ui_rect_make(panel.x + 12, panel.y + 30, panel.w - 24, 24),
                cands, ui_style(UI_FONT_BODY, UI_TEXT_PRIMARY));
+}
+
+static struct rect context_menu_rect(void) {
+    struct rect menu = {context_x, context_y, CONTEXT_MENU_W, CONTEXT_MENU_H};
+    if (!context_open)
+        return (struct rect){0, 0, 0, 0};
+    if (menu.x + menu.w > sw) menu.x = sw - menu.w;
+    if (menu.y + menu.h > sh) menu.y = sh - menu.h;
+    return menu;
 }
 
 /* Themed context menu: an acrylic flyout with hover rows, rather than a stack
@@ -2892,16 +3051,13 @@ static void draw_context_menu(void) {
     if (!context_open)
         return;
     s = ui_target();
-    menu = (struct rect){context_x, context_y, CONTEXT_MENU_W,
-                         CONTEXT_MENU_H};
-    if (menu.x + menu.w > sw) menu.x = sw - menu.w;
-    if (menu.y + menu.h > sh) menu.y = sh - menu.h;
+    menu = context_menu_rect();
     context_x = menu.x; context_y = menu.y;
     m = ui_of(menu);
 
     ui_shadow(&s, m, UI_RADIUS_OVERLAY, UI_ELEV_FLYOUT_R,
               UI_ELEV_FLYOUT_A, 3);
-    ui_acrylic(&s, m, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 210);
+    shell_acrylic(&s, m, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 210);
     ui_stroke_round(&s, m, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE, 255);
 
     for (int i = 0; i < 3; i++) {
@@ -2928,6 +3084,8 @@ static void draw_pointer(void) {
         0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
         0xFF80,0xF800,0xDC00,0x8C00,0x0600,0x0600,0x0300,0x0300
     };
+    if (hardware_cursor_ready)
+        return;
     for (int y = 0; y < 16; y++) {
         for (int x = 0; x < 16; x++) {
             if (!(arrow[y] & (0x8000u >> x)))
@@ -2941,24 +3099,28 @@ static void draw_pointer(void) {
 }
 
 static void compose_scene(void) {
-    draw_background();
-    for (int i = 0; i < WIN_COUNT; i++) {
-        int id = z_order[i];
-        if (id == WIN_LAUNCHER)
-            draw_launcher();
-        else if (id == WIN_STATUS)
-            draw_status();
-        else if (id >= WIN_APP_BASE)
-            draw_app_window(id);
+    if (compose_pass != COMPOSE_GPU_OVERLAY) {
+        draw_background();
+        for (int i = 0; i < WIN_COUNT; i++) {
+            int id = z_order[i];
+            if (id == WIN_LAUNCHER)
+                draw_launcher();
+            else if (id == WIN_STATUS)
+                draw_status();
+            else if (id >= WIN_APP_BASE)
+                draw_app_window(id);
+        }
     }
-    /* The Start menu sits above every window but below the taskbar's own
-     * acrylic, matching a conventional stacking order. */
-    draw_snap_preview();
-    draw_start_menu();
-    draw_taskbar();
-    draw_ime();
-    draw_context_menu();
-    draw_pointer();
+    if (compose_pass != COMPOSE_GPU_BASE) {
+        /* These controls live in the transparent GPU overlay.  Their acrylic
+         * backdrops are inserted by gpu_present_scene before this layer. */
+        draw_snap_preview();
+        draw_start_menu();
+        draw_taskbar();
+        draw_ime();
+        draw_context_menu();
+        draw_pointer();
+    }
 }
 
 static int bind_scanout(void) {
@@ -2995,32 +3157,255 @@ static int bind_scanout(void) {
  * Only the damaged sub-rect is uploaded, so a blinking caret costs a few
  * hundred bytes rather than a full screen.
  */
-enum { GPU_FRAME_LAYER = 1 };
+enum {
+    GPU_FRAME_LAYER = 1,
+    GPU_APP_LAYER_BASE = 2,
+    GPU_OVERLAY_LAYER = GPU_APP_LAYER_BASE + MAX_GUI_APPS,
+    GPU_SCENE_LAYER,
+    GPU_BLUR_PING_LAYER,
+    GPU_BLUR_PONG_LAYER,
+};
 
-static int gpu_present_ready;
+_Static_assert(GPU_BLUR_PONG_LAYER < GPUCOMP_MAX_LAYERS,
+               "GPU compositor layer table is too small");
+
+static int gpu_app_layer(int slot) {
+    return GPU_APP_LAYER_BASE + slot;
+}
+
+static void gpu_app_texture_release(int slot) {
+    if (slot < 0 || slot >= MAX_GUI_APPS)
+        return;
+    if (app_sessions[slot].gpu_resource) {
+        (void)gpucomp_layer_release(gpu_app_layer(slot), 0);
+        if (!app_sessions[slot].gpu_resource_canvas)
+            (void)gpu3d_resource_destroy(app_sessions[slot].gpu_resource);
+    }
+    app_sessions[slot].gpu_resource = 0;
+    app_sessions[slot].gpu_resource_w = 0;
+    app_sessions[slot].gpu_resource_h = 0;
+    app_sessions[slot].gpu_resource_canvas = 0;
+}
+
+/* Translate one validated application display list into an offscreen virgl
+ * render target.  Command encoding is small; all pixel coverage, rounded
+ * edges and glyph sampling happen on the host GPU. */
+static int gpu_canvas_render(int slot) {
+    struct app_session *session;
+    int layer, result = 0;
+    int glyph_budget = GUIAPP_CANVAS_STRING_BYTES;
+    if (!gpu_present_ready || slot < 0 || slot >= MAX_GUI_APPS)
+        return -1;
+    session = &app_sessions[slot];
+    layer = gpu_app_layer(slot);
+    if (!session->used || !session->canvas_mode ||
+        session->source_w <= 0 || session->source_h <= 0)
+        return -1;
+    if (!session->gpu_resource_canvas ||
+        session->gpu_resource_w != session->source_w ||
+        session->gpu_resource_h != session->source_h) {
+        if (session->gpu_resource && !session->gpu_resource_canvas)
+            gpu_app_texture_release(slot);
+        if (gpucomp_canvas_ensure(layer, session->source_w,
+                                  session->source_h) < 0)
+            return -1;
+        session->gpu_resource = gpucomp_layer_resource(layer);
+        session->gpu_resource_w = session->source_w;
+        session->gpu_resource_h = session->source_h;
+        session->gpu_resource_canvas = 1;
+    }
+
+    app_dirty_lock(slot);
+    if (gpucomp_canvas_begin(layer) < 0) {
+        app_dirty_unlock(slot);
+        return -1;
+    }
+    for (uint16_t i = 0; i < session->canvas_count; i++) {
+        const struct guiapp_canvas_command *command = &session->canvas[i];
+        if (command->type == GUIAPP_CANVAS_RECT) {
+            if (command->w <= 0 || command->h <= 0)
+                continue;
+            result = gpucomp_canvas_rect(layer, command->x, command->y,
+                                         command->w, command->h,
+                                         command->radius, command->color);
+        } else if (command->type == GUIAPP_CANVAS_TEXT) {
+            uint32_t end = (uint32_t)command->text_offset +
+                           (uint32_t)command->text_length;
+            if (command->w <= 0 || command->h <= 0 ||
+                end > session->canvas_string_bytes)
+                continue;
+            int text_length = command->text_length;
+            if (text_length > glyph_budget)
+                text_length = glyph_budget;
+            if (text_length <= 0)
+                continue;
+            glyph_budget -= text_length;
+            result = gpucomp_canvas_text(
+                layer, command->x, command->y, command->w, command->h,
+                session->canvas_strings + command->text_offset,
+                text_length, command->aux, command->color,
+                command->flags & 3u,
+                (command->flags & GUIAPP_CANVAS_TEXT_BOLD) != 0);
+        }
+        if (result < 0)
+            break;
+    }
+    if (result == 0)
+        result = gpucomp_canvas_end();
+    app_dirty_unlock(slot);
+    return result;
+}
+
+/* Bind the app's existing shared pixel pages directly as a virgl texture.
+ * There is no GUI-side memcpy: TRANSFER_TO_HOST_3D reads the pages the app
+ * published through guiapp. */
+static int gpu_app_texture_sync(int slot, struct rect dirty) {
+    struct app_session *session;
+    int width, height;
+    if (!gpu_present_ready || slot < 0 || slot >= MAX_GUI_APPS ||
+        !app_sessions[slot].used || !app_sessions[slot].shared)
+        return -1;
+    session = &app_sessions[slot];
+    width = session->source_w;
+    height = session->source_h;
+    if (width <= 0 || height <= 0)
+        return -1;
+    if (session->canvas_mode)
+        return gpu_canvas_render(slot);
+
+    if (session->gpu_resource_canvas || !session->gpu_resource ||
+        session->gpu_resource_w != width ||
+        session->gpu_resource_h != height) {
+        uint32_t resource = 0;
+        gpu_app_texture_release(slot);
+        if (gpu3d_resource_import_shm(
+                session->shm_token, GUIAPP_SHARED_HEADER_SIZE,
+                VIRGL_TARGET_TEXTURE_2D, VIRGL_FORMAT_B8G8R8X8_UNORM,
+                VIRGL_BIND_SAMPLER_VIEW, (uint32_t)width, (uint32_t)height,
+                &resource) < 0)
+            return -1;
+        session->gpu_resource = resource;
+        session->gpu_resource_w = width;
+        session->gpu_resource_h = height;
+        if (gpucomp_layer_import(gpu_app_layer(slot), resource, width, height,
+                                 VIRGL_FORMAT_B8G8R8X8_UNORM) < 0) {
+            gpu_app_texture_release(slot);
+            return -1;
+        }
+        dirty = (struct rect){0, 0, width, height};
+    }
+
+    dirty = intersect_rect(dirty, (struct rect){0, 0, width, height});
+    if (dirty.w <= 0 || dirty.h <= 0)
+        return 0;
+    /* Do not issue DMA while the application is in the middle of publishing
+     * a new dirty rectangle.  Its reader thread will wake us for the newer
+     * sequence, so yielding here coalesces instead of copying torn pixels. */
+    uint32_t sequence = session->shared->sequence;
+    if (sequence & 1u)
+        return 1;
+    __sync_synchronize();
+    int result = gpu3d_upload(session->gpu_resource, dirty.x, dirty.y,
+                              dirty.w, dirty.h);
+    __sync_synchronize();
+    if (result == 0 && session->shared->sequence != sequence) {
+        /* The app started a newer publish while TRANSFER_TO_HOST_3D was
+         * reading.  Queue that generation instead of presenting a tear. */
+        app_note_dirty(slot, (struct rect){0, 0, width, height});
+        return 1;
+    }
+    return result;
+}
+
+static void gpu_canvas_capability_set(int enabled) {
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
+        if (!app_sessions[slot].used || !app_sessions[slot].shared)
+            continue;
+        uint32_t old = app_sessions[slot].shared->capabilities;
+        uint32_t next = enabled ? old | GUIAPP_CAP_GPU_CANVAS
+                                : old & ~GUIAPP_CAP_GPU_CANVAS;
+        if (old == next)
+            continue;
+        app_sessions[slot].shared->capabilities = next;
+        __sync_synchronize();
+        if (!enabled && app_sessions[slot].canvas_mode) {
+            /* Do not interpret a display list as a software pixel surface
+             * while the app prepares its fallback frame. */
+            app_sessions[slot].canvas_mode = 0;
+            app_sessions[slot].surface_w = 0;
+            app_sessions[slot].surface_h = 0;
+            win_damage(WIN_APP_BASE + slot);
+        }
+        (void)app_send_event(slot, GUIAPP_EVT_CAPABILITIES, 0, 0,
+                             (int)next, 0, 0);
+    }
+}
+
+/* Build the ARGB cursor once.  With virtio-gpu cursorq active, subsequent
+ * mouse packets contain only MOVE_CURSOR -- no shell damage and no texture
+ * upload. */
+static void init_hardware_cursor(void) {
+    static const uint16_t arrow[16] = {
+        0x8000,0xC000,0xE000,0xF000,0xF800,0xFC00,0xFE00,0xFF00,
+        0xFF80,0xF800,0xDC00,0x8C00,0x0600,0x0600,0x0300,0x0300
+    };
+    uint32_t pixels[POINTER_W * POINTER_H];
+    memset(pixels, 0, sizeof(pixels));
+    for (int y = 0; y < POINTER_H; y++) {
+        for (int x = 0; x < POINTER_W; x++) {
+            if (!(arrow[y] & (0x8000u >> x)))
+                continue;
+            int edge = x == 0 || y == 0 ||
+                       !(arrow[y] & (0x8000u >> (x + 1))) ||
+                       (y + 1 < POINTER_H &&
+                        !(arrow[y + 1] & (0x8000u >> x)));
+            pixels[y * POINTER_W + x] =
+                edge ? 0xFF000000u : 0xFFFFFFFFu;
+        }
+    }
+    hardware_cursor_ready =
+        gfx_cursor_define(pixels, POINTER_W, POINTER_H, 0, 0,
+                          pointer_x, pointer_y) == 0;
+    if (hardware_cursor_ready) {
+        pointer_drawn_valid = 0;
+        gui_log("[gui] virtio-gpu hardware cursor enabled");
+    }
+}
 
 static void gpu_present_init(void) {
-    int stride = 0;
-    uint32_t *texture;
+    int stride = 0, blur_w, blur_h;
+    uint32_t *texture, *overlay;
 
     gpu_present_ready = 0;
-    if (gpucomp_init(sw, sh) < 0)
-        return;
-    if (gpucomp_layer_ensure(GPU_FRAME_LAYER, sw, sh) < 0) {
-        gpucomp_shutdown();
+    gpu_overlay_pixels = 0;
+    gpu_overlay_stride = 0;
+    gpu_blur_valid = 0;
+    compose_pass = COMPOSE_ALL;
+    if (gpucomp_init(sw, sh) < 0) {
+        gpu_canvas_capability_set(0);
         return;
     }
+    blur_w = (sw + 3) / 4;
+    blur_h = (sh + 3) / 4;
+    if (gpucomp_layer_ensure(GPU_FRAME_LAYER, sw, sh) < 0 ||
+        gpucomp_layer_ensure_format(GPU_OVERLAY_LAYER, sw, sh,
+                                    VIRGL_FORMAT_B8G8R8A8_UNORM) < 0 ||
+        gpucomp_target_ensure(GPU_SCENE_LAYER, sw, sh) < 0 ||
+        gpucomp_target_ensure(GPU_BLUR_PING_LAYER, blur_w, blur_h) < 0 ||
+        gpucomp_target_ensure(GPU_BLUR_PONG_LAYER, blur_w, blur_h) < 0)
+        goto fail;
     texture = gpucomp_layer_pixels(GPU_FRAME_LAYER, &stride);
-    if (!texture || stride <= 0) {
-        gpucomp_shutdown();
-        return;
-    }
-    /* The frame layer is the whole screen: square corners, fully opaque. */
+    overlay = gpucomp_layer_pixels(GPU_OVERLAY_LAYER, &gpu_overlay_stride);
+    if (!texture || stride <= 0 || !overlay || gpu_overlay_stride <= 0)
+        goto fail;
+    memset(overlay, 0, (size_t)gpu_overlay_stride * (size_t)sh *
+                       sizeof(uint32_t));
+    /* Base -> application surfaces -> GPU acrylic -> transparent overlay. */
     gpucomp_layer_place(GPU_FRAME_LAYER, 0, 0, sw, sh, 0, 255);
-    if (gpu3d_scanout(1) < 0) {
-        gpucomp_shutdown();
-        return;
-    }
+    gpucomp_layer_place(GPU_SCENE_LAYER, 0, 0, sw, sh, 0, 255);
+    gpucomp_layer_place(GPU_OVERLAY_LAYER, 0, 0, sw, sh, 0, 255);
+    if (gpu3d_scanout(1) < 0)
+        goto fail;
     /* Compose directly into the texture's mapped backing.  Without this the
      * compositor would still be writing the zero-copy scanout that the GPU is
      * about to overwrite -- reading a surface while presenting onto it -- and
@@ -3028,9 +3413,21 @@ static void gpu_present_init(void) {
      * straight into the memory the upload reads from. */
     fb = texture;
     fb_stride = stride;
+    gpu_overlay_pixels = overlay;
+    compose_pass = COMPOSE_GPU_BASE;
     scanout_direct = 0;
     gpu_present_ready = 1;
-    gui_log("[gui] virgl present enabled");
+    gpu_canvas_capability_set(1);
+    gui_log("[gui] virgl present + GPU acrylic enabled");
+    return;
+
+fail:
+    gpucomp_shutdown();
+    gpu_overlay_pixels = 0;
+    gpu_overlay_stride = 0;
+    gpu_blur_valid = 0;
+    compose_pass = COMPOSE_ALL;
+    gpu_canvas_capability_set(0);
 }
 
 /* Release GPU resources.  Does not rebind the compose buffer: the caller
@@ -3041,33 +3438,292 @@ static void gpu_present_shutdown(void) {
     if (!gpu_present_ready)
         return;
     gpu_present_ready = 0;
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++)
+        gpu_app_texture_release(slot);
     gpucomp_shutdown();
+    gpu_overlay_pixels = 0;
+    gpu_overlay_stride = 0;
+    gpu_blur_valid = 0;
+    compose_pass = COMPOSE_ALL;
 }
 
-/* Upload the damaged rect and draw.  Returns 0 on success; the caller falls
- * back to the software present path on anything else, so a mid-session GPU
- * failure degrades rather than blanks the screen. */
-static int gpu_present_region(struct rect area) {
+enum { GPU_VISIBLE_RECTS_MAX = 96 };
+
+/* Subtract one opaque screen rectangle from a list of visible rectangles.
+ * Each overlap becomes at most four non-overlapping strips. */
+static int gpu_visible_subtract(struct rect *rects, int count,
+                                struct rect cut) {
+    struct rect out[GPU_VISIBLE_RECTS_MAX];
+    int out_count = 0;
+    if (cut.w <= 0 || cut.h <= 0)
+        return count;
+    for (int i = 0; i < count; i++) {
+        struct rect r = rects[i];
+        struct rect hit = intersect_rect(r, cut);
+        struct rect pieces[4] = {
+            {r.x, r.y, r.w, hit.y - r.y},
+            {r.x, hit.y + hit.h, r.w,
+             r.y + r.h - (hit.y + hit.h)},
+            {r.x, hit.y, hit.x - r.x, hit.h},
+            {hit.x + hit.w, hit.y,
+             r.x + r.w - (hit.x + hit.w), hit.h},
+        };
+        if (hit.w <= 0 || hit.h <= 0) {
+            if (out_count >= GPU_VISIBLE_RECTS_MAX)
+                return -1;
+            out[out_count++] = r;
+            continue;
+        }
+        for (int p = 0; p < 4; p++) {
+            if (pieces[p].w <= 0 || pieces[p].h <= 0)
+                continue;
+            if (out_count >= GPU_VISIBLE_RECTS_MAX)
+                return -1;
+            out[out_count++] = pieces[p];
+        }
+    }
+    for (int i = 0; i < out_count; i++)
+        rects[i] = out[i];
+    return out_count;
+}
+
+static int gpu_visible_cut(struct rect *rects, int count, struct rect cut) {
+    return count < 0 ? count : gpu_visible_subtract(rects, count, cut);
+}
+
+/* Draw one imported application surface, clipped against all higher shell
+ * geometry.  Scissoring keeps the original quad/UV transform intact. */
+static void gpu_draw_app(int slot, struct rect damage) {
+    struct app_session *session;
+    struct rect content, destination, visible[GPU_VISIBLE_RECTS_MAX];
+    int id, zpos = -1, count;
+    if (slot < 0 || slot >= MAX_GUI_APPS)
+        return;
+    session = &app_sessions[slot];
+    id = WIN_APP_BASE + slot;
+    if (!session->used || !session->gpu_resource ||
+        !windows[id].visible || windows[id].minimized)
+        return;
+    content = content_rect(id);
+    destination = session->scaled_surface
+        ? scaled_view_rect(id, slot)
+        : (struct rect){content.x, content.y,
+                        session->source_w, session->source_h};
+    visible[0] = intersect_rect(intersect_rect(destination, content), damage);
+    if (visible[0].w <= 0 || visible[0].h <= 0)
+        return;
+    count = 1;
+
+    for (int zi = 0; zi < WIN_COUNT; zi++)
+        if (z_order[zi] == id) {
+            zpos = zi;
+            break;
+        }
+    for (int zi = zpos + 1; zi < WIN_COUNT && count > 0; zi++) {
+        int above = z_order[zi];
+        if (windows[above].visible && !windows[above].minimized)
+            count = gpu_visible_cut(visible, count, windows[above].r);
+    }
+
+    /* Taskbar, menus, IME, snap preview and the software-cursor fallback are
+     * now a real alpha overlay drawn after every app, so app surfaces no
+     * longer need to be fragmented around those rectangles. */
+    if (count <= 0)
+        return;
+
+    gpucomp_layer_place(gpu_app_layer(slot), destination.x, destination.y,
+                        destination.w, destination.h, 0, 255);
+    for (int i = 0; i < count; i++)
+        gpucomp_draw_layer_scissored(gpu_app_layer(slot), visible[i].x,
+                                     visible[i].y, visible[i].w,
+                                     visible[i].h);
+}
+
+struct gpu_acrylic_region {
+    struct rect r;
+    int radius;
+    uint32_t tint;
+    int alpha;
+};
+
+static int gpu_acrylic_regions(struct gpu_acrylic_region *out, int capacity) {
+    int count = 0;
+#define ADD_ACRYLIC(rect_value, rad_value, tint_value, alpha_value) do { \
+        struct rect add_r = (rect_value); \
+        if (add_r.w > 0 && add_r.h > 0 && count < capacity) { \
+            out[count].r = add_r; \
+            out[count].radius = (rad_value); \
+            out[count].tint = (tint_value); \
+            out[count].alpha = (alpha_value); \
+            count++; \
+        } \
+    } while (0)
+    ADD_ACRYLIC(taskbar_rect(), 0, UI_BG_ACRYLIC_THIN, 190);
+    if (taskbar_expanded) {
+        int ids[MAX_GUI_APPS];
+        int hidden = taskbar_hidden_windows(ids);
+        if (hidden > 0)
+            ADD_ACRYLIC(taskbar_overflow_panel(hidden), UI_RADIUS_OVERLAY,
+                        UI_BG_ACRYLIC, 205);
+    }
+    if (start_open)
+        ADD_ACRYLIC(start_menu_rect(), UI_RADIUS_OVERLAY,
+                    UI_BG_ACRYLIC, 215);
+    ADD_ACRYLIC(ime_panel_rect(), UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
+    ADD_ACRYLIC(context_menu_rect(), UI_RADIUS_OVERLAY,
+                UI_BG_ACRYLIC, 210);
+#undef ADD_ACRYLIC
+    return count;
+}
+
+static int gpu_acrylic_intersects(struct rect area) {
+    struct gpu_acrylic_region regions[6];
+    int count = gpu_acrylic_regions(regions, 6);
+    for (int i = 0; i < count; i++) {
+        struct rect hit = intersect_rect(area, regions[i].r);
+        if (hit.w > 0 && hit.h > 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int gpu_draw_acrylic_regions(struct rect area) {
+    struct gpu_acrylic_region regions[6];
+    int count = gpu_acrylic_regions(regions, 6);
+    for (int i = 0; i < count; i++) {
+        struct gpu_acrylic_region *r = &regions[i];
+        if (gpucomp_draw_acrylic(GPU_BLUR_PING_LAYER,
+                                 r->r.x, r->r.y, r->r.w, r->r.h,
+                                 r->radius, r->tint, r->alpha,
+                                 area.x, area.y, area.w, area.h) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Update the retained scene, refresh the cached GPU blur when something
+ * beneath an acrylic region changed, then assemble the scanout. */
+static int gpu_present_scene(struct rect area) {
+    struct rect screen = {0, 0, sw, sh};
     if (!gpu_present_ready)
         return -1;
-    if (gpucomp_upload_rect(GPU_FRAME_LAYER, area.x, area.y, area.w,
-                            area.h) < 0)
+    area = intersect_rect(area, screen);
+    if (area.w <= 0 || area.h <= 0)
+        return 0;
+
+    /* A mode switch recreates the compositor while apps keep their SHM.
+     * Lazily restore those imports without waiting for another app frame. */
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
+        struct app_session *session = &app_sessions[slot];
+        if (!session->used || session->gpu_resource ||
+            session->source_w <= 0 || session->source_h <= 0)
+            continue;
+        int result = gpu_app_texture_sync(
+            slot, (struct rect){0, 0, session->source_w, session->source_h});
+        if (result < 0)
+            return -1;
+        if (result > 0)
+            app_note_dirty(slot, (struct rect){0, 0, session->source_w,
+                                               session->source_h});
+    }
+
+    if (gpucomp_target_begin(GPU_SCENE_LAYER, area.x, area.y,
+                             area.w, area.h) < 0)
         return -1;
+    gpucomp_draw_layer_scissored(GPU_FRAME_LAYER, area.x, area.y,
+                                 area.w, area.h);
+    for (int zi = 0; zi < WIN_COUNT; zi++) {
+        int slot = app_slot_for_win(z_order[zi]);
+        if (slot >= 0)
+            gpu_draw_app(slot, area);
+    }
+    if (gpucomp_target_end() < 0)
+        return -1;
+
+    if (!gpu_blur_valid || gpu_acrylic_intersects(area)) {
+        if (gpucomp_blur_rebuild(GPU_SCENE_LAYER, GPU_BLUR_PING_LAYER,
+                                 GPU_BLUR_PONG_LAYER) < 0)
+            return -1;
+        gpu_blur_valid = 1;
+    }
+
     gpucomp_begin();
-    gpucomp_draw_layer(GPU_FRAME_LAYER);
+    gpucomp_draw_layer_scissored(GPU_SCENE_LAYER, area.x, area.y,
+                                 area.w, area.h);
+    if (gpu_draw_acrylic_regions(area) < 0)
+        return -1;
+    gpucomp_draw_layer_scissored(GPU_OVERLAY_LAYER, area.x, area.y,
+                                 area.w, area.h);
     return gpucomp_end(area.x, area.y, area.w, area.h);
+}
+
+static void gpu_overlay_clear(struct rect area) {
+    area = intersect_rect(area, (struct rect){0, 0, sw, sh});
+    if (!gpu_overlay_pixels || area.w <= 0 || area.h <= 0)
+        return;
+    for (int y = area.y; y < area.y + area.h; y++)
+        memset(gpu_overlay_pixels + (size_t)y * gpu_overlay_stride + area.x,
+               0, (size_t)area.w * sizeof(uint32_t));
+}
+
+/* Repaint the opaque base and transparent chrome overlay separately.
+ * Application contents never enter either CPU buffer. */
+static int gpu_shell_update(struct rect area) {
+    int base_stride, result;
+    uint32_t *base = gpucomp_layer_pixels(GPU_FRAME_LAYER, &base_stride);
+    if (!base || base_stride <= 0 || !gpu_overlay_pixels)
+        return -1;
+    compose_skip_app_pixels = 1;
+    compose_clip = area;
+    compose_pass = COMPOSE_GPU_BASE;
+    fb = base;
+    fb_stride = base_stride;
+    compose_scene();
+    result = gpucomp_upload_rect(GPU_FRAME_LAYER, area.x, area.y,
+                                 area.w, area.h);
+    if (result < 0)
+        goto done;
+
+    gpu_overlay_clear(area);
+    compose_pass = COMPOSE_GPU_OVERLAY;
+    fb = gpu_overlay_pixels;
+    fb_stride = gpu_overlay_stride;
+    compose_scene();
+    result = gpucomp_upload_rect(GPU_OVERLAY_LAYER, area.x, area.y,
+                                 area.w, area.h);
+
+done:
+    fb = base;
+    fb_stride = base_stride;
+    compose_pass = COMPOSE_GPU_BASE;
+    compose_clip = (struct rect){0, 0, sw, sh};
+    compose_skip_app_pixels = 0;
+    return result;
+}
+
+static void gpu_fallback_to_software(void) {
+    gpu_present_shutdown();
+    (void)bind_scanout();
+    gpu_canvas_capability_set(0);
+    desktop_dirty = 1;
+    gui_log("[gui] virgl compositor failed; software fallback");
 }
 
 static int render_region(struct rect area) {
     area = intersect_rect(area, (struct rect){0, 0, sw, sh});
     if (area.w <= 0 || area.h <= 0)
         return 0;
+    if (gpu_present_ready) {
+        if (gpu_shell_update(area) == 0 && gpu_present_scene(area) == 0)
+            return 0;
+        gpu_fallback_to_software();
+        /* The old 2-D scanout may be stale after 3-D scanout was active. */
+        area = (struct rect){0, 0, sw, sh};
+    }
+    compose_skip_app_pixels = 0;
     compose_clip = area;
     compose_scene();
     compose_clip = (struct rect){0, 0, sw, sh};
-    /* Preferred path: let the host GPU move and present the frame. */
-    if (gpu_present_region(area) == 0)
-        return 0;
     if (scanout_direct)
         return gfx_present(area.x, area.y, area.w, area.h);
     /* Fallback: software backbuffer → kernel scanout copy. */
@@ -3299,6 +3955,7 @@ static void close_window(int id) {
         if (app_sessions[slot].reader_tid > 0)
             (void)join(app_sessions[slot].reader_tid);
         close(app_sessions[slot].from_fd);
+        gpu_app_texture_release(slot);
         if (app_sessions[slot].shm_token)
             (void)shm_unmap(app_sessions[slot].shm_token);
         app_sessions[slot].used = 0;
@@ -3385,14 +4042,6 @@ enum {
  * pointer rather than the window bounds so a window that is already wide
  * does not snap merely by being dragged slightly left.
  */
-
-enum {
-    SNAP_NONE = 0,
-    SNAP_LEFT,
-    SNAP_RIGHT,
-    SNAP_MAX,
-    SNAP_EDGE = 12,   /* px from the edge that arms the snap */
-};
 
 static int snap_zone_at(int x, int y) {
     struct rect work = work_area();
@@ -3560,6 +4209,51 @@ static void send_app_ticks(void) {
         if (app_send_event(slot, GUIAPP_EVT_TICK, 0, 0, 0, 0, 0) < 0)
             app_sessions[slot].reader_dead = 1;
     }
+}
+
+static int has_app_tick_clients(void) {
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++)
+        if (app_sessions[slot].used && app_sessions[slot].wants_tick)
+            return 1;
+    return 0;
+}
+
+static void refresh_timed_shell(uint32_t now) {
+    /* Keep the old approximately-60-Hz time unit without requiring a 60-Hz
+     * polling loop.  Only actual deadlines cause damage. */
+    tick = now / 16u;
+    uint32_t second = now / 1000u;
+    if (second != last_clock_second) {
+        last_clock_second = second;
+        taskbar_clock_damage();
+    }
+    if (mode_error_until && tick >= mode_error_until) {
+        mode_error_until = 0;
+        win_damage(WIN_STATUS);
+    }
+}
+
+static unsigned int gui_idle_timeout(uint32_t now) {
+    unsigned int timeout = 1000u - now % 1000u;
+    if (has_app_tick_clients()) {
+        uint32_t elapsed = now - last_app_tick_ms;
+        unsigned int app_timeout = elapsed >= 500u ? 1u : 500u - elapsed;
+        if (app_timeout < timeout)
+            timeout = app_timeout;
+    }
+    if (!gpu_present_ready) {
+        unsigned int elapsed_ticks = tick - last_render_tick;
+        unsigned int redraw_timeout = elapsed_ticks >= 60u
+            ? 1u : (60u - elapsed_ticks) * 16u;
+        if (redraw_timeout < timeout)
+            timeout = redraw_timeout;
+    }
+    if (mode_error_until && mode_error_until > tick) {
+        unsigned int error_timeout = (mode_error_until - tick) * 16u;
+        if (error_timeout < timeout)
+            timeout = error_timeout;
+    }
+    return timeout ? timeout : 1u;
 }
 
 static int ime_target_active(void) {
@@ -3828,6 +4522,8 @@ static struct rect pointer_damage_rect(int x, int y) {
 /* Expand a dirty region so a partial compose both erases the last scanned-out
  * cursor and redraws it at the live position. */
 static struct rect damage_with_pointer(struct rect damage) {
+    if (hardware_cursor_ready)
+        return damage;
     if (pointer_drawn_valid)
         damage = union_rect(damage, pointer_damage_rect(pointer_drawn_x,
                                                         pointer_drawn_y));
@@ -3836,6 +4532,10 @@ static struct rect damage_with_pointer(struct rect damage) {
 }
 
 static void note_pointer_drawn(void) {
+    if (hardware_cursor_ready) {
+        pointer_drawn_valid = 0;
+        return;
+    }
     pointer_drawn_x = pointer_x;
     pointer_drawn_y = pointer_y;
     pointer_drawn_valid = 1;
@@ -3966,8 +4666,17 @@ static void handle_mouse(void) {
     pointer_x = ms.x;
     pointer_y = ms.y;
     if (pointer_moved) {
-        queue_damage(pointer_damage_rect(old_pointer_x, old_pointer_y));
-        queue_damage(pointer_damage_rect(pointer_x, pointer_y));
+        if (hardware_cursor_ready) {
+            if (gfx_cursor_move(pointer_x, pointer_y, 1) < 0) {
+                hardware_cursor_ready = 0;
+                queue_damage(pointer_damage_rect(old_pointer_x,
+                                                 old_pointer_y));
+                queue_damage(pointer_damage_rect(pointer_x, pointer_y));
+            }
+        } else {
+            queue_damage(pointer_damage_rect(old_pointer_x, old_pointer_y));
+            queue_damage(pointer_damage_rect(pointer_x, pointer_y));
+        }
         refresh_pointer_hover_damage();
         if (context_open)
             queue_damage((struct rect){context_x, context_y,
@@ -4294,11 +5003,12 @@ static void init_desktop(void) {
     else
         gui_log("[gui] software backbuffer (scanout map failed)");
     gfx_set_origin(0, 0);
+    pointer_x = sw / 2;
+    pointer_y = sh / 2;
+    init_hardware_cursor();
     /* Try the GPU present path after the scanout is bound: it retargets the
      * compose buffer, and needs the software path as a working fallback. */
     gpu_present_init();
-    pointer_x = sw / 2;
-    pointer_y = sh / 2;
     scan_apps();
     keyevent_fd = open("/dev/keyevent", O_RDONLY);
     layout();
@@ -4308,6 +5018,9 @@ static void shutdown_desktop(void) {
     /* Point the compose buffer away from the GPU texture before freeing it;
      * anything that paints during teardown would otherwise write into a
      * destroyed resource. */
+    if (hardware_cursor_ready)
+        (void)gfx_cursor_move(pointer_x, pointer_y, 0);
+    hardware_cursor_ready = 0;
     gpu_present_shutdown();
     (void)bind_scanout();
     if (keyevent_fd >= 0) {
@@ -4348,9 +5061,13 @@ int main(int argc, char **argv) {
     (void)atexit(release_display);
     redirect_logs_to_serial();
     init_desktop();
-    uint32_t frame_deadline = monotonic_ms();
-    uint32_t frame_fraction = 0;
     while (running) {
+        /* Capture before consuming any source.  An IRQ or app-reader publish
+         * during this iteration changes the sequence and makes the wait at
+         * the bottom return immediately instead of losing the wakeup. */
+        uint32_t event_sequence = gui_event_sequence();
+        uint32_t loop_now = monotonic_ms();
+        refresh_timed_shell(loop_now);
         reap_dead_apps();
         int key;
         while ((key = read_key_poll()) >= 0)
@@ -4360,14 +5077,30 @@ int main(int argc, char **argv) {
         flush_pending_app_resizes();
         send_app_ticks();
         uint32_t app_dirty = __sync_lock_test_and_set(&app_frame_dirty_mask, 0);
+        struct rect shell_damage = {0, 0, 0, 0};
         struct rect damage = {0, 0, 0, 0};
-        int have_damage = take_damage(&damage);
+        int have_shell_damage = take_damage(&shell_damage);
+        int have_damage = have_shell_damage;
+        int gpu_sync_failed = 0;
+        if (have_shell_damage)
+            damage = shell_damage;
         for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
             if (!(app_dirty & (1u << slot)))
                 continue;
             struct rect dirty;
             if (!app_take_dirty(slot, &dirty))
                 continue;
+            if (gpu_present_ready) {
+                int sync = gpu_app_texture_sync(slot, dirty);
+                if (sync > 0) {
+                    app_note_dirty(slot, dirty);
+                    continue;
+                }
+                if (sync < 0) {
+                    gpu_sync_failed = 1;
+                    break;
+                }
+            }
             struct rect area = app_damage_to_screen(slot, dirty);
             if (area.w <= 0 || area.h <= 0)
                 continue;
@@ -4375,7 +5108,12 @@ int main(int argc, char **argv) {
             have_damage = 1;
         }
         int full_dirty = __sync_lock_test_and_set(&desktop_dirty, 0);
-        if (full_dirty || tick - last_render_tick >= 60u) {
+        if (gpu_sync_failed) {
+            gpu_fallback_to_software();
+            full_dirty = 1;
+        }
+        if (full_dirty || (!gpu_present_ready &&
+                           tick - last_render_tick >= 60u)) {
             render();
             last_render_tick = tick;
             note_pointer_drawn();
@@ -4383,32 +5121,32 @@ int main(int argc, char **argv) {
             /* App-list hover dirties whole rows frequently.  Those rects can
              * omit the previous cursor splat if it sat just outside a row
              * gap; always re-erase the last composed pointer. */
-            damage = damage_with_pointer(damage);
-            (void)render_region(damage);
+            if (gpu_present_ready) {
+                if (have_shell_damage) {
+                    shell_damage = damage_with_pointer(shell_damage);
+                    damage = union_rect(damage, shell_damage);
+                    if (gpu_shell_update(shell_damage) < 0) {
+                        gpu_fallback_to_software();
+                        render();
+                        last_render_tick = tick;
+                        note_pointer_drawn();
+                        goto frame_done;
+                    }
+                }
+                if (gpu_present_scene(damage) < 0) {
+                    gpu_fallback_to_software();
+                    render();
+                    last_render_tick = tick;
+                }
+            } else {
+                damage = damage_with_pointer(damage);
+                (void)render_region(damage);
+            }
             note_pointer_drawn();
         }
-        tick++;
-        if (app_mouse_capture >= 0) {
-            frame_deadline += 4u;
-        } else {
-            /* 60 Hz = 16 2/3 ms. Use an absolute 16,17,17 ms cadence so
-             * composition time is part of the budget instead of being added
-             * after every frame. */
-            frame_deadline += 16u;
-            frame_fraction += 2u;
-            if (frame_fraction >= 3u) {
-                frame_deadline++;
-                frame_fraction -= 3u;
-            }
-        }
-        uint32_t now = monotonic_ms();
-        if ((int32_t)(frame_deadline - now) > 0) {
-            sleep_ms(frame_deadline - now);
-        } else {
-            yield();
-            if ((int32_t)(now - frame_deadline) > 100)
-                frame_deadline = now;
-        }
+frame_done:
+        loop_now = monotonic_ms();
+        (void)gui_event_wait(event_sequence, gui_idle_timeout(loop_now));
     }
     shutdown_desktop();
     release_display();

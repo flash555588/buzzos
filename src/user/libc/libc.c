@@ -78,7 +78,10 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_GFX_MAP_SURFACE=68, SYS_GFX_PRESENT=69,
        SYS_GPU3D_INFO=70, SYS_GPU3D_RESOURCE_CREATE=71,
        SYS_GPU3D_RESOURCE_DESTROY=72, SYS_GPU3D_UPLOAD=73,
-       SYS_GPU3D_SUBMIT=74, SYS_GPU3D_PRESENT=75, SYS_GPU3D_SCANOUT=76 };
+       SYS_GPU3D_SUBMIT=74, SYS_GPU3D_PRESENT=75, SYS_GPU3D_SCANOUT=76,
+       SYS_GPU3D_IMPORT_SHM=77, SYS_GUI_EVENT_SEQUENCE=78,
+       SYS_GUI_EVENT_WAIT=79, SYS_GUI_EVENT_SIGNAL=80,
+       SYS_GFX_CURSOR_DEFINE=81, SYS_GFX_CURSOR_MOVE=82 };
 
 static void (*exit_handlers[16])(void);
 static int exit_handler_count;
@@ -313,6 +316,18 @@ int gfx_acquire_display(void) {
     return syscall0(SYS_GFX_ACQUIRE);
 }
 
+uint32_t gui_event_sequence(void) {
+    return (uint32_t)syscall0(SYS_GUI_EVENT_SEQUENCE);
+}
+
+int gui_event_wait(uint32_t expected, unsigned int timeout_ms) {
+    return syscall2(SYS_GUI_EVENT_WAIT, (int)expected, (int)timeout_ms);
+}
+
+int gui_event_signal(void) {
+    return syscall0(SYS_GUI_EVENT_SIGNAL);
+}
+
 int gfx_release_display(void) {
     return syscall0(SYS_GFX_RELEASE);
 }
@@ -343,6 +358,26 @@ int gfx_map_surface(struct gfx_surface_map *out) {
 
 int gfx_present(int x, int y, int w, int h) {
     return syscall4(SYS_GFX_PRESENT, x, y, w, h);
+}
+
+int gfx_cursor_define(const uint32_t *pixels, int width, int height,
+                      int hot_x, int hot_y, int x, int y) {
+    uint32_t wh, hot, xy;
+    if (!pixels || width <= 0 || height <= 0 || width > 64 || height > 64 ||
+        hot_x < 0 || hot_y < 0 || hot_x >= width || hot_y >= height ||
+        x < 0 || y < 0 || x > 0xFFFF || y > 0xFFFF)
+        return -1;
+    wh = (uint32_t)width | ((uint32_t)height << 16);
+    hot = (uint32_t)hot_x | ((uint32_t)hot_y << 16);
+    xy = (uint32_t)x | ((uint32_t)y << 16);
+    return syscall4(SYS_GFX_CURSOR_DEFINE, (int)(uintptr_t)pixels,
+                    (int)wh, (int)hot, (int)xy);
+}
+
+int gfx_cursor_move(int x, int y, int visible) {
+    if (x < 0 || y < 0)
+        return -1;
+    return syscall3(SYS_GFX_CURSOR_MOVE, x, y, visible ? 1 : 0);
 }
 
 int font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap) {
@@ -385,6 +420,30 @@ int gpu3d_resource_create(uint32_t target, uint32_t format, uint32_t bind,
 
 int gpu3d_resource_destroy(uint32_t id) {
     return syscall1(SYS_GPU3D_RESOURCE_DESTROY, (int)id);
+}
+
+int gpu3d_resource_import_shm(uint32_t shm_token, uint32_t shm_offset,
+                              uint32_t target, uint32_t format,
+                              uint32_t bind, uint32_t width,
+                              uint32_t height, uint32_t *out_id) {
+    struct {
+        uint32_t shm_token, shm_offset, target, format;
+        uint32_t bind, width, height, id;
+    } io;
+    if (!out_id)
+        return -1;
+    io.shm_token = shm_token;
+    io.shm_offset = shm_offset;
+    io.target = target;
+    io.format = format;
+    io.bind = bind;
+    io.width = width;
+    io.height = height;
+    io.id = 0;
+    if (syscall1(SYS_GPU3D_IMPORT_SHM, (int)(uintptr_t)&io) < 0)
+        return -1;
+    *out_id = io.id;
+    return 0;
 }
 
 int gpu3d_upload(uint32_t id, int x, int y, int w, int h) {

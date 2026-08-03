@@ -38,6 +38,7 @@ struct ui_surface {
     int w;
     int h;
     int stride;   /* pixels per row; differs from w on a padded scanout */
+    int alpha;    /* straight-alpha ARGB target instead of opaque RGBX */
     struct ui_rect clip;
 };
 
@@ -88,7 +89,15 @@ static inline struct ui_surface ui_surface_stride(uint32_t *px, int w, int h,
     s.w = w;
     s.h = h;
     s.stride = stride > 0 ? stride : w;
+    s.alpha = 0;
     s.clip = ui_rect_make(0, 0, w, h);
+    return s;
+}
+
+static inline struct ui_surface ui_surface_alpha_stride(uint32_t *px, int w,
+                                                        int h, int stride) {
+    struct ui_surface s = ui_surface_stride(px, w, h, stride);
+    s.alpha = 1;
     return s;
 }
 
@@ -135,6 +144,34 @@ static inline uint32_t ui_blend(uint32_t fg, uint32_t bg, uint32_t a) {
     return rb | g;
 }
 
+/* Straight-alpha source-over used by the transparent GPU shell overlay.
+ * Opaque RGB surfaces retain the much cheaper two-lane blender above. */
+static inline uint32_t ui_blend_argb(uint32_t fg, uint32_t bg, uint32_t a) {
+    uint32_t da, ia, oa, r, g, b;
+    if (a >= 255u)
+        return 0xFF000000u | (fg & 0x00FFFFFFu);
+    if (a == 0u)
+        return bg;
+    da = bg >> 24;
+    ia = 255u - a;
+    oa = a + (da * ia + 127u) / 255u;
+    if (!oa)
+        return 0;
+    r = (((fg >> 16) & 255u) * a +
+         ((bg >> 16) & 255u) * da * ia / 255u + oa / 2u) / oa;
+    g = (((fg >> 8) & 255u) * a +
+         ((bg >> 8) & 255u) * da * ia / 255u + oa / 2u) / oa;
+    b = ((fg & 255u) * a + (bg & 255u) * da * ia / 255u + oa / 2u) / oa;
+    return (oa << 24) | (r << 16) | (g << 8) | b;
+}
+
+static inline uint32_t ui_surface_blend(const struct ui_surface *s,
+                                        uint32_t fg, uint32_t bg,
+                                        uint32_t alpha) {
+    return s->alpha ? ui_blend_argb(fg, bg, alpha)
+                    : ui_blend(fg, bg, alpha);
+}
+
 static inline uint32_t ui_lerp(uint32_t a, uint32_t b, int t) {
     return ui_blend(b, a, (uint32_t)ui_clamp(t, 0, 255));
 }
@@ -142,7 +179,8 @@ static inline uint32_t ui_lerp(uint32_t a, uint32_t b, int t) {
 static inline void ui_pixel(struct ui_surface *s, int x, int y, uint32_t c) {
     if (ui_rect_contains(s->clip, x, y) && x >= 0 && y >= 0 &&
         x < s->w && y < s->h)
-        s->px[y * s->stride + x] = c & 0x00FFFFFFu;
+        s->px[y * s->stride + x] = (c & 0x00FFFFFFu) |
+                                    (s->alpha ? 0xFF000000u : 0u);
 }
 
 static inline void ui_pixel_a(struct ui_surface *s, int x, int y, uint32_t c,
@@ -152,7 +190,7 @@ static inline void ui_pixel_a(struct ui_surface *s, int x, int y, uint32_t c,
     if (ui_rect_contains(s->clip, x, y) && x >= 0 && y >= 0 &&
         x < s->w && y < s->h) {
         uint32_t *p = &s->px[y * s->stride + x];
-        *p = ui_blend(c, *p, (uint32_t)ui_min(a, 255));
+        *p = ui_surface_blend(s, c, *p, (uint32_t)ui_min(a, 255));
     }
 }
 
@@ -178,7 +216,7 @@ static inline void ui_fill(struct ui_surface *s, struct ui_rect r,
     struct ui_rect c = ui_clipped(s, r);
     if (ui_rect_empty(c))
         return;
-    color &= 0x00FFFFFFu;
+    color = (color & 0x00FFFFFFu) | (s->alpha ? 0xFF000000u : 0u);
     for (int y = 0; y < c.h; y++) {
         uint32_t *row = s->px + (size_t)(c.y + y) * s->stride + c.x;
         for (int x = 0; x < c.w; x++)
@@ -198,7 +236,7 @@ static inline void ui_fill_a(struct ui_surface *s, struct ui_rect r,
     for (int y = 0; y < c.h; y++) {
         uint32_t *row = s->px + (size_t)(c.y + y) * s->stride + c.x;
         for (int x = 0; x < c.w; x++)
-            row[x] = ui_blend(color, row[x], (uint32_t)alpha);
+            row[x] = ui_surface_blend(s, color, row[x], (uint32_t)alpha);
     }
 }
 
@@ -210,7 +248,8 @@ static inline void ui_gradient_v(struct ui_surface *s, struct ui_rect r,
         return;
     for (int y = 0; y < c.h; y++) {
         int t = r.h > 1 ? (c.y + y - r.y) * 255 / (r.h - 1) : 0;
-        uint32_t color = ui_lerp(top, bottom, t);
+        uint32_t color = ui_lerp(top, bottom, t) |
+                         (s->alpha ? 0xFF000000u : 0u);
         uint32_t *row = s->px + (size_t)(c.y + y) * s->stride + c.x;
         for (int x = 0; x < c.w; x++)
             row[x] = color;
@@ -224,7 +263,8 @@ static inline void ui_gradient_h(struct ui_surface *s, struct ui_rect r,
         return;
     for (int x = 0; x < c.w; x++) {
         int t = r.w > 1 ? (c.x + x - r.x) * 255 / (r.w - 1) : 0;
-        uint32_t color = ui_lerp(left, right, t);
+        uint32_t color = ui_lerp(left, right, t) |
+                         (s->alpha ? 0xFF000000u : 0u);
         for (int y = 0; y < c.h; y++)
             s->px[(size_t)(c.y + y) * s->stride + c.x + x] = color;
     }

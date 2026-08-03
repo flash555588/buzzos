@@ -123,6 +123,11 @@ uint32_t vgpu_large_request_capacity(void);
 
 /* Attach a physically contiguous guest range as a resource's backing store. */
 int vgpu_attach_backing(uint32_t resource_id, uintptr_t phys, uint32_t bytes);
+/* Attach a page list.  Adjacent physical pages are coalesced into one virtio
+ * memory entry; first_offset permits a resource to begin inside page zero. */
+int vgpu_attach_backing_pages(uint32_t resource_id,
+                              const uintptr_t *pages, uint32_t page_count,
+                              uint32_t first_offset, uint32_t bytes);
 
 /* Monotonic resource-id allocator shared with the 2D scanout resource. */
 uint32_t vgpu_alloc_resource_id(void);

@@ -17,6 +17,7 @@
 #include "paging.h"
 #include "pmm.h"
 #include "serial.h"
+#include "sys_shm.h"
 #include "user_bounds.h"
 #include "virgl_protocol.h"
 #include "virtio_gpu.h"
@@ -38,7 +39,9 @@ struct vgpu_3d_resource {
     uint32_t height;
     uint32_t format;
     uint32_t target;
+    uint32_t shm_token;
     int mapped;
+    int imported;
     int used;
 };
 
@@ -90,6 +93,14 @@ static int vgpu_ctx_create(void) {
     request.context_init = 0;
     for (uint32_t i = 0; i < 6u; i++)
         request.debug_name[i] = name[i];
+    return vgpu_submit_expect(&request, sizeof(request), VGPU_RESP_OK_NODATA);
+}
+
+static int vgpu_ctx_destroy(void) {
+    struct vgpu_ctrl_hdr request;
+    zero_bytes(&request, sizeof(request));
+    request.type = VGPU_CMD_CTX_DESTROY;
+    request.ctx_id = VGPU_3D_CTX_ID;
     return vgpu_submit_expect(&request, sizeof(request), VGPU_RESP_OK_NODATA);
 }
 
@@ -170,10 +181,15 @@ static void resource_release(struct vgpu_3d_resource *entry) {
     }
     (void)vgpu_ctx_attach_resource(entry->id, 0);
     (void)vgpu_resource_unref(entry->id);
-    if (entry->phys)
-        pmm_free_pages(entry->phys, entry->pages);
-    if (gpu_3d_backing_bytes >= entry->bytes)
-        gpu_3d_backing_bytes -= entry->bytes;
+    if (entry->imported) {
+        if (entry->shm_token)
+            shm_unpin_pages(entry->shm_token);
+    } else {
+        if (entry->phys)
+            pmm_free_pages(entry->phys, entry->pages);
+        if (gpu_3d_backing_bytes >= entry->bytes)
+            gpu_3d_backing_bytes -= entry->bytes;
+    }
     zero_bytes(entry, sizeof(*entry));
 }
 
@@ -234,6 +250,8 @@ int virtio_gpu_3d_resource_create(uint32_t target, uint32_t format,
     entry->height = height;
     entry->format = format;
     entry->target = target;
+    entry->shm_token = 0;
+    entry->imported = 0;
 
     if (vgpu_resource_create_3d(entry->id, target, format, bind, width,
                                 height) < 0 ||
@@ -261,6 +279,58 @@ int virtio_gpu_3d_resource_create(uint32_t target, uint32_t format,
     *out_id = entry->id;
     *out_user_va = slot_va;
     *out_bytes = bytes;
+    return 0;
+}
+
+int virtio_gpu_3d_resource_import_shm(uint32_t shm_token, int owner,
+                                     uint32_t shm_offset, uint32_t target,
+                                     uint32_t format, uint32_t bind,
+                                     uint32_t width, uint32_t height,
+                                     uint32_t *out_id) {
+    struct vgpu_3d_resource *entry;
+    const uintptr_t *pages = 0;
+    uint32_t page_count = 0, first_offset = 0;
+    uint64_t bytes64;
+    uint32_t bytes;
+
+    if (!gpu_3d_ready || !shm_token || !out_id || target == 0 ||
+        !width || !height)
+        return -1;
+    bytes64 = (uint64_t)width * (uint64_t)height * 4u;
+    if (!bytes64 || bytes64 > USER_SHM_SLOT_SIZE)
+        return -1;
+    bytes = (uint32_t)bytes64;
+    if (shm_pin_pages(shm_token, owner, shm_offset, bytes, &pages,
+                      &page_count, &first_offset) < 0)
+        return -1;
+
+    entry = resource_alloc_slot();
+    if (!entry) {
+        shm_unpin_pages(shm_token);
+        return -1;
+    }
+    zero_bytes(entry, sizeof(*entry));
+    entry->used = 1;
+    entry->id = vgpu_alloc_resource_id();
+    entry->bytes = bytes;
+    entry->pages = page_count;
+    entry->width = width;
+    entry->height = height;
+    entry->format = format;
+    entry->target = target;
+    entry->shm_token = shm_token;
+    entry->imported = 1;
+
+    if (vgpu_resource_create_3d(entry->id, target, format, bind, width,
+                                height) < 0 ||
+        vgpu_attach_backing_pages(entry->id, pages, page_count, first_offset,
+                                  bytes) < 0 ||
+        vgpu_ctx_attach_resource(entry->id, 1) < 0) {
+        serial_puts("[gpu3d] SHM texture import failed\n");
+        resource_release(entry);
+        return -1;
+    }
+    *out_id = entry->id;
     return 0;
 }
 
@@ -361,6 +431,63 @@ int virtio_gpu_3d_scanout(int enable) {
                             gpu_3d_height);
 }
 
+int virtio_gpu_3d_resize(uint32_t width, uint32_t height) {
+    uint32_t replacement = 0, old;
+    uint32_t bind = VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW |
+                    VIRGL_BIND_SCANOUT;
+    if (!gpu_3d_ready || !width || !height)
+        return -1;
+    if (width == gpu_3d_width && height == gpu_3d_height)
+        return 0;
+
+    old = gpu_3d_rt_resource;
+    /* A mode change is a context boundary.  gui shuts its objects down first,
+     * and the kernel also releases any stragglers so a prior failed renderer
+     * cannot poison the new object namespace. */
+    for (int i = 0; i < VGPU_3D_MAX_RESOURCES; i++)
+        if (gpu_3d_resources[i].used)
+            resource_release(&gpu_3d_resources[i]);
+    (void)vgpu_ctx_attach_resource(old, 0);
+    (void)vgpu_ctx_destroy();
+    if (vgpu_ctx_create() < 0)
+        goto fail;
+
+    replacement = vgpu_alloc_resource_id();
+    if (vgpu_resource_create_3d(replacement, VGPU_PIPE_TEXTURE_2D,
+                                VIRGL_FORMAT_B8G8R8A8_UNORM, bind,
+                                width, height) < 0)
+        goto fail_context;
+    if (vgpu_ctx_attach_resource(replacement, 1) < 0) {
+        (void)vgpu_resource_unref(replacement);
+        replacement = 0;
+        goto fail_context;
+    }
+
+    gpu_3d_rt_resource = replacement;
+    gpu_3d_width = width;
+    gpu_3d_height = height;
+    if (old)
+        (void)vgpu_resource_unref(old);
+    serial_puts("[gpu3d] resized render target ");
+    serial_puthex(width);
+    serial_puts("x");
+    serial_puthex(height);
+    serial_puts("\n");
+    return 0;
+
+fail_context:
+    (void)vgpu_ctx_destroy();
+fail:
+    if (old)
+        (void)vgpu_resource_unref(old);
+    gpu_3d_rt_resource = 0;
+    gpu_3d_width = 0;
+    gpu_3d_height = 0;
+    gpu_3d_ready = 0;
+    serial_puts("[gpu3d] resize disabled virgl compositor\n");
+    return -1;
+}
+
 void virtio_gpu_3d_release(void) {
     if (!gpu_3d_ready)
         return;
@@ -370,6 +497,20 @@ void virtio_gpu_3d_release(void) {
             resource_release(&gpu_3d_resources[i]);
     }
     (void)virtio_gpu_3d_scanout(0);
+    /* A compositor can die without issuing DESTROY_OBJECT.  Resetting the
+     * context here clears every stale virgl handle before the next display
+     * owner starts, while keeping the kernel-owned render target resource. */
+    (void)vgpu_ctx_attach_resource(gpu_3d_rt_resource, 0);
+    (void)vgpu_ctx_destroy();
+    if (vgpu_ctx_create() < 0 ||
+        vgpu_ctx_attach_resource(gpu_3d_rt_resource, 1) < 0) {
+        (void)vgpu_ctx_destroy();
+        (void)vgpu_resource_unref(gpu_3d_rt_resource);
+        gpu_3d_rt_resource = 0;
+        gpu_3d_width = 0;
+        gpu_3d_height = 0;
+        gpu_3d_ready = 0;
+    }
 }
 
 /* ---- bring-up ---- */
@@ -400,9 +541,16 @@ int virtio_gpu_3d_init(void) {
     gpu_3d_rt_resource = vgpu_alloc_resource_id();
     if (vgpu_resource_create_3d(gpu_3d_rt_resource, VGPU_PIPE_TEXTURE_2D,
                                 VIRGL_FORMAT_B8G8R8A8_UNORM, bind,
-                                width, height) < 0 ||
-        vgpu_ctx_attach_resource(gpu_3d_rt_resource, 1) < 0) {
+                                width, height) < 0) {
         serial_puts("[gpu3d] render target setup failed\n");
+        (void)vgpu_ctx_destroy();
+        gpu_3d_rt_resource = 0;
+        return -1;
+    }
+    if (vgpu_ctx_attach_resource(gpu_3d_rt_resource, 1) < 0) {
+        serial_puts("[gpu3d] render target attach failed\n");
+        (void)vgpu_resource_unref(gpu_3d_rt_resource);
+        (void)vgpu_ctx_destroy();
         gpu_3d_rt_resource = 0;
         return -1;
     }

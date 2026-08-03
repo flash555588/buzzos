@@ -274,7 +274,7 @@ static inline void ui_blit_glyph(struct ui_surface *s, int x, int y,
                 continue;
             if (alpha < 255)
                 a = a * alpha / 255;
-            dst[tx] = ui_blend(color, dst[tx], (uint32_t)a);
+            dst[tx] = ui_surface_blend(s, color, dst[tx], (uint32_t)a);
         }
     }
 }

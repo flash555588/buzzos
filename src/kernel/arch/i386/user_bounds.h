@@ -30,14 +30,14 @@ enum {
     /* virtio-gpu 3D resource backings, mapped into the display owner. */
     USER_GPU_START         = 0x30000000u,
     USER_GPU_SLOT_SIZE     = 0x00A00000u, /* 10 MiB — full-screen RGB32 */
-    USER_GPU_SLOTS         = 16u,
-    USER_GPU_END           = 0x3A000000u, /* START + 16 * 10 MiB */
+    USER_GPU_SLOTS         = 24u,
+    USER_GPU_END           = 0x3F000000u, /* START + 24 * 10 MiB */
     /* Ceiling on physical memory handed to GPU resources at once, so a
      * runaway compositor cannot starve the 256 MiB managed pool. */
     USER_GPU_BUDGET_BYTES  = 0x04000000u, /* 64 MiB */
-    USER_SPACE_END         = 0x3A000000u,
+    USER_SPACE_END         = 0x3F000000u,
     USER_PTR_START         = 0x20000000u,
-    USER_PTR_END           = 0x3A000000u,
+    USER_PTR_END           = 0x3F000000u,
 };
 
 #endif /* BUZZOS_USER_BOUNDS_H */

@@ -23,6 +23,7 @@ English: [README.en.md](README.en.md)
 - 内核：GDT、IDT、异常处理、PIC、PIT、串口、PS/2 键鼠、分页、E820/PMM、ELF32 loader。
 - 用户态：`/bin/sh` shell、`nano`、`basm`、`cat`、`echo`、`gui`。
 - 桌面：用户态多窗口桌面，支持窗口激活置顶、拖动、缩放、最小化、最大化、关闭和滚动条。
+- 图形加速：virgl 下按窗口直接 GPU 合成，普通应用 SHM 零 CPU 拷贝导入；GPU Canvas 应用可提交安全的矩形/圆角/UTF-8 文本显示列表，桌面空闲时采用事件驱动休眠。
 - GUI app：System Monitor、Terminal、TextEdit、Paint、Calculator、Files、Browser 和媒体/游戏示例作为独立用户 ELF 程序，通过 `/fs/apps/*.app` manifest 注册。
 - 文件系统：VFS + initrd/ramfs + devfs + 持久化 minifs，`/fs` 默认随镜像重建保留。
 - 网络：QEMU NE2000、DHCP、DNS、ICMP、UDP、TCP client 和用户态 socket API。

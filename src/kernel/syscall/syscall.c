@@ -131,5 +131,11 @@ void syscall_init(void) {
     syscall_table[SYS_GPU3D_SUBMIT] = sys_gpu3d_submit;
     syscall_table[SYS_GPU3D_PRESENT] = sys_gpu3d_present;
     syscall_table[SYS_GPU3D_SCANOUT] = sys_gpu3d_scanout;
+    syscall_table[SYS_GPU3D_IMPORT_SHM] = sys_gpu3d_import_shm;
+    syscall_table[SYS_GUI_EVENT_SEQUENCE] = sys_gui_event_sequence;
+    syscall_table[SYS_GUI_EVENT_WAIT] = sys_gui_event_wait;
+    syscall_table[SYS_GUI_EVENT_SIGNAL] = sys_gui_event_signal;
+    syscall_table[SYS_GFX_CURSOR_DEFINE] = sys_gfx_cursor_define;
+    syscall_table[SYS_GFX_CURSOR_MOVE] = sys_gfx_cursor_move;
     serial_puts("[syscall] VFS-backed syscalls ready\n");
 }

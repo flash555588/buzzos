@@ -1,4 +1,5 @@
 #include "keyboard.h"
+#include "gui_event.h"
 #include "io.h"
 
 #define BUF_SIZE 256
@@ -31,6 +32,7 @@ static void enqueue_event(uint16_t key, int pressed) {
         return;
     event_buf[event_tail] = (uint16_t)(key | (pressed ? EVENT_DOWN : 0u));
     event_tail = next;
+    gui_event_notify_display();
 }
 
 /* US QWERTY scancode → ASCII (scancode set 1, unshifted) */

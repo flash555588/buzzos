@@ -51,6 +51,16 @@ struct syscall_gpu3d_resource {
     uint32_t address; /* out: mapped backing store */
     uint32_t bytes;   /* out */
 };
+struct syscall_gpu3d_import {
+    uint32_t shm_token;  /* in: object already mapped by the caller */
+    uint32_t shm_offset; /* in: first texture byte inside the object */
+    uint32_t target;
+    uint32_t format;
+    uint32_t bind;
+    uint32_t width;
+    uint32_t height;
+    uint32_t id;         /* out */
+};
 
 enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_SPAWN=6, SYS_YIELD=7, SYS_JOIN=8, SYS_SLEEP=9, SYS_KILL=10,
@@ -76,7 +86,10 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_GFX_MAP_SURFACE=68, SYS_GFX_PRESENT=69,
        SYS_GPU3D_INFO=70, SYS_GPU3D_RESOURCE_CREATE=71,
        SYS_GPU3D_RESOURCE_DESTROY=72, SYS_GPU3D_UPLOAD=73,
-       SYS_GPU3D_SUBMIT=74, SYS_GPU3D_PRESENT=75, SYS_GPU3D_SCANOUT=76 };
+       SYS_GPU3D_SUBMIT=74, SYS_GPU3D_PRESENT=75, SYS_GPU3D_SCANOUT=76,
+       SYS_GPU3D_IMPORT_SHM=77, SYS_GUI_EVENT_SEQUENCE=78,
+       SYS_GUI_EVENT_WAIT=79, SYS_GUI_EVENT_SIGNAL=80,
+       SYS_GFX_CURSOR_DEFINE=81, SYS_GFX_CURSOR_MOVE=82 };
 
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);

@@ -241,3 +241,119 @@ int guiapp_send_caret(struct guiapp_ctx *ctx, int x, int y) {
     frame.y = y;
     return write_full(ctx->frame_fd, &frame, (int)sizeof(frame));
 }
+
+int guiapp_has_capability(const struct guiapp_ctx *ctx, uint32_t capability) {
+    if (!ctx || !ctx->shared)
+        return 0;
+    __sync_synchronize();
+    return (ctx->shared->capabilities & capability) == capability;
+}
+
+int guiapp_canvas_begin(struct guiapp_ctx *ctx, struct guiapp_canvas *canvas,
+                        int width, int height) {
+    if (!ctx || !ctx->shared || !canvas ||
+        !surface_fits(ctx, width, height))
+        return -1;
+    memset(canvas, 0, sizeof(*canvas));
+    canvas->ctx = ctx;
+    canvas->width = width;
+    canvas->height = height;
+    canvas->sequence = begin_surface_write(ctx);
+    ctx->shared->canvas_count = 0;
+    ctx->shared->canvas_string_bytes = 0;
+    return 0;
+}
+
+static struct guiapp_canvas_command *canvas_push(struct guiapp_canvas *canvas,
+                                                  int type) {
+    if (!canvas || !canvas->ctx || !canvas->ctx->shared ||
+        canvas->count >= GUIAPP_CANVAS_MAX_COMMANDS)
+        return 0;
+    struct guiapp_canvas_command *command =
+        &canvas->ctx->shared->canvas[canvas->count++];
+    memset(command, 0, sizeof(*command));
+    command->type = (uint16_t)type;
+    return command;
+}
+
+static int canvas_i16(int value) {
+    if (value < -32768) return -32768;
+    if (value > 32767) return 32767;
+    return value;
+}
+
+int guiapp_canvas_rect(struct guiapp_canvas *canvas, int x, int y, int w,
+                       int h, int radius, uint32_t color) {
+    if (!canvas || w <= 0 || h <= 0)
+        return -1;
+    struct guiapp_canvas_command *command =
+        canvas_push(canvas, GUIAPP_CANVAS_RECT);
+    if (!command)
+        return -1;
+    command->x = (int16_t)canvas_i16(x);
+    command->y = (int16_t)canvas_i16(y);
+    command->w = (int16_t)canvas_i16(w);
+    command->h = (int16_t)canvas_i16(h);
+    command->radius = (int16_t)canvas_i16(radius);
+    command->color = color & 0x00FFFFFFu;
+    return 0;
+}
+
+int guiapp_canvas_text(struct guiapp_canvas *canvas, int x, int y, int w,
+                       int h, const char *value, int pixel_size,
+                       uint32_t color, uint16_t flags) {
+    int length = 0;
+    if (!canvas || !value || w <= 0 || h <= 0)
+        return -1;
+    while (value[length] && length < 0xFFFF)
+        length++;
+    int available = GUIAPP_CANVAS_STRING_BYTES - canvas->string_bytes;
+    if (length > available) {
+        length = available;
+        /* Keep the display list valid UTF-8 when the bounded string arena
+         * ends in the middle of a multibyte codepoint. */
+        while (length > 0 &&
+               ((uint8_t)value[length] & 0xC0u) == 0x80u)
+            length--;
+    }
+    if (length <= 0)
+        return -1;
+    struct guiapp_canvas_command *command =
+        canvas_push(canvas, GUIAPP_CANVAS_TEXT);
+    if (!command)
+        return -1;
+    command->x = (int16_t)canvas_i16(x);
+    command->y = (int16_t)canvas_i16(y);
+    command->w = (int16_t)canvas_i16(w);
+    command->h = (int16_t)canvas_i16(h);
+    command->aux = (int16_t)canvas_i16(pixel_size);
+    command->color = color & 0x00FFFFFFu;
+    uint16_t align = flags & 3u;
+    if (align > GUIAPP_CANVAS_ALIGN_RIGHT)
+        align = GUIAPP_CANVAS_ALIGN_LEFT;
+    command->flags = align | (flags & GUIAPP_CANVAS_TEXT_BOLD);
+    command->text_offset = canvas->string_bytes;
+    command->text_length = (uint16_t)length;
+    memcpy(canvas->ctx->shared->canvas_strings + canvas->string_bytes,
+           value, (size_t)length);
+    canvas->string_bytes = (uint16_t)(canvas->string_bytes + length);
+    return 0;
+}
+
+int guiapp_canvas_present(struct guiapp_canvas *canvas, const char *title) {
+    struct guiapp_frame frame;
+    if (!canvas || !canvas->ctx || !canvas->ctx->shared)
+        return -1;
+    canvas->ctx->shared->canvas_count = canvas->count;
+    canvas->ctx->shared->canvas_string_bytes = canvas->string_bytes;
+    end_surface_write(canvas->ctx, canvas->sequence,
+                      canvas->width, canvas->height);
+    init_frame(&frame, GUIAPP_FRAME_CANVAS);
+    frame.width = canvas->width;
+    frame.height = canvas->height;
+    frame.dirty_w = canvas->width;
+    frame.dirty_h = canvas->height;
+    frame.sequence = canvas->sequence;
+    copy_field(frame.title, title, GUIAPP_TITLE_MAX);
+    return write_full(canvas->ctx->frame_fd, &frame, (int)sizeof(frame));
+}

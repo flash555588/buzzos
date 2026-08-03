@@ -1,6 +1,7 @@
 #include "io.h"
 #include "fb.h"
 #include "mouse.h"
+#include "gui_event.h"
 #include "irq.h"
 
 enum {
@@ -286,6 +287,7 @@ void mouse_handler(uint8_t byte) {
         mouse_wheel_seq++;
     }
     mouse_seq++;
+    gui_event_notify_display();
 }
 
 void mouse_get_state(struct mouse_state *out) {

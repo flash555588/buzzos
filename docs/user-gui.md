@@ -3,7 +3,8 @@
 BuzzOS hosts GUI apps as independent user-space ELF processes. The desktop in
 `/bin/gui` owns the framebuffer, window stacking, focus, resizing, minimize,
 maximize, close controls, scrollbars, and final composition. Apps receive
-events over pipes and return full frames or dirty rectangles.
+events over pipes and return full/dirty pixel frames or validated GPU Canvas
+display lists.
 
 The build seeds these apps into `/fs/apps`:
 
@@ -144,40 +145,49 @@ geometry can be checked without booting. It is part of `make verify`.
 
 ### GPU presentation
 
-When the device offers virgl, `/bin/gui` composes **directly into a GPU
-texture** and presents it as a textured quad instead of copying the frame to
-the scanout on the CPU. `gpucomp.h` owns the pipeline; `gpu_present_init()`
-retargets `fb` at the texture's mapped backing, so there is no intermediate
-copy — the scene is built straight into the memory the upload reads from.
+When the device offers virgl, `/bin/gui` uses a retained, per-surface GPU
+compositor rather than rebuilding one CPU framebuffer for every app frame:
 
-Three properties this relies on:
+- The desktop shell (wallpaper, window chrome and overlays) is one persistent
+  texture. CPU painting and upload happen only for damaged shell pixels.
+- A normal app's existing SHM pixel pages are attached directly to a virgl
+  texture. The desktop never copies or blends those pixels; it submits a
+  per-window textured quad and clips it against higher windows and overlays.
+- An app with `GUIAPP_CAP_GPU_CANVAS` can submit a bounded display list instead
+  of pixels. Rectangles, analytic rounded corners and UTF-8 text are rendered
+  into that app's offscreen target by the host GPU. Unicode glyphs enter a GPU
+  atlas once per codepoint. Music uses this path, so its 40 Hz visualization no
+  longer walks or copies a 720×410 CPU framebuffer.
 
-- **It is optional at every step.** `gpu_present_region()` returns non-zero on
-  any failure and `render_region()` falls through to `gfx_present` and then to
-  `fb_blit_stride`. A device without virgl, or a mid-session GPU failure,
-  degrades rather than blanking the screen.
-- **Only the damaged rect is uploaded**, so a blinking caret costs a few
-  hundred bytes rather than a full screen. The texture retains its contents
-  between frames, exactly as the scanout does.
-- **Textures are `B8G8R8X8_UNORM`.** The rest of the GUI stores opaque pixels
-  as `0x00RRGGBB` — alpha zero — which under `B8G8R8A8` with SRC_ALPHA blending
-  is fully transparent. `X8` forces alpha to 1.0 and ignores the stored byte.
-  Per-window opacity comes from a shader constant instead. This is the single
-  easiest way to get a black screen on this path.
+The display list is deliberately not raw virgl: apps can only request validated
+Canvas operations; `/bin/gui` remains the sole owner of the host GL context.
+`GUIAPP_FRAME_CANVAS`, `guiapp_canvas_begin/rect/text/present`, and the
+`GUIAPP_EVT_CAPABILITIES` notification form this opt-in protocol. Pixel frames
+remain the compatibility path and are restored automatically after GPU failure.
 
-A mode change tears the GPU path down and brings it back up, because both the
-frame texture and the viewport are sized to the old resolution.
+The desktop loop is event driven. Mouse/keyboard IRQs and app reader threads
+publish a display-event sequence; the compositor sleeps in
+`gui_event_wait()` until that sequence changes or a real clock/app-tick
+deadline expires. There is no idle 60 Hz polling loop.
 
-**Still on the CPU: the acrylic blur.** It is the most expensive thing the
-software compositor does — measured on a fast host, one 480×460 Start-menu
-acrylic costs ~1.5 ms and the full-width taskbar ~0.4 ms, against 0.07 ms for
-a full-screen fill; on a `-mno-sse` guest the gap is far wider. Moving it needs
-render-to-texture (blur horizontally into an offscreen target, then sample
-*that* vertically), which means binding a framebuffer backed by a scratch
-texture between passes. Drawing both passes straight onto the scanout would
-blur the first pass' own output in place and produce a smear, not a Gaussian.
-`GPUCOMP_FS_BLUR` is the shader for it; the encoder does not yet emit the
-framebuffer switch.
+Other important properties:
+
+- **Failure is contained.** A virgl error tears down resources, revokes the
+  Canvas capability, notifies apps, and rebinds the software scanout.
+- **Damage stays local.** Shell uploads and presents use damaged rectangles;
+  app-only animation does not invoke CPU shell composition.
+- **Opaque pixel textures use `B8G8R8X8_UNORM`.** BuzzOS RGB pixels are
+  `0x00RRGGBB`; `X8` forces sampled alpha to 1.0. Per-window opacity and rounded
+  coverage come from fragment-shader constants.
+- **Mode changes are context boundaries.** User objects are destroyed before
+  the kernel replaces the 3-D render target; the context is reset and rebuilt
+  at the new resolution so stale handles cannot survive a resize or crash.
+
+The remaining CPU visual effect is acrylic on sparse shell updates. The encoder
+now supports offscreen render targets, but correct backdrop blur additionally
+requires splitting the retained shell into underlay and transparent overlay
+textures so app pixels participate below taskbar/menu text. `GPUCOMP_FS_BLUR`
+is reserved for that split; applying it in place would blur the overlay itself.
 
 ## Pixel Format (Modern Truecolor Path)
 
@@ -222,22 +232,27 @@ Division of labour:
 | Layer | Responsibility |
 | --- | --- |
 | `src/kernel/drv/virtio_gpu.c` | Transport: virtqueue, feature negotiation, 2D scanout |
-| `src/kernel/drv/virtio_gpu_3d.c` | Context, GPU resources + guest backing, `SUBMIT_3D` passthrough |
+| `src/kernel/drv/virtio_gpu_3d.c` | Context, resizable scanout target, GPU resources/SHM page backing, `SUBMIT_3D` passthrough |
 | `src/kernel/syscall/sys_gpu3d.c` | Display-owner-gated syscalls |
-| `src/user/libc/virgl.h` | Command-stream encoder, TGSI shaders, float vertex data |
+| `src/user/libc/virgl.h` | Command-stream encoder, framebuffer/scissor state and float vertex data |
+| `src/user/libc/gpucomp.h` | Per-surface composition, Canvas render targets, TGSI shaders and glyph atlas |
+| `src/user/libc/guiapp.h` | Validated app Canvas display-list ABI and capability negotiation |
 
 Encoding lives in user space deliberately: TGSI is text and vertex data is
 floating point, neither of which belongs in a `-mno-sse` freestanding kernel.
 
-Resource backings are mapped into the display owner at `USER_GPU_START`, so a
-texture upload is *zero-copy*: write pixels through the mapping, then
-`gpu3d_upload()` only the damaged box. Total backing is capped by
-`USER_GPU_BUDGET_BYTES` (64 MiB) so a runaway compositor cannot starve the
-256 MiB managed pool.
+Compositor-owned resource backings are mapped at `USER_GPU_START`. Existing app
+SHM pages can instead be pinned and attached directly, so importing a window
+does not allocate or copy a second guest pixel buffer. `gpu3d_upload()` asks the
+host to consume only the damaged box. Canvas targets are written by GPU draws
+and sampled directly in the following composition pass. Allocated GPU backing
+is capped by `USER_GPU_BUDGET_BYTES` (64 MiB) so a runaway compositor cannot
+starve the 256 MiB managed pool.
 
-Not available on this host: `VIRTIO_GPU_F_RESOURCE_BLOB` is not offered under
-Windows (no udmabuf), so blob/shared-memory resources are out of reach. The
-cursor queue exists (2 queues) and a hardware cursor plane is still open.
+`VIRTIO_GPU_F_RESOURCE_BLOB` is not offered under the Windows host setup (no
+udmabuf). BuzzOS therefore imports app SHM with ordinary
+`RESOURCE_ATTACH_BACKING` page lists rather than blob resources. The cursor
+queue exists (2 queues) and a hardware cursor plane is still open.
 
 ### virgl pitfalls (learned the hard way)
 
@@ -527,6 +542,31 @@ make app-check
 python tools/check_project.py --list-apps
 ```
 
+### Opt in to GPU Canvas
+
+Apps should retain their pixel renderer as a fallback and choose Canvas when
+the desktop advertises it:
+
+```c
+if (guiapp_has_capability(&ctx, GUIAPP_CAP_GPU_CANVAS)) {
+    struct guiapp_canvas canvas;
+    guiapp_canvas_begin(&ctx, &canvas, width, height);
+    guiapp_canvas_rect(&canvas, 0, 0, width, height, 0, UI_BG_BASE);
+    guiapp_canvas_rect(&canvas, 24, 24, 180, 44, 12, UI_ACCENT_FILL);
+    guiapp_canvas_text(&canvas, 24, 24, 180, 44, "GPU UI", 16,
+                       UI_TEXT_ON_ACCENT,
+                       GUIAPP_CANVAS_ALIGN_CENTER |
+                       GUIAPP_CANVAS_TEXT_BOLD);
+    guiapp_canvas_present(&canvas, "Example");
+} else {
+    /* Draw RGB32 pixels and call guiapp_send_frame as before. */
+}
+```
+
+Canvas frames are complete display lists, not incremental pixel damage. Keep
+them bounded, repaint the background, and handle `GUIAPP_EVT_CAPABILITIES` so a
+paused/event-driven app wakes and switches renderer immediately after fallback.
+
 ## APIs Used
 
 The sample uses only user-space libc syscall wrappers:
@@ -543,6 +583,7 @@ open/read/write/close;        /* persistent state in /fs/apps */
 sleep_ms(16);
 ```
 
-That is the intended pattern for small user GUI programs: inspect the
-framebuffer, draw each frame, submit pixels through the desktop/app protocol or
-graphics syscall wrappers, and poll input.
+The direct graphics wrappers are useful for standalone diagnostics. Managed
+desktop apps should use `guiapp`: either submit compatibility RGB32 frames or a
+validated GPU Canvas display list, and block on events/futexes when idle rather
+than polling at a fixed frame rate.

@@ -10,7 +10,14 @@
 #define GUIAPP_TITLE_MAX 32
 #define GUIAPP_PATH_MAX 128
 #define GUIAPP_TEXT_MAX 32
-#define GUIAPP_SHARED_HEADER_SIZE 4096
+/* Header holds the display list; it must stay page aligned because the pixel
+ * plane starts right after it and the desktop imports that plane directly.
+ * The budget is sized for the widest surface in the tree: a full System
+ * Monitor process table (chrome plus ~30 rows of seven primitives each), a
+ * modal dialog on top, or a 60-sample history chart per graph. */
+#define GUIAPP_SHARED_HEADER_SIZE 12288
+#define GUIAPP_CANVAS_MAX_COMMANDS 320
+#define GUIAPP_CANVAS_STRING_BYTES 2048
 #define GUIAPP_SHARED_PIXELS (GUIAPP_MAX_W * GUIAPP_MAX_H)
 /* Surfaces are 32bpp 0x00RRGGBB (4 bytes per pixel). */
 #define GUIAPP_BYTES_PER_PIXEL 4u
@@ -28,9 +35,40 @@ enum {
     GUIAPP_EVT_COMMAND = 7,
     /* Desktop heartbeat for applications with live status surfaces. */
     GUIAPP_EVT_TICK = 8,
+    /* Desktop -> app: shared->capabilities changed (also mirrored in key). */
+    GUIAPP_EVT_CAPABILITIES = 9,
 };
 
 enum { GUIAPP_CMD_COPY = 1, GUIAPP_CMD_PASTE = 2, GUIAPP_CMD_CUT = 3 };
+
+enum { GUIAPP_CAP_GPU_CANVAS = 1u << 0 };
+
+enum {
+    GUIAPP_CANVAS_RECT = 1,
+    GUIAPP_CANVAS_TEXT = 2,
+};
+
+enum {
+    GUIAPP_CANVAS_ALIGN_LEFT = 0,
+    GUIAPP_CANVAS_ALIGN_CENTER = 1,
+    GUIAPP_CANVAS_ALIGN_RIGHT = 2,
+    GUIAPP_CANVAS_TEXT_BOLD = 1u << 2,
+};
+
+/* Compact, validated display list.  Applications describe geometry; the
+ * desktop owns the virgl context and translates only these safe operations. */
+struct guiapp_canvas_command {
+    uint16_t type;
+    uint16_t flags;
+    int16_t x, y, w, h;
+    int16_t radius;
+    int16_t aux;       /* text pixel size for GUIAPP_CANVAS_TEXT */
+    uint32_t color;    /* 0x00RRGGBB */
+    uint16_t text_offset;
+    uint16_t text_length;
+};
+typedef char guiapp_canvas_command_is_24_bytes[
+    sizeof(struct guiapp_canvas_command) == 24 ? 1 : -1];
 
 enum {
     GUIAPP_KEY_ESC = 0x1B,
@@ -78,6 +116,8 @@ enum {
     GUIAPP_FRAME_SCALED = 6,
     /* App -> desktop: text caret in content-local pixels (frame.x/y). */
     GUIAPP_FRAME_CARET = 7,
+    /* App -> desktop: render the validated display list below on the GPU. */
+    GUIAPP_FRAME_CANVAS = 8,
 };
 
 struct guiapp_shared_surface {
@@ -90,6 +130,22 @@ struct guiapp_shared_surface {
      * deliver the current geometry (Wayland-style configure coalesce). */
     volatile uint32_t configure_width;
     volatile uint32_t configure_height;
+    volatile uint32_t capabilities;
+    volatile uint16_t canvas_count;
+    volatile uint16_t canvas_string_bytes;
+    struct guiapp_canvas_command canvas[GUIAPP_CANVAS_MAX_COMMANDS];
+    char canvas_strings[GUIAPP_CANVAS_STRING_BYTES];
+};
+typedef char guiapp_shared_header_fits[
+    sizeof(struct guiapp_shared_surface) <= GUIAPP_SHARED_HEADER_SIZE ? 1 : -1];
+
+struct guiapp_canvas {
+    struct guiapp_ctx *ctx;
+    int width;
+    int height;
+    uint32_t sequence;
+    uint16_t count;
+    uint16_t string_bytes;
 };
 
 struct guiapp_ctx {
@@ -118,5 +174,14 @@ int guiapp_request_launch(struct guiapp_ctx *ctx, const char *target,
 int guiapp_set_clipboard(struct guiapp_ctx *ctx, const char *text);
 int guiapp_request_exec(struct guiapp_ctx *ctx, const char *path);
 int guiapp_send_caret(struct guiapp_ctx *ctx, int x, int y);
+int guiapp_has_capability(const struct guiapp_ctx *ctx, uint32_t capability);
+int guiapp_canvas_begin(struct guiapp_ctx *ctx, struct guiapp_canvas *canvas,
+                        int width, int height);
+int guiapp_canvas_rect(struct guiapp_canvas *canvas, int x, int y, int w,
+                       int h, int radius, uint32_t color);
+int guiapp_canvas_text(struct guiapp_canvas *canvas, int x, int y, int w,
+                       int h, const char *text, int pixel_size,
+                       uint32_t color, uint16_t flags);
+int guiapp_canvas_present(struct guiapp_canvas *canvas, const char *title);
 
 #endif

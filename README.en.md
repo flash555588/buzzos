@@ -23,6 +23,7 @@ Related documentation: [CHANGELOG.md](CHANGELOG.md), [Local Boot Guide](docs/boo
 - **Kernel**: GDT, IDT, exception handling, PIC, PIT, serial port, PS/2 keyboard & mouse, paging, E820/PMM, ELF32 loader.
 - **User mode**: `/bin/sh` shell, `nano`, `basm`, `cat`, `echo`, `gui`.
 - **Desktop**: User-mode multi-window desktop with support for window activation (raise to top), dragging, resizing, minimize, maximize, close, and scrollbars.
+- **Graphics acceleration**: virgl composites per-window GPU surfaces, imports normal app SHM without a desktop CPU copy, and offers a validated GPU Canvas for rounded rectangles and UTF-8 text; the desktop sleeps on events while idle.
 - **GUI apps**: System Monitor, Terminal, TextEdit, Paint, Calculator, Files,
   Browser, and media/game examples as independent user ELF programs,
   registered via `/fs/apps/*.app` manifests.
@@ -171,7 +172,7 @@ make app-check
 make image-reset-fs run
 ```
 
-The GUI app protocol is defined in [src/user/libc/guiapp.h](src/user/libc/guiapp.h), and basic control drawing utilities are in [src/user/libc/appui.h](src/user/libc/appui.h). The desktop sends init, resize, mouse, key, and close events via pipes, and the app returns either full frames or dirty rectangles.
+The GUI app protocol is defined in [src/user/libc/guiapp.h](src/user/libc/guiapp.h), and basic control drawing utilities are in [src/user/libc/appui.h](src/user/libc/appui.h). The desktop sends init, resize, mouse, key, close, and capability events via pipes; apps return full/dirty RGB frames or opt into validated GPU Canvas display lists.
 
 ## Shell Commands
 

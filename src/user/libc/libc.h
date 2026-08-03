@@ -175,6 +175,9 @@ int  fb_blit_stride(int x, int y, int w, int h, const uint32_t *pixels,
 int  mouse_get(struct mouse_state *out);
 int  gfx_info(struct gfx_info *out);
 int  gfx_acquire_display(void);
+uint32_t gui_event_sequence(void);
+int  gui_event_wait(uint32_t expected, unsigned int timeout_ms);
+int  gui_event_signal(void);
 int  gfx_release_display(void);
 int  gfx_set_mode(int width, int height);
 /* Zero-copy scanout: map RGB surface, compose in-place, present dirty rects. */
@@ -188,6 +191,9 @@ struct gfx_surface_map {
 };
 int  gfx_map_surface(struct gfx_surface_map *out);
 int  gfx_present(int x, int y, int w, int h);
+int  gfx_cursor_define(const uint32_t *pixels, int width, int height,
+                       int hot_x, int hot_y, int x, int y);
+int  gfx_cursor_move(int x, int y, int visible);
 int  font_glyph(uint32_t codepoint, uint8_t *bits, size_t cap);
 void gfx_set_origin(int x, int y);
 void gfx_get_origin(int *x_out, int *y_out);
@@ -219,6 +225,10 @@ int gpu3d_info(struct gpu3d_caps *out);
 int gpu3d_resource_create(uint32_t target, uint32_t format, uint32_t bind,
                           uint32_t width, uint32_t height,
                           struct gpu3d_resource *out);
+int gpu3d_resource_import_shm(uint32_t shm_token, uint32_t shm_offset,
+                              uint32_t target, uint32_t format,
+                              uint32_t bind, uint32_t width,
+                              uint32_t height, uint32_t *out_id);
 int gpu3d_resource_destroy(uint32_t id);
 int gpu3d_upload(uint32_t id, int x, int y, int w, int h);
 int gpu3d_submit(const uint32_t *dwords, uint32_t count);
