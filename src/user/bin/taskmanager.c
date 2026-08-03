@@ -1420,7 +1420,85 @@ static void handle_scroll_press(int x, int y) {
     scroll_drag_start_px = scroll_row * ROW_H;
 }
 
-static void handle_mouse(int x, int y, int buttons, int wheel) {
+/*
+ * Return the pointer-driven visual region at a coordinate.  The canvas has
+ * no retained widgets: publishing it rebuilds the whole display list, so a
+ * raw mouse event is not by itself a reason to redraw.  Coordinates moving
+ * inside one region leave every painted hover/pressed state unchanged.
+ */
+static int pointer_visual_region(int x, int y) {
+    enum {
+        POINTER_REGION_NONE = 0,
+        POINTER_REGION_REFRESH = 1,
+        POINTER_REGION_PAUSE = 2,
+        POINTER_REGION_TAB_BASE = 10,
+        POINTER_REGION_HEADER_BASE = 20,
+        POINTER_REGION_END = 30,
+        POINTER_REGION_SCROLL = 31,
+        POINTER_REGION_ROW_BASE = 64,
+        POINTER_REGION_DIALOG_BASE = 256,
+    };
+    int region = POINTER_REGION_NONE;
+
+    if (appui_inside(x, y, refresh_button_rect()))
+        region = POINTER_REGION_REFRESH;
+    else if (appui_inside(x, y, pause_button_rect()))
+        region = POINTER_REGION_PAUSE;
+    else {
+        for (int tab = TAB_PROCESSES; tab <= TAB_RESOURCES; tab++) {
+            if (appui_inside(x, y, tab_rect(tab))) {
+                region = POINTER_REGION_TAB_BASE + tab;
+                break;
+            }
+        }
+    }
+
+    if (region == POINTER_REGION_NONE && active_tab == TAB_PROCESSES) {
+        for (int column = SORT_PID; column <= SORT_MEMORY; column++) {
+            if (appui_inside(x, y, header_cell(column))) {
+                region = POINTER_REGION_HEADER_BASE + column;
+                break;
+            }
+        }
+        if (region == POINTER_REGION_NONE &&
+            appui_inside(x, y, end_button_rect())) {
+            region = POINTER_REGION_END;
+        } else if (region == POINTER_REGION_NONE && table_scrollable() &&
+                   (scroll_dragging ||
+                    appui_inside(x, y, table_scroll_track()))) {
+            region = POINTER_REGION_SCROLL;
+        } else if (region == POINTER_REGION_NONE) {
+            int body_y = table_y() + TABLE_HEADER_H;
+            int scroll_w = table_scrollable() ? APPUI_SCROLL_W : 0;
+            if (x >= 8 && x < w - 8 - scroll_w && y >= body_y &&
+                y < body_y + table_viewport_px()) {
+                int index = scroll_row + (y - body_y) / ROW_H;
+                if (index >= 0 && index < process_count)
+                    region = POINTER_REGION_ROW_BASE + index;
+            }
+        }
+    }
+
+    /* The modal is painted over the page, but the page is still generated
+     * with pointer-aware controls.  Include both layers in the fingerprint
+     * so entering a dialog button cannot leave either hover stale. */
+    if (confirm_pid >= 0) {
+        int dialog_region = 0;
+        if (appui_inside(x, y, confirm_button(0)))
+            dialog_region = 1;
+        else if (appui_inside(x, y, confirm_button(1)))
+            dialog_region = 2;
+        region += POINTER_REGION_DIALOG_BASE * dialog_region;
+    }
+    return region;
+}
+
+static int handle_mouse(int x, int y, int buttons, int wheel) {
+    int old_region = pointer_visual_region(pointer_x, pointer_y);
+    int old_left = pointer_buttons & 1;
+    int old_scroll_row = scroll_row;
+    int old_dragging = scroll_dragging;
+
     pointer_x = x;
     pointer_y = y;
     pointer_buttons = buttons;
@@ -1445,6 +1523,14 @@ static void handle_mouse(int x, int y, int buttons, int wheel) {
     if (!(buttons & 1))
         scroll_dragging = 0;
     previous_buttons = buttons;
+
+    /* Clicks can refresh data, select rows or change tabs.  Drags redraw
+     * only after crossing a whole-row scroll boundary.  Ordinary motion is
+     * reduced to hover-region transitions instead of one full GPU canvas
+     * submission per input report. */
+    return old_region != pointer_visual_region(pointer_x, pointer_y) ||
+           old_left != (buttons & 1) || old_scroll_row != scroll_row ||
+           old_dragging != scroll_dragging || wheel != 0;
 }
 
 static void move_selection(int direction) {
@@ -1486,11 +1572,14 @@ static void handle_key(int key) {
 int main(int argc, char **argv) {
     struct guiapp_ctx ctx;
     struct guiapp_event event;
+    int gpu_mode;
     if (guiapp_parse_args(argc, argv, &ctx) < 0)
         return 1;
     own_pid = getpid();
     refresh_data();
+    gpu_mode = guiapp_has_capability(&ctx, GUIAPP_CAP_GPU_CANVAS);
     for (;;) {
+        int needs_render = 0;
         if (guiapp_read_event(&ctx, &event) < 0 ||
             event.type == GUIAPP_EVT_CLOSE)
             break;
@@ -1499,20 +1588,31 @@ int main(int argc, char **argv) {
             w = clamp_int(event.width, 420, MAX_W);
             h = clamp_int(event.height, 300, MAX_H);
             clamp_scroll();
+            needs_render = 1;
         } else if (event.type == GUIAPP_EVT_MOUSE) {
-            handle_mouse(event.x, event.y, event.buttons, event.wheel);
+            needs_render = handle_mouse(event.x, event.y, event.buttons,
+                                        event.wheel);
         } else if (event.type == GUIAPP_EVT_KEY && event.buttons) {
             handle_key(event.key);
+            needs_render = 1;
         } else if (event.type == GUIAPP_EVT_TICK && !paused &&
                    (uint32_t)(monotonic_ms() - last_refresh_ms) >= 1000u) {
             refresh_data();
             clamp_scroll();
+            needs_render = 1;
         }
-        /* Re-read the capability every frame rather than caching it at
-         * startup: the desktop drops GPU_CANVAS if it loses its virgl
-         * context, and announces the change with GUIAPP_EVT_CAPABILITIES,
-         * which lands here as an ordinary wake-up. */
-        if (guiapp_has_capability(&ctx, GUIAPP_CAP_GPU_CANVAS)) {
+        /* Capability changes arrive as an ordinary wake-up.  They still
+         * force one frame so the backing representation switches promptly,
+         * but unrelated wake-ups no longer rebuild an unchanged canvas. */
+        int next_gpu_mode =
+            guiapp_has_capability(&ctx, GUIAPP_CAP_GPU_CANVAS);
+        if (next_gpu_mode != gpu_mode) {
+            gpu_mode = next_gpu_mode;
+            needs_render = 1;
+        }
+        if (!needs_render)
+            continue;
+        if (gpu_mode) {
             /* The CPU surface is dead weight while the desktop rasterises. */
             if (pixels) {
                 free(pixels);
