@@ -1,0 +1,52 @@
+name: x86_64-nightly
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+jobs:
+  runtime-matrix:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        memory_mib: [64, 256, 1024, 3072]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install canonical Windows tools
+        shell: powershell
+        run: choco install make nasm qemu --yes --no-progress
+      - name: Fetch pinned dependencies
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/fetch-netsurf.ps1
+      - name: Build image and host tests
+        run: make -j2 host-test PYTHON=python HOST_CC=clang
+      - name: Serial smoke at configured RAM size
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -QemuPath qemu-system-x86_64 -MemoryMiB ${{ matrix.memory_mib }} -SerialLog build/serial-smoke-${{ matrix.memory_mib }}.log -TestImage build/buzzos-test-${{ matrix.memory_mib }}.img -TimeoutSeconds 120
+      - name: Filesystem corruption and repair tests
+        if: matrix.memory_mib == 256
+        run: |
+          python tools/check_minifs_negative.py --image build/buzzos-test-256.img
+          python tools/check_minifs_repair.py --image build/buzzos-test-256.img
+      - name: Network stress
+        if: matrix.memory_mib == 256
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/net-stress.ps1 -QemuPath qemu-system-x86_64 -MemoryMiB 256
+      - name: GUI smoke
+        if: matrix.memory_mib == 256
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -QemuPath qemu-system-x86_64 -PythonPath python -MemoryMiB 256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: buzzos-nightly-${{ matrix.memory_mib }}-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            build/serial-*.log
+            build/gui-smoke/

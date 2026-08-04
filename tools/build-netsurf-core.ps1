@@ -1,7 +1,11 @@
 param(
     [string]$Workspace = "third_party/netsurf-workspace",
     [string]$BuildDir = "build/netsurf",
-    [string]$Output = "build/user/nshtmltest.elf"
+    [string]$Output = "build/user/nshtmltest.elf",
+    [string]$Compiler = "clang",
+    [string]$HostCC = "clang",
+    [string]$HostCCArgs = "",
+    [string]$PythonPath = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,25 +17,23 @@ foreach ($name in $required) {
     }
 }
 
-& python tools/gen-netsurf-aliases.py (Join-Path $Workspace "libparserutils")
+& $PythonPath tools/gen-netsurf-aliases.py (Join-Path $Workspace "libparserutils")
 if ($LASTEXITCODE -ne 0) { throw "Could not generate charset aliases" }
-& python tools/gen-netsurf-entities.py (Join-Path $Workspace "libhubbub")
+& $PythonPath tools/gen-netsurf-entities.py (Join-Path $Workspace "libhubbub")
 if ($LASTEXITCODE -ne 0) { throw "Could not generate HTML entities" }
-& python tools/gen-netsurf-elements.py (Join-Path $Workspace "libhubbub")
+& $PythonPath tools/gen-netsurf-elements.py (Join-Path $Workspace "libhubbub")
 if ($LASTEXITCODE -ne 0) { throw "Could not generate HTML element lookup" }
 
 New-Item -ItemType Directory -Force $BuildDir | Out-Null
 $generator = Join-Path $BuildDir "gen_parser.exe"
 $generatorSource = Join-Path $Workspace "libcss/src/parse/properties/css_property_parser_gen.c"
-$zig = Get-Command zig.exe -ErrorAction SilentlyContinue
-if ($null -ne $zig) {
-    # The generator is a host utility, not a freestanding BuzzOS binary.
-    # Prefer Zig's bundled Windows libc when the machine has no MSVC SDK;
-    # this keeps the otherwise freestanding build independent of host headers.
-    & $zig.Source cc $generatorSource -D_CRT_SECURE_NO_WARNINGS -o $generator
-} else {
-    & clang $generatorSource -D_CRT_SECURE_NO_WARNINGS -o $generator
+# The generator is a host utility, not a freestanding BuzzOS binary.  The
+# host compiler is independent from the cross compiler used below.
+$hostArgs = @()
+if (![string]::IsNullOrWhiteSpace($HostCCArgs)) {
+    $hostArgs = $HostCCArgs.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
 }
+& $HostCC @hostArgs $generatorSource -D_CRT_SECURE_NO_WARNINGS -o $generator
 if ($LASTEXITCODE -ne 0) { throw "Could not build CSS property generator" }
 $propertyRoot = Join-Path $Workspace "libcss/src/parse/properties"
 foreach ($line in Get-Content (Join-Path $propertyRoot "properties.gen")) {
@@ -82,7 +84,7 @@ function Compile-Source([IO.FileInfo]$File, [string]$Root, [string]$Group) {
                   "-I$wc/include") }
         "nsutils" { @("-I$nsutils/include", "-I$nsutils/src") }
     })
-    & clang @common @groupIncludes -c $File.FullName -o $object
+    & $Compiler @common @groupIncludes -c $File.FullName -o $object
     if ($LASTEXITCODE -ne 0) { throw "Compile failed: $($File.FullName)" }
     $compiledObjects.Add((Resolve-Path $object).Path)
 }
@@ -102,7 +104,7 @@ Get-ChildItem (Join-Path $css "src") -Recurse -Filter *.c |
 Get-ChildItem (Join-Path $nsutils "src") -Recurse -Filter *.c |
     ForEach-Object { Compile-Source $_ (Join-Path $nsutils "src") "nsutils" }
 
-& clang @common @testIncludes -c src/user/bin/nshtmltest.c -o (Join-Path $BuildDir "nshtmltest.o")
+& $Compiler @common @testIncludes -c src/user/bin/nshtmltest.c -o (Join-Path $BuildDir "nshtmltest.o")
 if ($LASTEXITCODE -ne 0) { throw "Could not compile nshtmltest" }
 $objects = @("build/user/crt0.o", "build/user/libc.o",
              (Join-Path $BuildDir "nshtmltest.o")) + @($compiledObjects)

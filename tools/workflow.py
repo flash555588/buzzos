@@ -6,7 +6,7 @@ import json
 WORKFLOW = [
     {
         "phase": "preflight",
-        "command": "make doctor QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
+        "command": "make doctor QEMU=\"C:\\Program Files\\qemu\\qemu-system-x86_64.exe\"",
         "purpose": "check host tools and QEMU path",
     },
     {
@@ -16,27 +16,27 @@ WORKFLOW = [
     },
     {
         "phase": "run",
-        "command": "make run-local QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
+        "command": "make run-local QEMU=\"C:\\Program Files\\qemu\\qemu-system-x86_64.exe\"",
         "purpose": "open a visible QEMU window while logging serial output",
     },
     {
         "phase": "run",
-        "command": "make run-gui QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
+        "command": "make run-gui QEMU=\"C:\\Program Files\\qemu\\qemu-system-x86_64.exe\"",
         "purpose": "boot and open the user-space GUI app manager",
     },
     {
         "phase": "test",
-        "command": "make smoke QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
+        "command": "make smoke QEMU=\"C:\\Program Files\\qemu\\qemu-system-x86_64.exe\"",
         "purpose": "run serial QEMU smoke coverage",
     },
     {
         "phase": "test",
-        "command": "make gui-smoke QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
+        "command": "make gui-smoke QEMU=\"C:\\Program Files\\qemu\\qemu-system-x86_64.exe\"",
         "purpose": "drive GUI examples and validate screenshots",
     },
     {
         "phase": "test",
-        "command": "make verify QEMU=\"C:\\Program Files\\qemu\\qemu-system-i386.exe\"",
+        "command": "make verify QEMU=\"C:\\Program Files\\qemu\\qemu-system-x86_64.exe\"",
         "purpose": "run the full local verification gate",
     },
     {

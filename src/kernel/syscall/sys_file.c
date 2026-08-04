@@ -5,6 +5,12 @@
 #include "task.h"
 #include "vfs.h"
 
+enum { SYSCALL_PATH_MAX = 256, SYSCALL_IO_CHUNK = 4096 };
+
+static int copy_path(char path[SYSCALL_PATH_MAX], uintptr_t user_path) {
+    return copy_string_from_user(path, SYSCALL_PATH_MAX, user_path);
+}
+
 static int streq(const char *a, const char *b) {
     while (*a && *b && *a == *b) {
         a++;
@@ -15,10 +21,10 @@ static int streq(const char *a, const char *b) {
 
 intptr_t sys_open_console_aware(uintptr_t path_arg, uintptr_t flags, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    const char *path = (const char *)(uintptr_t)path_arg;
-    if (!user_string_ok(path))
+    char path[SYSCALL_PATH_MAX];
+    if (copy_path(path, path_arg) < 0)
         return -1;
-    if (current_task && current_task->console_silent && path && streq(path, "/dev/console"))
+    if (current_task && current_task->console_silent && streq(path, "/dev/console"))
         return vfs_open_flags("/dev/null", (int)flags);
     return vfs_open_flags(path, (int)flags);
 }
@@ -30,16 +36,40 @@ intptr_t sys_close(uintptr_t fd, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_
 
 intptr_t sys_read(uintptr_t fd, uintptr_t buf, uintptr_t count, uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
-    if (!user_range_writable(buf, count))
-        return -1;
-    return vfs_read((int)fd, (void *)(uintptr_t)buf, (size_t)count);
+    uint8_t bounce[SYSCALL_IO_CHUNK];
+    size_t done = 0;
+    while (done < count) {
+        size_t chunk = count - done;
+        if (chunk > sizeof(bounce)) chunk = sizeof(bounce);
+        int n = vfs_read((int)fd, bounce, chunk);
+        if (n <= 0)
+            return done ? (intptr_t)done : n;
+        if (copy_to_user(buf + done, bounce, (size_t)n) < 0)
+            return done ? (intptr_t)done : -1;
+        done += (size_t)n;
+        if ((size_t)n < chunk)
+            break;
+    }
+    return (intptr_t)done;
 }
 
 intptr_t sys_write(uintptr_t fd, uintptr_t buf, uintptr_t count, uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
-    if (!user_range_ok(buf, count))
-        return -1;
-    return vfs_write((int)fd, (const void *)(uintptr_t)buf, (size_t)count);
+    uint8_t bounce[SYSCALL_IO_CHUNK];
+    size_t done = 0;
+    while (done < count) {
+        size_t chunk = count - done;
+        if (chunk > sizeof(bounce)) chunk = sizeof(bounce);
+        if (copy_from_user(bounce, buf + done, chunk) < 0)
+            return done ? (intptr_t)done : -1;
+        int n = vfs_write((int)fd, bounce, chunk);
+        if (n <= 0)
+            return done ? (intptr_t)done : n;
+        done += (size_t)n;
+        if ((size_t)n < chunk)
+            break;
+    }
+    return (intptr_t)done;
 }
 
 intptr_t sys_dup(uintptr_t fd, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
@@ -54,37 +84,48 @@ intptr_t sys_dup2(uintptr_t oldfd, uintptr_t newfd, uintptr_t c, uintptr_t d, ui
 
 intptr_t sys_stat(uintptr_t path, uintptr_t st, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    if (!user_string_ok((const char *)(uintptr_t)path) || !user_range_writable(st, sizeof(struct stat)))
+    char kernel_path[SYSCALL_PATH_MAX];
+    struct stat kernel_stat;
+    if (copy_path(kernel_path, path) < 0)
         return -1;
-    return vfs_stat((const char *)(uintptr_t)path, (struct stat *)(uintptr_t)st);
+    int ret = vfs_stat(kernel_path, &kernel_stat);
+    if (ret < 0)
+        return ret;
+    return copy_to_user(st, &kernel_stat, sizeof(kernel_stat));
 }
 
 intptr_t sys_getdents(uintptr_t fd, uintptr_t ents, uintptr_t count, uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
-    if (!user_range_writable(ents, count))
-        return -1;
-    return vfs_getdents((int)fd, (struct dirent *)(uintptr_t)ents, (size_t)count);
+    uint8_t bounce[SYSCALL_IO_CHUNK];
+    size_t chunk = count < sizeof(bounce) ? count : sizeof(bounce);
+    int ret = vfs_getdents((int)fd, (struct dirent *)bounce, chunk);
+    if (ret <= 0)
+        return ret;
+    return copy_to_user(ents, bounce, (size_t)ret) < 0 ? -1 : ret;
 }
 
 intptr_t sys_mkdir(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_string_ok((const char *)(uintptr_t)path))
+    char kernel_path[SYSCALL_PATH_MAX];
+    if (copy_path(kernel_path, path) < 0)
         return -1;
-    return vfs_mkdir((const char *)(uintptr_t)path);
+    return vfs_mkdir(kernel_path);
 }
 
 intptr_t sys_unlink(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_string_ok((const char *)(uintptr_t)path))
+    char kernel_path[SYSCALL_PATH_MAX];
+    if (copy_path(kernel_path, path) < 0)
         return -1;
-    return vfs_remove((const char *)(uintptr_t)path);
+    return vfs_remove(kernel_path);
 }
 
 intptr_t sys_create(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_string_ok((const char *)(uintptr_t)path))
+    char kernel_path[SYSCALL_PATH_MAX];
+    if (copy_path(kernel_path, path) < 0)
         return -1;
-    return vfs_create((const char *)(uintptr_t)path);
+    return vfs_create(kernel_path);
 }
 
 intptr_t sys_lseek(uintptr_t fd, uintptr_t offset, uintptr_t whence, uintptr_t d, uintptr_t e) {
@@ -94,22 +135,26 @@ intptr_t sys_lseek(uintptr_t fd, uintptr_t offset, uintptr_t whence, uintptr_t d
 
 intptr_t sys_rmdir(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_string_ok((const char *)(uintptr_t)path))
+    char kernel_path[SYSCALL_PATH_MAX];
+    if (copy_path(kernel_path, path) < 0)
         return -1;
-    return vfs_rmdir((const char *)(uintptr_t)path);
+    return vfs_rmdir(kernel_path);
 }
 
 intptr_t sys_rename(uintptr_t old_path, uintptr_t new_path, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    if (!user_string_ok((const char *)(uintptr_t)old_path) ||
-        !user_string_ok((const char *)(uintptr_t)new_path))
+    char kernel_old[SYSCALL_PATH_MAX];
+    char kernel_new[SYSCALL_PATH_MAX];
+    if (copy_path(kernel_old, old_path) < 0 ||
+        copy_path(kernel_new, new_path) < 0)
         return -1;
-    return vfs_rename((const char *)(uintptr_t)old_path, (const char *)(uintptr_t)new_path);
+    return vfs_rename(kernel_old, kernel_new);
 }
 
 intptr_t sys_fsstat(uintptr_t info_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_range_writable(info_arg, sizeof(struct fs_info)))
+    struct fs_info info;
+    if (minifs_info(&info) < 0)
         return -1;
-    return minifs_info((struct fs_info *)(uintptr_t)info_arg);
+    return copy_to_user(info_arg, &info, sizeof(info));
 }

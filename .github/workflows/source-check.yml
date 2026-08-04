@@ -1,11 +1,11 @@
-name: source-check
+name: x86_64-release-gates
 
 on:
   push:
   pull_request:
 
 jobs:
-  consistency:
+  host-checks:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -17,7 +17,53 @@ jobs:
           python-version: "3.13"
       - name: Compile host tools
         run: python -m compileall -q tools
-      - name: Check source consistency
+      - name: Check x86_64 source consistency
         run: python tools/check_project.py --source-only
+      - name: Prepare host-test output directory
+        run: python -c "from pathlib import Path; Path('build/user').mkdir(parents=True, exist_ok=True)"
+      - name: Run behavioral host tests
+        run: make host-test HOST_CC=clang
       - name: Exercise app scaffolder
         run: python tools/new_app.py ci_sample --dry-run
+
+  windows-image-and-boot:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install canonical Windows build and runtime tools
+        shell: powershell
+        run: choco install make nasm qemu --yes --no-progress
+      - name: Record dependency versions
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force build | Out-Null
+          python --version | Tee-Object build/dependencies.txt
+          clang --version | Select-Object -First 1 | Tee-Object -Append build/dependencies.txt
+          ld.lld --version | Tee-Object -Append build/dependencies.txt
+          nasm -v | Tee-Object -Append build/dependencies.txt
+          qemu-system-x86_64 --version | Select-Object -First 1 | Tee-Object -Append build/dependencies.txt
+      - name: Fetch pinned NetSurf dependencies over HTTPS
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/fetch-netsurf.ps1
+      - name: Build x86_64 image
+        run: make -j2 PYTHON=python HOST_CC=clang
+      - name: Validate ELF64 image and repository consistency
+        run: python tools/check_project.py
+      - name: Boot serial smoke test
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -QemuPath qemu-system-x86_64 -TimeoutSeconds 90
+      - name: Check the booted minifs image
+        run: python tools/check_minifs.py --image build/buzzos-test.img
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: buzzos-x86_64-pr-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            build/buzzos.img
+            build/dependencies.txt
+            build/serial-smoke.log

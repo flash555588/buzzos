@@ -1,5 +1,5 @@
 # Shared QEMU path / accelerator selection for BuzzOS host scripts.
-# Prefer MSYS2 mingw64 qemu-system-x86_64 with WHPX; fall back to TCG / i386.
+# Prefer MSYS2 mingw64 qemu-system-x86_64 with WHPX; fall back to TCG.
 
 function Resolve-BuzzosQemu {
     param(
@@ -21,10 +21,7 @@ function Resolve-BuzzosQemu {
         "D:\msys64\ucrt64\bin\qemu-system-x86_64.exe",
         "C:\Program Files\qemu\qemu-system-x86_64.exe",
         "D:\Program Files\qemu\qemu-system-x86_64.exe",
-        "qemu-system-x86_64",
-        "C:\Program Files\qemu\qemu-system-i386.exe",
-        "D:\Program Files\qemu\qemu-system-i386.exe",
-        "qemu-system-i386"
+        "qemu-system-x86_64"
     )
 
     $path = $null

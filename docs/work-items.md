@@ -39,8 +39,8 @@
 
 涉及文件：
 - `src/kernel/mm/pmm.c`
-- `src/kernel/arch/i386/paging.c`
-- `src/kernel/arch/i386/paging.h`
+- `src/kernel/arch/x86_64/paging.c`
+- `src/kernel/arch/x86_64/paging.h`
 
 工作内容：
 - 明确当前内核 direct-map 范围，目前是低 64 MiB。
@@ -58,8 +58,8 @@
 目标：减少长 syscall 导致的输入延迟和调度停顿。
 
 涉及文件：
-- `src/kernel/arch/i386/idt.c`
-- `src/kernel/arch/i386/isr.asm`
+- `src/kernel/arch/x86_64/idt.c`
+- `src/kernel/arch/x86_64/isr.asm`
 - `src/kernel/syscall/syscall.c`
 - `src/kernel/fs/vfs.c`
 - `src/kernel/fs/minifs/minifs.c`
@@ -318,13 +318,13 @@ TCP 输入 demux 和 per-PCB 接收缓冲。后续重点是乱序/重复包处�
 - 新增 `tools/workflow.py`，用同一份清单输出本地推荐工作流。
 - 新增 `make help`，不触发构建即可查看 doctor、build、run、smoke、verify、report、fs 和 app 相关入口。
 - 新增 `tools/doctor.py`，检查 Python、GNU Make、PowerShell、NASM、LLVM 工具链、QEMU 和关键工作区文件。
-- 新增 `make doctor`，支持 `QEMU="C:\Program Files\qemu\qemu-system-i386.exe"` 这类显式路径。
+- 新增 `make doctor`，支持 `QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"` 这类显式路径。
 - `make report` 输出 Local Workflow 和 Host Doctor 表，并用 soft 模式避免报告因缺少某个本地工具直接失败。
 - `make check-project` 静态检查 workflow、doctor、报告和 README 覆盖。
 
 验收标准：
 - `make help` 能输出推荐本地工作流。
-- `make doctor QEMU="C:\Program Files\qemu\qemu-system-i386.exe"` 能输出宿主环境检查结果。
+- `make doctor QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"` 能输出宿主环境检查结果。
 - `make report` 包含 `## Local Workflow` 和 `## Host Doctor`。
 - `make check-project` 通过。
 
@@ -351,7 +351,7 @@ TCP 输入 demux 和 per-PCB 接收缓冲。后续重点是乱序/重复包处�
 验收标准：
 - `make help` 能列出 GUI 快捷启动命令。
 - `make check-project` 通过。
-- `make run-gui QEMU="C:\Program Files\qemu\qemu-system-i386.exe"` 能打开可见 QEMU 桌面。
+- `make run-gui QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"` 能打开可见 QEMU 桌面。
 
 ## Done/P2: minifs 校验与恢复工具
 

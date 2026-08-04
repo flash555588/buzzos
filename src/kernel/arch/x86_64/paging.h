@@ -22,6 +22,8 @@ int paging_set_user_range_executable_in_space(uintptr_t cr3, uintptr_t va,
                                               size_t size, int executable);
 int paging_copy_to_user_space(uintptr_t cr3, uintptr_t va,
                               const void *src, size_t size);
+int paging_copy_from_user_space(uintptr_t cr3, void *dst, uintptr_t va,
+                                size_t size);
 int paging_zero_user_space(uintptr_t cr3, uintptr_t va, size_t size);
 int paging_map_shared_pages(uintptr_t va, const uintptr_t *pages, size_t count);
 int paging_unmap_shared_pages(uintptr_t cr3, uintptr_t va, size_t count);

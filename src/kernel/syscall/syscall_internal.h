@@ -11,6 +11,9 @@ typedef intptr_t (*syscall_handler_fn)(uintptr_t, uintptr_t, uintptr_t,
 int user_range_ok(uintptr_t ptr, size_t len);
 int user_range_writable(uintptr_t ptr, size_t len);
 int user_string_ok(const char *s);
+int copy_from_user(void *dst, uintptr_t src, size_t len);
+int copy_to_user(uintptr_t dst, const void *src, size_t len);
+int copy_string_from_user(char *dst, size_t capacity, uintptr_t src);
 
 intptr_t sys_open_console_aware(uintptr_t path_arg, uintptr_t flags, uintptr_t c, uintptr_t d, uintptr_t e);
 intptr_t sys_close(uintptr_t fd, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);

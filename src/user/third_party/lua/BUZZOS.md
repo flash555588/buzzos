@@ -11,7 +11,7 @@ interpreter.
 
 ## Port notes
 
-- Built freestanding against BuzzOS mini libc (`-ffreestanding`, i386).
+- Built freestanding against BuzzOS mini libc (`-ffreestanding`, x86_64).
 - Platform overrides live in `src/user/ports/lua/buzzos_lua_port.h`
   (`LUA_USE_C89`, package path, no `os.execute` shell, fixed decimal point).
 - Error handling uses user-space `setjmp`/`longjmp` (`src/user/libc/setjmp.asm`).

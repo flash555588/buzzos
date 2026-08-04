@@ -217,7 +217,7 @@ exec /fs/demo
 - `Ctrl+S` 保存。
 - `Ctrl+C` 退出。
 
-`basm` 是教学用小 assembler，不是完整 NASM。它输出 BuzzOS loader 可执行的 ELF32 文件。
+`basm` 是教学用小 assembler，不是完整 NASM。它输出 BuzzOS ELF64 loader 可执行的 x86_64 文件。
 
 ## 8. 排错小抄
 

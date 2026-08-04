@@ -270,6 +270,8 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     ramfs_register("/bin/netsurf", initrd_bin_netsurf_data, INITRD_BIN_NETSURF_SIZE);
     ramfs_register("/share/buzzos-demo.wav", initrd_share_buzzos_demo_wav_data,
                    INITRD_SHARE_BUZZOS_DEMO_WAV_SIZE);
+    ramfs_register("/share/buzzos-demo.mp3", initrd_share_buzzos_demo_mp3_data,
+                   INITRD_SHARE_BUZZOS_DEMO_MP3_SIZE);
     serial_puts("[boot] initrd files registered\n");
     seed_user_apps();
     serial_puts("[boot] user apps seeded\n");

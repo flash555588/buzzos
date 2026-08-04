@@ -13,6 +13,13 @@ enum {
     IPPROTO_ICMP_K = 1,
     IPPROTO_UDP_K  = 17,
     MAX_SOCKETS    = 8,
+    NET_SYSCALL_BUFFER = 4096,
+    NET_DATAGRAM_MAX = 1472,
+    SOCKET_STATE_FREE = 0,
+    SOCKET_STATE_OPEN,
+    SOCKET_STATE_CONNECTING,
+    SOCKET_STATE_CONNECTED,
+    SOCKET_STATE_CLOSING,
 };
 
 struct k_sockaddr_in {
@@ -31,6 +38,8 @@ struct socket_entry {
     uint32_t peer_ip;
     uint16_t peer_port;
     int connected;
+    int state;
+    uint32_t refs;
     struct net_tcp_pcb tcp;
 };
 
@@ -61,7 +70,8 @@ static int socket_owner(void) {
 static struct socket_entry *socket_get(int sd) {
     if (sd < 0 || sd >= MAX_SOCKETS)
         return 0;
-    if (!sockets[sd].used || sockets[sd].owner != socket_owner())
+    if (sockets[sd].used != 1 || sockets[sd].owner != socket_owner() ||
+        sockets[sd].state == SOCKET_STATE_CLOSING)
         return 0;
     return &sockets[sd];
 }
@@ -76,6 +86,15 @@ static void socket_clear(struct socket_entry *s) {
     s->peer_ip = 0;
     s->peer_port = 0;
     s->connected = 0;
+    s->state = SOCKET_STATE_FREE;
+    s->refs = 0;
+}
+
+static void socket_release(struct socket_entry *s) {
+    socket_lock();
+    if (s && s->refs)
+        s->refs--;
+    socket_unlock();
 }
 
 intptr_t sys_socket(uintptr_t domain, uintptr_t type, uintptr_t protocol, uintptr_t d, uintptr_t e) {
@@ -98,6 +117,8 @@ intptr_t sys_socket(uintptr_t domain, uintptr_t type, uintptr_t protocol, uintpt
             sockets[i].peer_ip = 0;
             sockets[i].peer_port = 0;
             sockets[i].connected = 0;
+            sockets[i].state = SOCKET_STATE_OPEN;
+            sockets[i].refs = 0;
             net_tcp_pcb_init(&sockets[i].tcp);
             socket_unlock();
             return i;
@@ -110,18 +131,18 @@ intptr_t sys_socket(uintptr_t domain, uintptr_t type, uintptr_t protocol, uintpt
 intptr_t sys_connect(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen,
                 uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
-    if (addrlen < sizeof(struct k_sockaddr_in) ||
-        !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in))) {
+    struct k_sockaddr_in addr;
+    if (addrlen < sizeof(addr) ||
+        copy_from_user(&addr, addr_arg, sizeof(addr)) < 0) {
         serial_puts("[net] connect: bad address\n");
         return -1;
     }
-    struct k_sockaddr_in *addr = (struct k_sockaddr_in *)(uintptr_t)addr_arg;
-    if (addr->sin_family != AF_INET_K) {
+    if (addr.sin_family != AF_INET_K) {
         serial_puts("[net] connect: bad family\n");
         return -1;
     }
-    uint32_t peer_ip = addr->sin_addr;
-    uint16_t peer_port = ntoh16(addr->sin_port);
+    uint32_t peer_ip = addr.sin_addr;
+    uint16_t peer_port = ntoh16(addr.sin_port);
 
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
@@ -134,101 +155,141 @@ intptr_t sys_connect(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen,
         s->peer_ip = peer_ip;
         s->peer_port = peer_port;
         s->connected = 1;
+        s->state = SOCKET_STATE_CONNECTED;
         socket_unlock();
         return 0;
     }
-    if (s->type != SOCK_STREAM_K || s->connected) {
+    if (s->type != SOCK_STREAM_K || s->state != SOCKET_STATE_OPEN) {
         serial_puts("[net] connect: invalid state\n");
         socket_unlock();
         return -1;
     }
     struct net_tcp_pcb *tcp = &s->tcp;
+    struct socket_entry *held = s;
     net_tcp_pcb_init(tcp);
+    s->state = SOCKET_STATE_CONNECTING;
+    s->refs++;
     socket_unlock();
 
     int ret = net_tcp_connect_pcb(tcp, peer_ip, peer_port);
     socket_lock();
     s = socket_get((int)sd_arg);
     if (ret < 0) {
-        if (s && s->type == SOCK_STREAM_K) {
+        if (s && s->type == SOCK_STREAM_K &&
+            s->state == SOCKET_STATE_CONNECTING) {
             s->connected = 0;
+            s->state = SOCKET_STATE_OPEN;
             net_tcp_pcb_init(&s->tcp);
         }
+        if (held->refs) held->refs--;
         socket_unlock();
         return -1;
     }
-    if (s && s->type == SOCK_STREAM_K) {
+    if (s && s->type == SOCK_STREAM_K &&
+        s->state == SOCKET_STATE_CONNECTING) {
         s->peer_ip = peer_ip;
         s->peer_port = peer_port;
         s->connected = 1;
+        s->state = SOCKET_STATE_CONNECTED;
+        if (s->refs) s->refs--;
         socket_unlock();
         return 0;
     }
+    int closing = held->state == SOCKET_STATE_CLOSING;
+    if (held->refs) held->refs--;
     socket_unlock();
-    net_tcp_close_pcb(tcp);
+    if (!closing)
+        net_tcp_close_pcb(tcp);
     return -1;
 }
 
 intptr_t sys_send(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t flags, uintptr_t e) {
     (void)flags; (void)e;
-    if (!user_range_ok(buf, len))
+    if (len > INT32_MAX)
         return -1;
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
-    if (!s || !s->connected) {
+    if (!s || s->state != SOCKET_STATE_CONNECTED) {
         socket_unlock();
         return -1;
     }
+    s->refs++;
     int type = s->type;
     uint16_t local_port = s->local_port;
     uint32_t peer_ip = s->peer_ip;
     uint16_t peer_port = s->peer_port;
     struct net_tcp_pcb *tcp = &s->tcp;
     socket_unlock();
+    uint8_t bounce[NET_SYSCALL_BUFFER];
     int ret = -1;
-    if (type == SOCK_STREAM_K)
-        ret = net_tcp_send_pcb(tcp, (const void *)(uintptr_t)buf, (size_t)len);
-    else if (type == SOCK_DGRAM_K)
+    if (type == SOCK_STREAM_K) {
+        size_t done = 0;
+        while (done < len) {
+            size_t chunk = len - done;
+            if (chunk > sizeof(bounce)) chunk = sizeof(bounce);
+            if (copy_from_user(bounce, buf + done, chunk) < 0) {
+                ret = done ? (int)done : -1;
+                break;
+            }
+            if (net_tcp_send_pcb(tcp, bounce, chunk) < 0) {
+                ret = done ? (int)done : -1;
+                break;
+            }
+            done += chunk;
+            ret = (int)done;
+        }
+        if (len == 0) ret = 0;
+    } else if (len > NET_DATAGRAM_MAX ||
+               copy_from_user(bounce, buf, (size_t)len) < 0) {
+        ret = -1;
+    } else if (type == SOCK_DGRAM_K) {
         ret = net_udp_send(peer_ip, local_port, peer_port,
-                           (const void *)(uintptr_t)buf, (size_t)len);
-    else if (type == SOCK_RAW_K)
+                           bounce, (size_t)len) < 0 ? -1 : (int)len;
+    } else if (type == SOCK_RAW_K && len <= 1200u) {
         ret = net_icmp_send_echo(peer_ip, local_port, 1,
-                                 (const void *)(uintptr_t)buf, (size_t)len);
-    return ret < 0 ? ret : (int)len;
+                                 bounce, (size_t)len) < 0 ? -1 : (int)len;
+    }
+    socket_release(s);
+    return ret;
 }
 
 intptr_t sys_recv(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t flags, uintptr_t e) {
     (void)flags; (void)e;
-    if (!user_range_writable(buf, len))
-        return -1;
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
-    if (!s || !s->connected) {
+    if (!s || s->state != SOCKET_STATE_CONNECTED) {
         socket_unlock();
         return -1;
     }
+    s->refs++;
     int type = s->type;
     uint16_t local_port = s->local_port;
     uint32_t peer_ip = s->peer_ip;
     struct net_tcp_pcb *tcp = &s->tcp;
     socket_unlock();
+    uint8_t bounce[NET_SYSCALL_BUFFER];
+    size_t cap = len < sizeof(bounce) ? (size_t)len : sizeof(bounce);
+    int ret = -1;
     if (type == SOCK_STREAM_K)
-        return net_tcp_recv_pcb(tcp, (void *)(uintptr_t)buf, (size_t)len);
-    if (type == SOCK_DGRAM_K)
-        return net_udp_recv(local_port, 0, 0, (void *)(uintptr_t)buf, (size_t)len);
-    if (type == SOCK_RAW_K)
-        return net_icmp_recv_echo(peer_ip, local_port, 0, (void *)(uintptr_t)buf, (size_t)len);
-    return -1;
+        ret = net_tcp_recv_pcb(tcp, bounce, cap);
+    else if (type == SOCK_DGRAM_K)
+        ret = net_udp_recv(local_port, 0, 0, bounce, cap);
+    else if (type == SOCK_RAW_K)
+        ret = net_icmp_recv_echo(peer_ip, local_port, 0, bounce, cap);
+    if (ret > 0 && copy_to_user(buf, bounce, (size_t)ret) < 0)
+        ret = -1;
+    socket_release(s);
+    return ret;
 }
 
 intptr_t sys_bind(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen,
              uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
-    if (addrlen < sizeof(struct k_sockaddr_in) ||
-        !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in)))
+    struct k_sockaddr_in addr;
+    if (addrlen < sizeof(addr) ||
+        copy_from_user(&addr, addr_arg, sizeof(addr)) < 0)
         return -1;
-    struct k_sockaddr_in *addr = (struct k_sockaddr_in *)(uintptr_t)addr_arg;
-    if (addr->sin_family != AF_INET_K)
+    if (addr.sin_family != AF_INET_K)
         return -1;
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
@@ -236,18 +297,20 @@ intptr_t sys_bind(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen,
         socket_unlock();
         return -1;
     }
-    s->local_port = ntoh16(addr->sin_port);
+    s->local_port = ntoh16(addr.sin_port);
     socket_unlock();
     return 0;
 }
 
 intptr_t sys_sendto(uintptr_t sd_arg, uintptr_t buf, uintptr_t len,
                uintptr_t addr_arg, uintptr_t addrlen) {
-    if (!user_range_ok(buf, len) || addrlen < sizeof(struct k_sockaddr_in) ||
-        !user_range_ok(addr_arg, sizeof(struct k_sockaddr_in)))
+    struct k_sockaddr_in addr;
+    uint8_t bounce[NET_DATAGRAM_MAX];
+    if (len > sizeof(bounce) || len > INT32_MAX || addrlen < sizeof(addr) ||
+        copy_from_user(&addr, addr_arg, sizeof(addr)) < 0 ||
+        copy_from_user(bounce, buf, (size_t)len) < 0)
         return -1;
-    struct k_sockaddr_in *addr = (struct k_sockaddr_in *)(uintptr_t)addr_arg;
-    if (addr->sin_family != AF_INET_K)
+    if (addr.sin_family != AF_INET_K)
         return -1;
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
@@ -255,25 +318,24 @@ intptr_t sys_sendto(uintptr_t sd_arg, uintptr_t buf, uintptr_t len,
         socket_unlock();
         return -1;
     }
+    s->refs++;
     int type = s->type;
     uint16_t local_port = s->local_port;
     socket_unlock();
     int ret = -1;
     if (type == SOCK_DGRAM_K)
-        ret = net_udp_send(addr->sin_addr, local_port, ntoh16(addr->sin_port),
-                           (const void *)(uintptr_t)buf, (size_t)len);
-    else if (type == SOCK_RAW_K)
-        ret = net_icmp_send_echo(addr->sin_addr, local_port, 1,
-                                 (const void *)(uintptr_t)buf, (size_t)len);
+        ret = net_udp_send(addr.sin_addr, local_port, ntoh16(addr.sin_port),
+                           bounce, (size_t)len);
+    else if (type == SOCK_RAW_K && len <= 1200u)
+        ret = net_icmp_send_echo(addr.sin_addr, local_port, 1,
+                                 bounce, (size_t)len);
+    socket_release(s);
     return ret < 0 ? ret : (int)len;
 }
 
 intptr_t sys_recvfrom(uintptr_t sd_arg, uintptr_t buf, uintptr_t len,
                  uintptr_t addr_arg, uintptr_t addrlen) {
-    if (!user_range_writable(buf, len))
-        return -1;
-    if (addr_arg && (addrlen < sizeof(struct k_sockaddr_in) ||
-        !user_range_writable(addr_arg, sizeof(struct k_sockaddr_in))))
+    if (addr_arg && addrlen < sizeof(struct k_sockaddr_in))
         return -1;
     socket_lock();
     struct socket_entry *s = socket_get((int)sd_arg);
@@ -281,27 +343,36 @@ intptr_t sys_recvfrom(uintptr_t sd_arg, uintptr_t buf, uintptr_t len,
         socket_unlock();
         return -1;
     }
+    s->refs++;
     int type = s->type;
     uint16_t local_port = s->local_port;
     uint32_t peer_ip = s->peer_ip;
     socket_unlock();
     uint32_t src_ip = 0;
     uint16_t src_port = 0;
+    uint8_t bounce[NET_SYSCALL_BUFFER];
+    size_t cap = len < sizeof(bounce) ? (size_t)len : sizeof(bounce);
     int ret;
     if (type == SOCK_DGRAM_K) {
-        ret = net_udp_recv(local_port, &src_ip, &src_port, (void *)(uintptr_t)buf, (size_t)len);
+        ret = net_udp_recv(local_port, &src_ip, &src_port, bounce, cap);
     } else if (type == SOCK_RAW_K) {
-        ret = net_icmp_recv_echo(peer_ip, local_port, 0, (void *)(uintptr_t)buf, (size_t)len);
+        ret = net_icmp_recv_echo(peer_ip, local_port, 0, bounce, cap);
         src_ip = peer_ip;
     } else {
+        socket_release(s);
         return -1;
     }
+    if (ret > 0 && copy_to_user(buf, bounce, (size_t)ret) < 0)
+        ret = -1;
     if (ret >= 0 && addr_arg) {
-        struct k_sockaddr_in *addr = (struct k_sockaddr_in *)(uintptr_t)addr_arg;
-        addr->sin_family = AF_INET_K;
-        addr->sin_port = ntoh16(src_port);
-        addr->sin_addr = src_ip;
+        struct k_sockaddr_in addr;
+        addr.sin_family = AF_INET_K;
+        addr.sin_port = ntoh16(src_port);
+        addr.sin_addr = src_ip;
+        if (copy_to_user(addr_arg, &addr, sizeof(addr)) < 0)
+            ret = -1;
     }
+    socket_release(s);
     return ret;
 }
 
@@ -316,9 +387,17 @@ intptr_t sys_closesocket(uintptr_t sd_arg, uintptr_t b, uintptr_t c, uintptr_t d
     int close_tcp = s->type == SOCK_STREAM_K && (s->tcp.state != 0 || s->tcp.registered);
     struct net_tcp_pcb *tcp = &s->tcp;
     s->used = 2;
-    s->owner = -1;
+    s->state = SOCKET_STATE_CLOSING;
     s->connected = 0;
     socket_unlock();
+    for (;;) {
+        socket_lock();
+        uint32_t refs = s->refs;
+        socket_unlock();
+        if (!refs)
+            break;
+        task_yield();
+    }
     if (close_tcp)
         net_tcp_close_pcb(tcp);
     net_tcp_pcb_init(tcp);
@@ -345,8 +424,11 @@ void sys_net_cleanup_owner(int owner) {
                         (s->tcp.state != 0 || s->tcp.registered);
         struct net_tcp_pcb *tcp = &s->tcp;
         s->used = 2;
-        s->owner = -1;
+        s->state = SOCKET_STATE_CLOSING;
         s->connected = 0;
+        /* Owner cleanup runs after every task in the process is dead, so no
+         * operation can resume to release an outstanding reference. */
+        s->refs = 0;
         socket_unlock();
 
         if (close_tcp)
@@ -363,24 +445,20 @@ void sys_net_cleanup_owner(int owner) {
 intptr_t sys_dns_resolve(uintptr_t host_arg, uintptr_t ip_out_arg, uintptr_t c,
                     uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    const char *host = (const char *)(uintptr_t)host_arg;
-    if (!user_string_ok(host) || !user_range_writable(ip_out_arg, sizeof(uint32_t)))
+    char host[256];
+    uint32_t ip;
+    if (copy_string_from_user(host, sizeof(host), host_arg) < 0)
         return -1;
-    return net_dns_resolve(host, (uint32_t *)(uintptr_t)ip_out_arg);
+    if (net_dns_resolve(host, &ip) < 0)
+        return -1;
+    return copy_to_user(ip_out_arg, &ip, sizeof(ip));
 }
 
 intptr_t sys_netinfo(uintptr_t mac_arg, uintptr_t ip_arg, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    if (mac_arg && !user_range_writable(mac_arg, 6))
+    if (mac_arg && copy_to_user(mac_arg, net_mac, 6) < 0)
         return -1;
-    if (ip_arg && !user_range_writable(ip_arg, sizeof(uint32_t)))
+    if (ip_arg && copy_to_user(ip_arg, &net_ip, sizeof(net_ip)) < 0)
         return -1;
-    if (mac_arg) {
-        uint8_t *mac = (uint8_t *)(uintptr_t)mac_arg;
-        for (int i = 0; i < 6; i++)
-            mac[i] = net_mac[i];
-    }
-    if (ip_arg)
-        *(uint32_t *)(uintptr_t)ip_arg = net_ip;
     return 0;
 }

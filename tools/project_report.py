@@ -492,7 +492,7 @@ def table(headers, rows):
     return out
 
 
-def build_report(python_cmd="python", make_cmd="make", qemu_cmd="qemu-system-i386"):
+def build_report(python_cmd="python", make_cmd="make", qemu_cmd="qemu-system-x86_64"):
     makefile = read_text_if_exists("Makefile")
     boot_sectors = parse_make_int("BOOT_PARTITION_SECTORS", 0)
     fs_start = parse_make_int("FS_START_SECTOR", 512)
@@ -665,7 +665,7 @@ def main():
     parser.add_argument("--print", action="store_true", help="also print the report to stdout")
     parser.add_argument("--python", default="python", help="Python command shown in host doctor")
     parser.add_argument("--make", default="make", help="Make command shown in host doctor")
-    parser.add_argument("--qemu", default="qemu-system-i386", help="QEMU command/path shown in host doctor")
+    parser.add_argument("--qemu", default="qemu-system-x86_64", help="QEMU command/path shown in host doctor")
     args = parser.parse_args()
 
     report = build_report(args.python, args.make, args.qemu)

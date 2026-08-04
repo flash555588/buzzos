@@ -1,10 +1,10 @@
 # BuzzOS
 
-BuzzOS 是一个面向学习和实验的 i386 POSIX-like 操作系统。它已经演进成一个能启动用户态 shell、运行多任务、挂载持久化文件系统、联网，并通过 Limine framebuffer 显示桌面的完整小型系统。
+BuzzOS 是一个面向学习和实验的 x86_64 POSIX-like 操作系统。它已经演进成一个能启动用户态 shell、运行多任务、挂载持久化文件系统、联网，并通过 Limine framebuffer 显示桌面的完整小型系统。
 
 English: [README.en.md](README.en.md)
 
-相关文档：[CHANGELOG.md](CHANGELOG.md)、[本地启动指南](docs/boot-guide.md)、[用户指南](docs/user-guide.md)、[项目状态](docs/project-status.md)、[用户 GUI app 指南](docs/user-gui.md)。运行 `make report` 可以生成本地验证报告 `build/project-report.md`。
+相关文档：[CHANGELOG.md](CHANGELOG.md)、[本地启动指南](docs/boot-guide.md)、[构建依赖](docs/dependencies.md)、[用户指南](docs/user-guide.md)、[项目状态](docs/project-status.md)、[用户 GUI app 指南](docs/user-gui.md)。运行 `make report` 可以生成本地验证报告 `build/project-report.md`。
 
 <table>
   <tr>
@@ -20,7 +20,7 @@ English: [README.en.md](README.en.md)
 ## 当前状态
 
 - 启动链路：Limine BIOS + multiboot2，默认请求 `1280x800x32` framebuffer。
-- 内核：GDT、IDT、异常处理、PIC、PIT、串口、PS/2 键鼠、分页、E820/PMM、ELF32 loader。
+- 内核：GDT、IDT、异常处理、PIC、PIT、串口、PS/2 键鼠、四级分页、E820/PMM、ELF64 loader。
 - 用户态：`/bin/sh` shell、`nano`、`basm`、`cat`、`echo`、`gui`。
 - 桌面：用户态多窗口桌面，支持窗口激活置顶、拖动、缩放、最小化、最大化、关闭和滚动条。
 - 图形加速：virgl 下按窗口直接 GPU 合成，普通应用 SHM 零 CPU 拷贝导入；GPU Canvas 应用可提交安全的矩形/圆角/UTF-8 文本显示列表，桌面空闲时采用事件驱动休眠。
@@ -42,7 +42,7 @@ English: [README.en.md](README.en.md)
 | `llvm-objcopy` | 生成辅助二进制产物 |
 | `python` | 生成 initrd、app registry、磁盘镜像 |
 | `powershell` | Windows 下运行脚本 |
-| `qemu-system-i386` | 运行 BuzzOS |
+| `qemu-system-x86_64` | 运行 BuzzOS |
 | Limine（已 vendoring） | 仓库内 `third_party/limine/`，安装 BIOS 启动阶段 |
 
 默认使用仓库内的 Limine（v12.5.2）：
@@ -63,7 +63,7 @@ make help
 检查本机环境：
 
 ```sh
-make doctor QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make doctor QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 该目标调用 `tools/doctor.py`，也可以给脚本传 `--soft` 只报告问题而不中止。
@@ -84,13 +84,13 @@ make run-hda
 在可见 QEMU 窗口运行，并把串口日志写入 `build/serial-live.log`：
 
 ```sh
-make run-local QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make run-local QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 直接启动后进入桌面：
 
 ```sh
-make run-gui QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make run-gui QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 重建镜像并清空 `/fs`：
@@ -278,19 +278,19 @@ make check-project
 串口 smoke：
 
 ```sh
-make smoke QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make smoke QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 GUI smoke：
 
 ```sh
-make gui-smoke QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make gui-smoke QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 完整验证：
 
 ```sh
-make verify QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make verify QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 ## 设计边界
@@ -306,7 +306,7 @@ BuzzOS 仍然是教学和实验系统，不是完整 Unix：
 ## 代码入口
 
 - Kernel entry: [src/kernel/core/kernel.c](src/kernel/core/kernel.c)
-- Multiboot2 entry: [src/kernel/arch/i386/mb2_entry.asm](src/kernel/arch/i386/mb2_entry.asm)
+- Multiboot2 entry: [src/kernel/arch/x86_64/mb2_entry.asm](src/kernel/arch/x86_64/mb2_entry.asm)
 - Framebuffer driver: [src/kernel/drv/fb.c](src/kernel/drv/fb.c)
 - Scheduler/processes: [src/kernel/sched/task.c](src/kernel/sched/task.c)
 - Syscalls: [src/kernel/syscall/syscall.c](src/kernel/syscall/syscall.c)

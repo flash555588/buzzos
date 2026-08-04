@@ -245,6 +245,7 @@ static void start_playback(void) {
     /* RPBM | IOCE: run and interrupt on each completed descriptor. */
     outb(nabm + 0x1B, 0x11u);
     playing = 1;
+    serial_puts("[audio] PCM playback started (AC97 bus master)\n");
 }
 
 int ac97_write(const uint8_t *data, size_t size) {

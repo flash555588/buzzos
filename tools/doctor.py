@@ -144,7 +144,7 @@ def main():
             "QEMU",
             r"C:\msys64\mingw64\bin\qemu-system-x86_64.exe",
         ),
-        help="qemu-system-x86_64 (preferred, WHPX) or qemu-system-i386 path",
+        help="qemu-system-x86_64 path (WHPX preferred on Windows)",
     )
     parser.add_argument("--nasm", default="nasm")
     parser.add_argument("--clang", default="clang")

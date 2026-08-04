@@ -97,7 +97,8 @@ static int base_type(void){while(take("const")||take("static")||take("signed")||
     need("int");return 4;}
 static Node*node(int k){if(nnodes>=NODE_MAX){fail_at(cur()->line,"tree too large");return 0;}
     Node*n=&nodes[nnodes++];memset(n,0,sizeof(*n));n->kind=k;return n;}
-static Node*binary(int k,Node*a,Node*b){Node*n=node(k);n->lhs=a;n->rhs=b;return n;}
+static Node*binary(int k,Node*a,Node*b){Node*n=node(k);n->lhs=a;n->rhs=b;
+    n->size=(k==N_ADD||k==N_SUB)&&(a->size==8||b->size==8)?8:4;return n;}
 static Var*find_var(Token*t){
     for(int i=nlocals-1;i>=0;i--)
         if((int)strlen(locals[i].name)==t->len&&bytes_equal(locals[i].name,t->loc,t->len))return&locals[i];
@@ -114,7 +115,7 @@ static int declarator(int base,char name[NAME_MAX],int *count,int *elem) {
     int pointers=0;while(take("*"))pointers++;
     if(cur()->kind!=TK_IDENT){fail_at(cur()->line,"expected identifier");return 4;}
     getname(name,cur());pos++;
-    int size=pointers?4:base;*elem=base;*count=0;
+    int size=pointers?8:base;*elem=pointers>1?8:base;*count=0;
     if(take("[")){if(cur()->kind!=TK_NUM)fail_at(cur()->line,"expected array size");
         else{*count=cur()->value;pos++;}need("]");size=(*count)*base;}
     return size;
@@ -128,7 +129,7 @@ static Node *var_node(Var*v){Node*n=node(N_VAR);n->var=v;n->size=v->size;n->elem
 static Node *primary(void) {
     if(take("(")){Node*n=expression();need(")");return n;}
     if(cur()->kind==TK_NUM){Node*n=node(N_NUM);n->value=cur()->value;n->size=4;pos++;return n;}
-    if(cur()->kind==TK_STRING){Node*n=node(N_STRING);n->value=cur()->value;n->size=4;n->elem_size=1;pos++;return n;}
+    if(cur()->kind==TK_STRING){Node*n=node(N_STRING);n->value=cur()->value;n->size=8;n->elem_size=1;pos++;return n;}
     if(cur()->kind!=TK_IDENT){fail_at(cur()->line,"expected expression");return node(N_NUM);}
     Token*t=cur();pos++;
     if(take("(")){Node*n=node(N_CALL);getname(n->name,t);Node head={0},*tail=&head;
@@ -150,10 +151,10 @@ static Node *unary(void) {
     if(take("-")){Node*n=node(N_NEG);n->lhs=unary();n->size=4;return n;}
     if(take("!")){Node*n=node(N_NOT);n->lhs=unary();n->size=4;return n;}
     if(take("~")){Node*n=node(N_BNOT);n->lhs=unary();n->size=4;return n;}
-    if(take("&")){Node*n=node(N_ADDR);n->lhs=unary();n->size=4;n->elem_size=n->lhs->size;return n;}
+    if(take("&")){Node*n=node(N_ADDR);n->lhs=unary();n->size=8;n->elem_size=n->lhs->size;return n;}
     if(take("*")){Node*n=node(N_DEREF);n->lhs=unary();n->size=n->lhs->elem_size?n->lhs->elem_size:4;return n;}
     if(take("sizeof")){Node*n=node(N_NUM);n->size=4;
-        if(take("(")&&is_type()){int b=base_type();while(take("*"))b=4;need(")");n->value=b;return n;}
+        if(take("(")&&is_type()){int b=base_type();while(take("*"))b=8;need(")");n->value=b;return n;}
         Node*x=unary();n->value=x->size?x->size:4;return n;}
     return postfix();
 }
@@ -186,7 +187,7 @@ static Node *declaration(void) {
     int base=base_type();Node head={0},*tail=&head;
     do{char name[NAME_MAX];int count,elem,size=declarator(base,name,&count,&elem);
         int used=0;for(int i=0;i<nlocals;i++)if(locals[i].offset<0&&-locals[i].offset>used)used=-locals[i].offset;
-        used=(used+size+3)&~3;Var*v=new_local(name,size,elem,count,-used);
+        int align=size>=8?8:4;used=(used+size+align-1)&~(align-1);Var*v=new_local(name,size,elem,count,-used);
         if(take("=")){Node*a=node(N_ASSIGN);a->lhs=var_node(v);a->rhs=expression();a->size=size;
             Node*s=node(N_EXPR);s->lhs=a;tail->next=s;tail=s;}
     }while(take(","));need(";");Node*n=node(N_BLOCK);n->body=head.next;return n;
@@ -214,40 +215,47 @@ static void emit_num(int value){char b[16];int n=0;unsigned x;if(value<0){emit("
 static void emit_label(int id){emit("L");emit_num(id);}
 static void gen_expr(Node*n);
 static void gen_addr(Node*n){
-    if(n->kind==N_VAR){if(n->var->global){emit("    mov eax, ");emit(n->var->name);emit("\n");}
-        else{emit("    lea eax, [ebp");if(n->var->offset>=0)emit("+");emit_num(n->var->offset);emit("]\n");}return;}
+    if(n->kind==N_VAR){if(n->var->global){emit("    mov rax, ");emit(n->var->name);emit("\n");}
+        else{emit("    lea rax, [rbp");if(n->var->offset>=0)emit("+");emit_num(n->var->offset);emit("]\n");}return;}
     if(n->kind==N_DEREF){gen_expr(n->lhs);return;}fail_at(cur()->line,"not an lvalue");
 }
 static void load(Node*n){if(n->kind==N_VAR&&n->var->count)return;
-    if(n->size==1)emit("    movzx eax, byte [eax]\n");else emit("    mov eax, dword [eax]\n");}
-static void store(Node*n){if(n->size==1)emit("    mov byte [eax], bl\n");else emit("    mov dword [eax], ebx\n");}
+    if(n->size==1)emit("    movzx eax, byte [rax]\n");
+    else if(n->size==8)emit("    mov rax, qword [rax]\n");
+    else emit("    mov eax, dword [rax]\n");}
+static void store(Node*n){if(n->size==1)emit("    mov byte [rax], bl\n");
+    else if(n->size==8)emit("    mov qword [rax], rbx\n");
+    else emit("    mov dword [rax], ebx\n");}
 static int argc_of(Node*n){int c=0;for(;n;n=n->next)c++;return c;}
-static void gen_args(Node*n){if(!n)return;gen_args(n->next);gen_expr(n);emit("    push eax\n");}
+static void gen_args(Node*n){if(!n)return;gen_args(n->next);gen_expr(n);emit("    push rax\n");}
 static void gen_expr(Node*n){
     if(!n||failed)return;
     if(n->kind==N_NUM){emit("    mov eax, ");emit_num(n->value);emit("\n");return;}
-    if(n->kind==N_STRING){emit("    mov eax, STR");emit_num(n->value);emit("\n");return;}
+    if(n->kind==N_STRING){emit("    mov rax, STR");emit_num(n->value);emit("\n");return;}
     if(n->kind==N_VAR){gen_addr(n);load(n);return;}
     if(n->kind==N_ADDR){gen_addr(n->lhs);return;}
     if(n->kind==N_DEREF){gen_expr(n->lhs);load(n);return;}
-    if(n->kind==N_ASSIGN){gen_expr(n->rhs);emit("    push eax\n");gen_addr(n->lhs);emit("    pop ebx\n");
-        store(n);emit("    mov eax, ebx\n");return;}
+    if(n->kind==N_ASSIGN){gen_expr(n->rhs);emit("    push rax\n");gen_addr(n->lhs);emit("    pop rbx\n");
+        store(n);emit(n->size==8?"    mov rax, rbx\n":"    mov eax, ebx\n");return;}
     if(n->kind==N_NEG||n->kind==N_NOT||n->kind==N_BNOT){gen_expr(n->lhs);
         if(n->kind==N_NEG)emit("    neg eax\n");else if(n->kind==N_BNOT)emit("    not eax\n");
-        else emit("    cmp eax, 0\n    sete al\n    movzx eax, al\n");return;}
+        else emit(n->lhs->size==8?"    cmp rax, 0\n    sete al\n    movzx eax, al\n":
+                                  "    cmp eax, 0\n    sete al\n    movzx eax, al\n");
+        return;}
     if(n->kind==N_CALL){int c=argc_of(n->body);gen_args(n->body);emit("    call ");emit(n->name);emit("\n");
-        if(c){emit("    add esp, ");emit_num(c*4);emit("\n");}return;}
-    if(n->kind==N_LAND||n->kind==N_LOR){int a=label_id++,done=label_id++;gen_expr(n->lhs);emit("    cmp eax, 0\n");
+        if(c){emit("    add rsp, ");emit_num(c*8);emit("\n");}return;}
+    if(n->kind==N_LAND||n->kind==N_LOR){int a=label_id++,done=label_id++;gen_expr(n->lhs);emit(n->lhs->size==8?"    cmp rax, 0\n":"    cmp eax, 0\n");
         emit(n->kind==N_LAND?"    je ":"    jne ");emit_label(a);emit("\n");gen_expr(n->rhs);
-        emit("    cmp eax, 0\n    setne al\n    movzx eax, al\n    jmp ");emit_label(done);emit("\n");
+        emit(n->rhs->size==8?"    cmp rax, 0\n":"    cmp eax, 0\n");emit("    setne al\n    movzx eax, al\n    jmp ");emit_label(done);emit("\n");
         emit_label(a);emit(n->kind==N_LAND?":\n    mov eax, 0\n":":\n    mov eax, 1\n");emit_label(done);emit(":\n");return;}
-    gen_expr(n->lhs);emit("    push eax\n");gen_expr(n->rhs);emit("    mov ecx, eax\n    pop eax\n");
-    if(n->kind==N_ADD)emit("    add eax, ecx\n");else if(n->kind==N_SUB)emit("    sub eax, ecx\n");
+    int wide=n->lhs->size==8||n->rhs->size==8;
+    gen_expr(n->lhs);emit("    push rax\n");gen_expr(n->rhs);emit("    mov rcx, rax\n    pop rax\n");
+    if(n->kind==N_ADD)emit(wide?"    add rax, rcx\n":"    add eax, ecx\n");else if(n->kind==N_SUB)emit(wide?"    sub rax, rcx\n":"    sub eax, ecx\n");
     else if(n->kind==N_MUL)emit("    imul eax, ecx\n");else if(n->kind==N_DIV||n->kind==N_MOD){
         emit("    cdq\n    idiv ecx\n");if(n->kind==N_MOD)emit("    mov eax, edx\n");}
     else if(n->kind==N_SHL)emit("    shl eax, cl\n");else if(n->kind==N_SHR)emit("    sar eax, cl\n");
     else if(n->kind==N_AND)emit("    and eax, ecx\n");else if(n->kind==N_XOR)emit("    xor eax, ecx\n");
-    else if(n->kind==N_OR)emit("    or eax, ecx\n");else{emit("    cmp eax, ecx\n");
+    else if(n->kind==N_OR)emit("    or eax, ecx\n");else{emit(wide?"    cmp rax, rcx\n":"    cmp eax, ecx\n");
         if(n->kind==N_LT)emit("    setl al\n");else if(n->kind==N_LE)emit("    setle al\n");
         else if(n->kind==N_EQ)emit("    sete al\n");else if(n->kind==N_NE)emit("    setne al\n");
         emit("    movzx eax, al\n");}
@@ -256,52 +264,52 @@ static void gen_stmt(Node*n,int ret){
     if(!n||failed)return;if(n->kind==N_BLOCK){for(Node*s=n->body;s;s=s->next)gen_stmt(s,ret);return;}
     if(n->kind==N_EXPR){gen_expr(n->lhs);return;}if(n->kind==N_RETURN){if(n->lhs)gen_expr(n->lhs);else emit("    mov eax, 0\n");
         emit("    jmp ");emit_label(ret);emit("\n");return;}
-    if(n->kind==N_IF){int e=label_id++,d=label_id++;gen_expr(n->cond);emit("    cmp eax, 0\n    je ");emit_label(e);emit("\n");
+    if(n->kind==N_IF){int e=label_id++,d=label_id++;gen_expr(n->cond);emit(n->cond->size==8?"    cmp rax, 0\n    je ":"    cmp eax, 0\n    je ");emit_label(e);emit("\n");
         gen_stmt(n->then,ret);emit("    jmp ");emit_label(d);emit("\n");emit_label(e);emit(":\n");gen_stmt(n->els,ret);
         emit_label(d);emit(":\n");return;}
     if(n->kind==N_WHILE||n->kind==N_FOR){int begin=label_id++,cont=label_id++,done=label_id++;
         int oldb=break_label,oldc=continue_label;break_label=done;continue_label=cont;
         if(n->kind==N_FOR&&n->init)gen_expr(n->init);emit_label(begin);emit(":\n");if(n->cond){gen_expr(n->cond);
-            emit("    cmp eax, 0\n    je ");emit_label(done);emit("\n");}gen_stmt(n->then,ret);emit_label(cont);emit(":\n");
+            emit(n->cond->size==8?"    cmp rax, 0\n    je ":"    cmp eax, 0\n    je ");emit_label(done);emit("\n");}gen_stmt(n->then,ret);emit_label(cont);emit(":\n");
         if(n->kind==N_FOR&&n->inc)gen_expr(n->inc);emit("    jmp ");emit_label(begin);emit("\n");emit_label(done);emit(":\n");
         break_label=oldb;continue_label=oldc;return;}
     if(n->kind==N_BREAK||n->kind==N_CONTINUE){int l=n->kind==N_BREAK?break_label:continue_label;
         if(!l)fail_at(cur()->line,"break outside loop");else{emit("    jmp ");emit_label(l);emit("\n");}}
 }
 static void runtime(void){
-    emit("global _start\nsection .text\n_start:\n    mov eax, dword [esp+8]\n    push eax\n");
-    emit("    mov eax, dword [esp+8]\n    push eax\n    call main\n    add esp, 8\n");
-    emit("    mov ebx, eax\n    mov eax, 1\n    int 0x80\n");
-    emit("exit:\n    mov ebx, dword [esp+4]\n    mov eax, 1\n    int 0x80\n");
-    emit("write:\n    mov ebx, dword [esp+4]\n    mov ecx, dword [esp+8]\n    mov edx, dword [esp+12]\n");
+    emit("bits 64\nglobal _start\nsection .text\n_start:\n    lea rax, [rsp+8]\n    push rax\n");
+    emit("    mov eax, dword [rsp+8]\n    push rax\n    call main\n    add rsp, 16\n");
+    emit("    mov edi, eax\n    mov eax, 1\n    int 0x80\n");
+    emit("exit:\n    mov edi, dword [rsp+8]\n    mov eax, 1\n    int 0x80\n");
+    emit("write:\n    mov edi, dword [rsp+8]\n    mov rsi, qword [rsp+16]\n    mov edx, dword [rsp+24]\n");
     emit("    mov eax, 5\n    int 0x80\n    ret\n");
-    emit("read:\n    mov ebx, dword [esp+4]\n    mov ecx, dword [esp+8]\n    mov edx, dword [esp+12]\n");
+    emit("read:\n    mov edi, dword [rsp+8]\n    mov rsi, qword [rsp+16]\n    mov edx, dword [rsp+24]\n");
     emit("    mov eax, 4\n    int 0x80\n    ret\n");
-    emit("open:\n    mov ebx, dword [esp+4]\n    mov ecx, dword [esp+8]\n    mov eax, 2\n    int 0x80\n    ret\n");
-    emit("close:\n    mov ebx, dword [esp+4]\n    mov eax, 3\n    int 0x80\n    ret\n");
-    emit("putchar:\n    push ebp\n    mov ebp, esp\n    sub esp, 4\n    mov eax, dword [ebp+8]\n");
-    emit("    mov byte [ebp-4], al\n    push 1\n    lea eax, [ebp-4]\n    push eax\n    push 1\n");
-    emit("    call write\n    add esp, 12\n    leave\n    ret\n");
-    emit("puts:\n    push ebp\n    mov ebp, esp\n    push esi\n    mov esi, dword [ebp+8]\n    mov edx, 0\n");
-    emit("BCC_PUTS_LEN:\n    cmp byte [esi+edx], 0\n    je BCC_PUTS_WRITE\n    inc edx\n    jmp BCC_PUTS_LEN\n");
-    emit("BCC_PUTS_WRITE:\n    push edx\n    push esi\n    push 1\n    call write\n    add esp, 12\n");
-    emit("    push 1\n    mov eax, BCC_NEWLINE\n    push eax\n    push 1\n    call write\n    add esp, 12\n");
-    emit("    pop esi\n    leave\n    ret\n");
+    emit("open:\n    mov rdi, qword [rsp+8]\n    mov esi, dword [rsp+16]\n    mov eax, 2\n    int 0x80\n    ret\n");
+    emit("close:\n    mov edi, dword [rsp+8]\n    mov eax, 3\n    int 0x80\n    ret\n");
+    emit("putchar:\n    push rbp\n    mov rbp, rsp\n    sub rsp, 16\n    mov eax, dword [rbp+16]\n");
+    emit("    mov byte [rbp-4], al\n    push 1\n    lea rax, [rbp-4]\n    push rax\n    push 1\n");
+    emit("    call write\n    add rsp, 24\n    leave\n    ret\n");
+    emit("puts:\n    push rbp\n    mov rbp, rsp\n    push rsi\n    mov rsi, qword [rbp+16]\n    mov edx, 0\n");
+    emit("BCC_PUTS_LEN:\n    cmp byte [rsi+rdx], 0\n    je BCC_PUTS_WRITE\n    inc rdx\n    jmp BCC_PUTS_LEN\n");
+    emit("BCC_PUTS_WRITE:\n    push rdx\n    push rsi\n    push 1\n    call write\n    add rsp, 24\n");
+    emit("    push 1\n    mov rax, BCC_NEWLINE\n    push rax\n    push 1\n    call write\n    add rsp, 24\n");
+    emit("    pop rsi\n    leave\n    ret\n");
 }
 
 /* translation unit and driver */
 static int frame_size(void){int m=0;for(int i=0;i<nlocals;i++)if(locals[i].offset<0&&-locals[i].offset>m)m=-locals[i].offset;
     return(m+15)&~15;}
 static void function(const char*name){
-    nlocals=0;int off=8;
+    nlocals=0;int off=16;
     if(!take(")")){
         if(same(cur(),"void")&&same(&toks[pos+1],")")){pos+=2;}
         else{do{int base=base_type();char pn[NAME_MAX];int count,elem,size=declarator(base,pn,&count,&elem);
-            new_local(pn,size,elem,count,off);off+=4;}while(take(","));need(")");}
+            new_local(pn,size,elem,count,off);off+=8;}while(take(","));need(")");}
     }
     if(take(";")){nlocals=0;return;}
     need("{");Node*body=compound();int frame=frame_size(),ret=label_id++;
-    emit(name);emit(":\n    push ebp\n    mov ebp, esp\n");if(frame){emit("    sub esp, ");emit_num(frame);emit("\n");}
+    emit(name);emit(":\n    push rbp\n    mov rbp, rsp\n");if(frame){emit("    sub rsp, ");emit_num(frame);emit("\n");}
     gen_stmt(body,ret);emit("    mov eax, 0\n");emit_label(ret);emit(":\n    leave\n    ret\n");nlocals=0;
 }
 static void program(void){
@@ -322,8 +330,9 @@ static void program(void){
         for(int j=0;j<string_sizes[i];j++){if(j)emit(", ");emit_num((unsigned char)strings[i][j]);}
         if(string_sizes[i])emit(", ");emit("0\n");}
     for(int i=0;i<nglobals;i++){Var*v=&globals[i];emit(v->name);emit(": ");
-        if(v->count){emit("times ");emit_num(v->count);emit(v->elem_size==1?" db 0\n":" dd 0\n");}
+        if(v->count){emit("times ");emit_num(v->count);emit(v->elem_size==1?" db 0\n":v->elem_size==8?" dq 0\n":" dd 0\n");}
         else if(v->size==1){emit("db ");emit_num(v->init);emit("\n");}
+        else if(v->size==8){emit("dq ");emit_num(v->init);emit("\n");}
         else{emit("dd ");emit_num(v->init);emit("\n");}}
 }
 static int read_source(const char*path){

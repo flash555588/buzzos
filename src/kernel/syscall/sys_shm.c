@@ -56,8 +56,7 @@ static void maybe_free_object(struct shm_object *o) {
 
 intptr_t sys_shm_create(uintptr_t size, uintptr_t out_arg, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    if (!size || size > USER_SHM_SLOT_SIZE ||
-        !user_range_writable(out_arg, sizeof(struct syscall_shm_mapping))) return -1;
+    if (!size || size > USER_SHM_SLOT_SIZE) return -1;
     int owner = task_get_pid();
     if (owner <= 0 || owner >= MAX_TASKS) return -1;
     shm_lock();
@@ -89,15 +88,18 @@ intptr_t sys_shm_create(uintptr_t size, uintptr_t out_arg, uintptr_t c, uintptr_
     shm_lock();
     o->owners = 1u << (uint32_t)owner;
     o->ready = 1;
-    struct syscall_shm_mapping *out = (void *)(uintptr_t)out_arg;
-    out->token = object_token(index); out->address = va; out->size = size;
+    struct syscall_shm_mapping out;
+    out.token = object_token(index); out.address = va; out.size = size;
     shm_unlock();
+    if (copy_to_user(out_arg, &out, sizeof(out)) < 0) {
+        (void)sys_shm_unmap(out.token, 0, 0, 0, 0);
+        return -1;
+    }
     return 0;
 }
 
 intptr_t sys_shm_map(uintptr_t token, uintptr_t out_arg, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    if (!user_range_writable(out_arg, sizeof(struct syscall_shm_mapping))) return -1;
     int owner = task_get_pid(), index;
     if (owner <= 0 || owner >= MAX_TASKS) return -1;
     shm_lock();
@@ -108,9 +110,13 @@ intptr_t sys_shm_map(uintptr_t token, uintptr_t out_arg, uintptr_t c, uintptr_t 
         shm_unlock(); return -1;
     }
     o->owners |= bit;
-    struct syscall_shm_mapping *out = (void *)(uintptr_t)out_arg;
-    out->token = token; out->address = object_va(index); out->size = o->size;
+    struct syscall_shm_mapping out;
+    out.token = token; out.address = object_va(index); out.size = o->size;
     shm_unlock();
+    if (copy_to_user(out_arg, &out, sizeof(out)) < 0) {
+        (void)sys_shm_unmap(token, 0, 0, 0, 0);
+        return -1;
+    }
     return 0;
 }
 

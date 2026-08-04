@@ -25,9 +25,30 @@ struct fs_info {
     uint32_t max_file_size;
 };
 
+enum minifs_error {
+    MINIFS_ERROR_NONE = 0,
+    MINIFS_ERROR_DEVICE,
+    MINIFS_ERROR_READ,
+    MINIFS_ERROR_CORRUPT_SUPERBLOCK,
+    MINIFS_ERROR_MIGRATION,
+    MINIFS_ERROR_METADATA,
+    MINIFS_ERROR_FORMAT,
+};
+
+struct minifs_mount_status {
+    int mounted;
+    int corrupt;
+    int dirty;
+    int recovery_required;
+    int journal_enabled;
+    enum minifs_error last_error;
+};
+
 int minifs_mount(void);
 int minifs_sync(void);
 int minifs_info(struct fs_info *out);
+int minifs_get_mount_status(struct minifs_mount_status *out);
+const char *minifs_error_text(enum minifs_error error);
 int minifs_open(const char *path, uint16_t *ino_out);
 int minifs_create(const char *path);
 int minifs_mkdir(const char *path);
