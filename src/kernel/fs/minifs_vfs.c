@@ -160,6 +160,6 @@ static const struct fs_ops minifs_ops = {
 };
 
 void minifs_vfs_init(void) {
-    minifs_mount();
-    vfs_mount("/fs", &minifs_ops);
+    if (minifs_mount() == 0)
+        vfs_mount("/fs", &minifs_ops);
 }

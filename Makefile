@@ -47,8 +47,10 @@ KERNEL_SRCS := \
 	src/kernel/fs/minifs_vfs.c \
 	src/kernel/block/ata.c \
 	src/kernel/block/cache.c \
+	src/kernel/fs/minifs/mount_policy.c \
 	src/kernel/fs/minifs/minifs.c \
 	src/kernel/net/netdev.c \
+	src/kernel/net/packet.c \
 	src/kernel/net/net.c \
 	src/kernel/drv/keyboard.c \
 	src/kernel/drv/mouse.c \
@@ -80,11 +82,23 @@ KERNEL_C_OBJS  := $(patsubst src/kernel/%.c,$(OBJDIR)/%.o,$(KERNEL_SRCS))
 KERNEL_ASM_OBJS:= $(patsubst src/kernel/%.asm,$(OBJDIR)/%.o-asm,$(KERNEL_ASMS))
 KERNEL_OBJS    := $(KERNEL_C_OBJS) $(KERNEL_ASM_OBJS)
 
-NASM := nasm
-CC   := clang
-LD   := ld.lld
+NASM ?= nasm
+ifeq ($(origin CC),default)
+CC := clang
+endif
+ifeq ($(origin LD),default)
+LD := ld.lld
+endif
+ifeq ($(origin OBJCOPY),default)
 OBJCOPY := llvm-objcopy
+endif
+ifeq ($(origin OBJCOPY),undefined)
+OBJCOPY := llvm-objcopy
+endif
 PYTHON ?= python
+HOST_CC ?= clang
+HOST_CC_ARGS ?=
+VERSION ?= dev
 # Prefer MSYS2 mingw64 QEMU (pacman -S mingw-w64-x86_64-qemu) with WHPX.
 # Override examples:
 #   make run QEMU="C:/msys64/mingw64/bin/qemu-system-x86_64.exe" QEMU_ACCEL=whpx
@@ -96,6 +110,7 @@ QEMU_ACCEL ?= whpx
 # "Unexpected VP exit code 4"). BuzzOS only needs a plain 64-bit-capable
 # model; qemu64 supplies the long-mode, SSE2 and NX baseline BuzzOS requires.
 QEMU_CPU ?= qemu64
+QEMU_MEMORY ?= 256
 # SDL+GL is much faster than default GTK under WHPX; clarity is acceptable.
 QEMU_DISPLAY ?= sdl,gl=on
 # Display backend: virtio-vga enables the guest VirtIO-GPU 2D path with a
@@ -223,7 +238,7 @@ FONT_H := src/kernel/drv/font_builtin.h
 UNICODE_FONT_H := src/kernel/drv/font_unicode_data.h
 GUI_APP_META := $(foreach app,$(GUI_APP_NAMES),$(wildcard src/user/bin/$(app).app src/user/bin/$(app).readme src/user/bin/$(app).seed))
 
-.PHONY: all clean help doctor uikit-test run run-hda run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify image-reset-fs new-app doom-install gameboy-install music-install
+.PHONY: all clean help doctor host-test packet-test minifs-policy-test uikit-test run run-hda run-current run-local run-gui check-project app-check app-registry fs-check fs-ls fs-repair fs-check-smoke fs-check-negative fs-check-repair smoke net-stress gui-smoke report verify release image-reset-fs new-app doom-install gameboy-install music-install
 
 # These objects are prerequisites of pattern-built user ELFs, not disposable
 # intermediates. Keeping them makes source timestamp changes rebuild reliably.
@@ -488,7 +503,7 @@ $(NSHTMLTEST_ELF): $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		src/user/bin/nshtmltest.c tools/build-netsurf-core.ps1 \
 		tools/gen-netsurf-aliases.py tools/gen-netsurf-entities.py \
 		tools/gen-netsurf-elements.py $(BUILD)/user/user.ld | $(BUILD)/user
-	powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-netsurf-core.ps1
+	powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-netsurf-core.ps1 -Compiler "$(CC)" -HostCC "$(HOST_CC)" -HostCCArgs "$(HOST_CC_ARGS)" -PythonPath "$(PYTHON)"
 
 $(NETSURF_ELF): $(NSHTMLTEST_ELF) $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		$(BUILD)/user/guiapp.o \
@@ -515,7 +530,7 @@ $(NETSURF_ELF): $(NSHTMLTEST_ELF) $(BUILD)/user/crt0.o $(BUILD)/user/libc.o \
 		$(FONT_H) \
 		src/user/ports/netsurf/buzzos_gui_plot.c \
 		src/user/ports/netsurf/buzzos_gui_plot.h $(BUILD)/user/user.ld | $(BUILD)/user
-	powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-netsurf-engine.ps1 -Link
+	powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-netsurf-engine.ps1 -Link -Compiler "$(CC)" -PythonPath "$(PYTHON)"
 
 $(NSMONKEY_ELF): $(NETSURF_ELF)
 
@@ -597,10 +612,10 @@ fs-repair: $(IMAGE)
 	$(PYTHON) tools/check_minifs.py --image "$(FS_IMAGE)" --repair --out "$(FS_REPAIR_IMAGE)"
 
 smoke: $(IMAGE)
-	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)"
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)" -MemoryMiB $(QEMU_MEMORY)
 
 net-stress: $(IMAGE)
-	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/net-stress.ps1 -Image $(IMAGE) -Qemu "$(QEMU)"
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/net-stress.ps1 -Image $(IMAGE) -Qemu "$(QEMU)" -MemoryMiB $(QEMU_MEMORY)
 
 fs-check-smoke: smoke
 	$(PYTHON) tools/check_minifs.py --image "$(FS_TEST_IMAGE)"
@@ -612,18 +627,31 @@ fs-check-repair: fs-check-smoke
 	$(PYTHON) tools/check_minifs_repair.py --image "$(FS_TEST_IMAGE)"
 
 gui-smoke: $(IMAGE)
-	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)" -PythonPath "$(PYTHON)"
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)" -PythonPath "$(PYTHON)" -MemoryMiB $(QEMU_MEMORY)
 
 # The uikit rendering kernel is freestanding integer pixel math over a
 # caller-supplied buffer, so it can be checked on the host without booting.
-uikit-test: tests/uikit_test.c $(USER_HEADERS)
-	gcc -std=c11 -O1 -w -Isrc/user/libc -o $(BUILD)/uikit_test tests/uikit_test.c
+uikit-test: tests/uikit_test.c $(USER_HEADERS) | $(BUILD)/user
+	$(HOST_CC) $(HOST_CC_ARGS) -std=c11 -O1 -w -Isrc/user/libc -o $(BUILD)/uikit_test tests/uikit_test.c
 	$(BUILD)/uikit_test
+
+packet-test: tests/net_packet_test.c src/kernel/net/packet.c src/kernel/net/packet.h src/kernel/net/net.h | $(BUILD)/user
+	$(HOST_CC) $(HOST_CC_ARGS) -std=c11 -O1 -Wall -Wextra -Isrc/kernel/net -o $(BUILD)/net_packet_test tests/net_packet_test.c src/kernel/net/packet.c
+	$(BUILD)/net_packet_test
+
+minifs-policy-test: tests/minifs_mount_policy_test.c src/kernel/fs/minifs/mount_policy.c src/kernel/fs/minifs/mount_policy.h | $(BUILD)/user
+	$(HOST_CC) $(HOST_CC_ARGS) -std=c11 -O1 -Wall -Wextra -Isrc/kernel/fs/minifs -o $(BUILD)/minifs_mount_policy_test tests/minifs_mount_policy_test.c src/kernel/fs/minifs/mount_policy.c
+	$(BUILD)/minifs_mount_policy_test
+
+host-test: uikit-test packet-test minifs-policy-test
 
 report: $(IMAGE)
 	$(PYTHON) tools/project_report.py --out "$(BUILD)/project-report.md" --print --python "$(PYTHON)" --make "$(MAKE)" --qemu "$(QEMU)"
 
-verify: check-project uikit-test smoke fs-check-smoke fs-check-negative fs-check-repair gui-smoke
+verify: check-project host-test smoke fs-check-smoke fs-check-negative fs-check-repair gui-smoke
+
+release: verify
+	$(PYTHON) tools/package_release.py --version "$(VERSION)"
 
 image-reset-fs: $(OBJDIR)/kernel.elf tools/mkbootimg.py $(LIMINE_BIOS_SYS) $(LIMINE_TOOL)
 	$(PYTHON) tools/mkbootimg.py \

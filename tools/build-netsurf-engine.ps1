@@ -4,6 +4,8 @@ param(
     [string]$BuildDir = "build/netsurf-engine",
     [string]$Output = "build/user/nsmonkey.elf",
     [string]$GuiOutput = "build/user/netsurf.elf",
+    [string]$Compiler = "clang",
+    [string]$PythonPath = "python",
     [switch]$Link
 )
 
@@ -21,7 +23,7 @@ $css = Join-Path $Workspace "libcss"
 $nsutils = Join-Path $Workspace "libnsutils"
 $zlib = Join-Path $Workspace "zlib"
 New-Item -ItemType Directory -Force $BuildDir | Out-Null
-& python tools/embed-netsurf-resources.py --netsurf $NetSurf --output (Join-Path $BuildDir "buzzos_netsurf_resources.h")
+& $PythonPath tools/embed-netsurf-resources.py --netsurf $NetSurf --output (Join-Path $BuildDir "buzzos_netsurf_resources.h")
 if ($LASTEXITCODE -ne 0) { throw "Could not embed NetSurf resources" }
 $domBindingInclude = Join-Path $BuildDir "dom/bindings/hubbub"
 New-Item -ItemType Directory -Force $domBindingInclude | Out-Null
@@ -114,7 +116,7 @@ $objects = [Collections.Generic.List[string]]::new()
 foreach ($source in $sources) {
     $input = Join-Path $NetSurf $source
     $object = Join-Path $BuildDir ($source.Replace("/", "_").Replace(".c", ".o"))
-    & clang @common -c $input -o $object
+    & $Compiler @common -c $input -o $object
     if ($LASTEXITCODE -ne 0) { throw "Compile failed: $source" }
     $objects.Add($object)
 }
@@ -127,7 +129,7 @@ $zlibSources = @(
 foreach ($source in $zlibSources) {
     $input = Join-Path $zlib $source
     $object = Join-Path $BuildDir ("zlib_" + $source.Replace(".c", ".o"))
-    & clang @common -c $input -o $object
+    & $Compiler @common -c $input -o $object
     if ($LASTEXITCODE -ne 0) { throw "Compile failed: zlib/$source" }
     $objects.Add($object)
 }
@@ -138,7 +140,7 @@ foreach ($source in @("src/user/ports/netsurf/buzzos_gui.c",
                       "src/user/ports/netsurf/buzzos_tls.c",
                       "src/user/ports/netsurf/buzzos_png.c")) {
     $object = Join-Path $BuildDir ((Split-Path $source -Leaf).Replace(".c", ".o"))
-    & clang @common -c $source -o $object
+    & $Compiler @common -c $source -o $object
     if ($LASTEXITCODE -ne 0) { throw "Compile failed: $source" }
     $guiObjects.Add($object)
 }
@@ -150,7 +152,7 @@ $lodepngFlags = $common + @(
     "-DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS",
     "-DLODEPNG_NO_COMPILE_ALLOCATORS"
 )
-& clang @lodepngFlags -c "src/user/third_party/lodepng/lodepng.c" -o $lodepngObject
+& $Compiler @lodepngFlags -c "src/user/third_party/lodepng/lodepng.c" -o $lodepngObject
 if ($LASTEXITCODE -ne 0) { throw "Compile failed: lodepng" }
 $guiObjects.Add($lodepngObject)
 
@@ -167,7 +169,7 @@ foreach ($input in Get-ChildItem (Join-Path $bearsslRoot "src") -Recurse -Filter
         "-mno-stack-arg-probe", "-O2",
         "-DNDEBUG", "-Isrc/user/libc", "-I$bearsslRoot/inc", "-I$bearsslRoot/src"
     )
-    & clang @bearsslFlags -c $input.FullName -o $object
+    & $Compiler @bearsslFlags -c $input.FullName -o $object
     if ($LASTEXITCODE -ne 0) { throw "Compile failed: BearSSL/$relative" }
     $bearsslObjects.Add($object)
 }

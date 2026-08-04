@@ -18,13 +18,13 @@ git status --short --branch
 推荐先跑 doctor：
 
 ```powershell
-make doctor QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make doctor QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 它会检查 Python、Make、PowerShell、NASM、LLVM 工具链和 QEMU 路径。Windows 上如果 `make` 不在 PATH，可以直接用完整路径：
 
 ```powershell
-& "C:\Users\flash\AppData\Local\Microsoft\WinGet\Links\make.exe" doctor QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+& "C:\Users\flash\AppData\Local\Microsoft\WinGet\Links\make.exe" doctor QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 ## 3. 构建镜像
@@ -44,7 +44,7 @@ make image-reset-fs
 日常手动测试推荐：
 
 ```powershell
-make run-local QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make run-local QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 `run-local` 会打开可见 QEMU 窗口，并把串口日志写到 `build/serial-live.log`，不会让终端串口占住键盘输入。看到下面提示后，点击 QEMU 窗口再输入命令：
@@ -70,7 +70,7 @@ Get-Process | Where-Object { $_.ProcessName -like "qemu*" } | Stop-Process
 想马上看图形界面：
 
 ```powershell
-make run-gui QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make run-gui QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 这个目标会先启动 BuzzOS，再自动输入 `gui`。桌面会打开 `Applications`、`Terminal` 和 `System` 窗口；`Applications` 里可以启动 TextEdit、Paint 和 Calculator。
@@ -99,9 +99,9 @@ FAT16 boot 分区里有 `kernel.elf`、`limine.conf` 和 `limine-bios.sys`。内
 
 ```powershell
 make check-project
-make smoke QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
-make gui-smoke QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
-make verify QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make smoke QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
+make gui-smoke QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
+make verify QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 make report
 ```
 
@@ -115,7 +115,7 @@ make report
 
 `build/buzzos.img` 被占用
 
-QEMU 还在运行。关掉窗口或结束 `qemu-system-i386` 进程。
+QEMU 还在运行。关掉窗口或结束 `qemu-system-x86_64` 进程。
 
 QEMU 有启动日志但输入不了
 

@@ -7,7 +7,9 @@ param(
     [int]$Workers = 6,
     [int]$Rounds = 20,
     [int]$BodyBytes = 6144,
-    [int]$TimeoutSeconds = 180
+    [int]$TimeoutSeconds = 180,
+    [ValidateRange(64, 4096)]
+    [int]$MemoryMiB = 256
 )
 
 $ErrorActionPreference = "Stop"
@@ -175,7 +177,7 @@ while (!(Test-Path -LiteralPath $readyPath)) {
 $qemuArgs = @(
     "-accel", $QemuAccel,
     "-cpu", $QemuCpu,
-    "-m", "256",
+    "-m", "$MemoryMiB",
     "-drive", "format=raw,file=$TestImage",
     "-serial", "file:$SerialLog",
     "-display", "none",

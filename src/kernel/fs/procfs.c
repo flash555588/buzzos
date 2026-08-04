@@ -124,7 +124,7 @@ static int proc_about_text(char *buf, int cap) {
     append_text(buf, &pos, cap, "kind native-x86_64-posix-os\n");
     append_text(buf, &pos, cap, "status experimental\n");
     append_text(buf, &pos, cap, "arch x86_64\n");
-    append_text(buf, &pos, cap, "mode protected32\n");
+    append_text(buf, &pos, cap, "mode long64\n");
     append_text(buf, &pos, cap, "entrypoints shell,gui,procfs,fs,apps,report\n");
     append_text(buf, &pos, cap, "docs README.md,README.en.md,docs/project-status.md\n");
     append_text(buf, &pos, cap, "log CHANGELOG.md\n");
@@ -207,13 +207,39 @@ static int proc_interfaces_text(char *buf, int cap) {
 
 static int proc_fs_text(char *buf, int cap) {
     struct fs_info fs;
+    struct minifs_mount_status mount_status;
     int pos = 0;
     int fs_ok = minifs_info(&fs) == 0;
+    int status_ok = minifs_get_mount_status(&mount_status) == 0;
 
     append_text(buf, &pos, cap, "mount /fs\n");
     append_text(buf, &pos, cap, "driver minifs\n");
     append_text(buf, &pos, cap, "status ");
     append_text(buf, &pos, cap, fs_ok ? "ok" : "unavailable");
+    append_char(buf, &pos, cap, '\n');
+    append_text(buf, &pos, cap, "mounted ");
+    append_text(buf, &pos, cap,
+                status_ok && mount_status.mounted ? "yes" : "no");
+    append_char(buf, &pos, cap, '\n');
+    append_text(buf, &pos, cap, "dirty ");
+    append_text(buf, &pos, cap,
+                status_ok && mount_status.dirty ? "yes" : "no");
+    append_char(buf, &pos, cap, '\n');
+    append_text(buf, &pos, cap, "corrupt ");
+    append_text(buf, &pos, cap,
+                status_ok && mount_status.corrupt ? "yes" : "no");
+    append_char(buf, &pos, cap, '\n');
+    append_text(buf, &pos, cap, "recovery_required ");
+    append_text(buf, &pos, cap,
+                status_ok && mount_status.recovery_required ? "yes" : "no");
+    append_char(buf, &pos, cap, '\n');
+    append_text(buf, &pos, cap, "journal ");
+    append_text(buf, &pos, cap,
+                status_ok && mount_status.journal_enabled ? "enabled" : "disabled");
+    append_char(buf, &pos, cap, '\n');
+    append_text(buf, &pos, cap, "last_error ");
+    append_text(buf, &pos, cap,
+                status_ok ? minifs_error_text(mount_status.last_error) : "status");
     append_char(buf, &pos, cap, '\n');
     append_text(buf, &pos, cap, "lba_start ");
     append_u32(buf, &pos, cap, MINIFS_LBA_START);

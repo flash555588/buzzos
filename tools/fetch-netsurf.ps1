@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $revision = "a471a0d44274ec57fee5e5f30ae59fbd2ad02656"
-$repository = "git://git.netsurf-browser.org/netsurf.git"
+$repository = "https://git.netsurf-browser.org/netsurf.git"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $patchDir = Join-Path $repoRoot "third_party/netsurf-patches"
 
@@ -85,7 +85,7 @@ New-Item -ItemType Directory -Force $workspace | Out-Null
 foreach ($name in $libraries.Keys) {
     $path = Join-Path $workspace $name
     Ensure-GitCheckout -Path $path `
-        -Repository "git://git.netsurf-browser.org/$name.git" `
+        -Repository "https://git.netsurf-browser.org/$name.git" `
         -Revision $libraries[$name] -Label $name
 }
 

@@ -389,7 +389,7 @@ int virtio_gpu_3d_resource_upload(uint32_t id, int x, int y, int w, int h) {
 
 /* Pass a user-encoded command stream to the host.  The dwords are copied once
  * into a staging buffer so the guest cannot mutate them after validation, and
- * because SUBMIT_3D wants the header and payload contiguous.  i386 is
+ * because SUBMIT_3D wants the header and payload contiguous.  x86_64 is
  * little-endian and the wire format is little-endian, so the payload is a
  * straight copy rather than a byte-by-byte serialize. */
 int virtio_gpu_3d_submit(const uint32_t *dwords, uint32_t count) {

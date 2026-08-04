@@ -35,7 +35,7 @@ static void exec_unlock(void) {
     __sync_lock_release(&exec_syscall_lock);
 }
 
-static void copy_user_cstr_256(char *dst, const char *src) {
+static void copy_kernel_cstr_256(char *dst, const char *src) {
     int i = 0;
     if (!src)
         src = "";
@@ -48,8 +48,7 @@ static void copy_user_cstr_256(char *dst, const char *src) {
 
 static int spawn_proc_common_locked(const char *path, int flags, int argc, const char *const argv[]) {
     struct stat st;
-    if (vfs_stat(path, &st) < 0 || st.st_size < 52 ||
-        st.st_size > USER_LOAD_END - USER_LOAD_START)
+    if (vfs_stat(path, &st) < 0 || st.st_size < 52)
         return -1;
 
     int fd = vfs_open_flags(path, O_RDONLY);
@@ -57,7 +56,7 @@ static int spawn_proc_common_locked(const char *path, int flags, int argc, const
         return -1;
 
     const char *name = path;
-    for (int i = 0; path && path[i]; i++)
+    for (int i = 0; path[i]; i++)
         if (path[i] == '/')
             name = path + i + 1;
     int silent = (flags & 1u) ? 1 : 0;
@@ -90,12 +89,11 @@ intptr_t sys_exit(uintptr_t code, uintptr_t b, uintptr_t c, uintptr_t d, uintptr
 
 intptr_t sys_spawn_proc(uintptr_t path_arg, uintptr_t flags, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    const char *path = (const char *)(uintptr_t)path_arg;
-    if (!user_string_ok(path))
-        return -1;
-
     exec_lock();
-    copy_user_cstr_256(exec_path_buf, path);
+    if (copy_string_from_user(exec_path_buf, sizeof(exec_path_buf), path_arg) < 0) {
+        exec_unlock();
+        return -1;
+    }
     exec_argv_ptrs[0] = exec_path_buf;
     int pid = spawn_proc_common_locked(exec_path_buf, (int)flags, 1, exec_argv_ptrs);
     exec_unlock();
@@ -105,31 +103,34 @@ intptr_t sys_spawn_proc(uintptr_t path_arg, uintptr_t flags, uintptr_t c, uintpt
 intptr_t sys_spawn_proc_args(uintptr_t path_arg, uintptr_t argv_arg, uintptr_t argc_arg,
                         uintptr_t flags, uintptr_t e) {
     (void)e;
-    const char *path = (const char *)(uintptr_t)path_arg;
-    const char *const *user_argv = (const char *const *)(uintptr_t)argv_arg;
     int argc = (int)argc_arg;
-    if (!user_string_ok(path))
-        return -1;
     if (argc < 0)
         return -1;
     if (argc > 15)
         argc = 15;
-    if (argc > 0 && !user_range_ok(argv_arg, (size_t)argc * sizeof(char *)))
-        return -1;
-
     exec_lock();
-    copy_user_cstr_256(exec_path_buf, path);
+    if (copy_string_from_user(exec_path_buf, sizeof(exec_path_buf), path_arg) < 0) {
+        exec_unlock();
+        return -1;
+    }
 
     for (int i = 0; i < argc; i++) {
-        if (user_argv && !user_string_ok(user_argv[i])) {
+        uintptr_t user_arg = 0;
+        if (copy_from_user(&user_arg,
+                           argv_arg + (size_t)i * sizeof(user_arg),
+                           sizeof(user_arg)) < 0 ||
+            (user_arg && copy_string_from_user(exec_argv_storage[i],
+                                               sizeof(exec_argv_storage[i]),
+                                               user_arg) < 0)) {
             exec_unlock();
             return -1;
         }
-        copy_user_cstr_256(exec_argv_storage[i], user_argv ? user_argv[i] : "");
+        if (!user_arg)
+            exec_argv_storage[i][0] = 0;
         exec_argv_ptrs[i] = exec_argv_storage[i];
     }
     if (argc == 0) {
-        copy_user_cstr_256(exec_argv_storage[0], exec_path_buf);
+        copy_kernel_cstr_256(exec_argv_storage[0], exec_path_buf);
         exec_argv_ptrs[0] = exec_argv_storage[0];
         argc = 1;
     }
@@ -140,9 +141,14 @@ intptr_t sys_spawn_proc_args(uintptr_t path_arg, uintptr_t argv_arg, uintptr_t a
 
 intptr_t sys_ps(uintptr_t buf, uintptr_t size, uintptr_t show_dead, uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
-    if (!user_range_writable(buf, size))
+    char bounce[4096];
+    if (size == 0)
         return -1;
-    return task_dump_text((char *)(uintptr_t)buf, (int)size, (int)show_dead);
+    size_t cap = size < sizeof(bounce) ? size : sizeof(bounce);
+    int ret = task_dump_text(bounce, (int)cap, (int)show_dead);
+    if (ret < 0 || copy_to_user(buf, bounce, (size_t)ret + 1u) < 0)
+        return -1;
+    return ret;
 }
 
 intptr_t sys_reboot(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
@@ -291,7 +297,11 @@ intptr_t sys_spawn(uintptr_t func_addr, uintptr_t b, uintptr_t c, uintptr_t d, u
         return -1;
     }
     user_stack -= sizeof(uintptr_t);
-    *(uintptr_t *)user_stack = return_addr;
+    if (copy_to_user(user_stack, &return_addr, sizeof(return_addr)) < 0) {
+        process_thread_slots[owner][(unsigned)slot / 64u] &=
+            ~(UINT64_C(1) << ((unsigned)slot % 64u));
+        return -1;
+    }
 
     uint32_t irq_flags = irq_save();
     int id = task_create(thread_trampoline, "user_thread");
@@ -363,21 +373,30 @@ intptr_t sys_gettid(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_
 
 intptr_t sys_chdir(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_string_ok((const char *)(uintptr_t)path))
+    char kernel_path[256];
+    if (copy_string_from_user(kernel_path, sizeof(kernel_path), path) < 0)
         return -1;
-    return vfs_chdir((const char *)(uintptr_t)path);
+    return vfs_chdir(kernel_path);
 }
 
 intptr_t sys_getcwd(uintptr_t buf, uintptr_t size, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    if (!user_range_writable(buf, size))
+    char cwd[128];
+    if (size == 0)
         return -1;
-    return vfs_getcwd((char *)(uintptr_t)buf, (size_t)size);
+    size_t cap = size < sizeof(cwd) ? size : sizeof(cwd);
+    int ret = vfs_getcwd(cwd, cap);
+    if (ret < 0 || copy_to_user(buf, cwd, (size_t)ret + 1u) < 0)
+        return -1;
+    return ret;
 }
 
 intptr_t sys_waitpid(uintptr_t pid, uintptr_t status, uintptr_t options, uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
-    if (status && !user_range_writable(status, sizeof(int)))
+    int kernel_status = 0;
+    int ret = task_wait_pid((int)pid, status ? &kernel_status : 0, (int)options);
+    if (ret > 0 && status &&
+        copy_to_user(status, &kernel_status, sizeof(kernel_status)) < 0)
         return -1;
-    return task_wait_pid((int)pid, (int *)(uintptr_t)status, (int)options);
+    return ret;
 }

@@ -334,12 +334,34 @@ int paging_copy_to_user_space(uintptr_t cr3, uintptr_t va,
     while (done < size) {
         uintptr_t cur = va + done;
         pte_t *pte;
-        if (!pte_for_user(cr3, cur, 0, &pte)) { paging_unlock(); return -1; }
+        if (!pte_for_user(cr3, cur, 1, &pte)) { paging_unlock(); return -1; }
         size_t offset = (size_t)(cur & (PAGE_SIZE - 1u));
         size_t chunk = PAGE_SIZE - offset;
         if (chunk > size - done) chunk = size - done;
         uint8_t *dst = (uint8_t *)entry_address(*pte) + offset;
         for (size_t i = 0; i < chunk; i++) dst[i] = src[done + i];
+        done += chunk;
+    }
+    paging_unlock();
+    return 0;
+}
+
+int paging_copy_from_user_space(uintptr_t cr3, void *dst_ptr, uintptr_t va,
+                                size_t size) {
+    uintptr_t end;
+    if (!dst_ptr || !user_bounds(va, size, &end)) return size ? -1 : 0;
+    uint8_t *dst = (uint8_t *)dst_ptr;
+    paging_lock();
+    size_t done = 0;
+    while (done < size) {
+        uintptr_t cur = va + done;
+        pte_t *pte;
+        if (!pte_for_user(cr3, cur, 0, &pte)) { paging_unlock(); return -1; }
+        size_t offset = (size_t)(cur & (PAGE_SIZE - 1u));
+        size_t chunk = PAGE_SIZE - offset;
+        if (chunk > size - done) chunk = size - done;
+        const uint8_t *src = (const uint8_t *)entry_address(*pte) + offset;
+        for (size_t i = 0; i < chunk; i++) dst[done + i] = src[i];
         done += chunk;
     }
     paging_unlock();
@@ -354,7 +376,7 @@ int paging_zero_user_space(uintptr_t cr3, uintptr_t va, size_t size) {
     while (done < size) {
         uintptr_t cur = va + done;
         pte_t *pte;
-        if (!pte_for_user(cr3, cur, 0, &pte)) { paging_unlock(); return -1; }
+        if (!pte_for_user(cr3, cur, 1, &pte)) { paging_unlock(); return -1; }
         size_t offset = (size_t)(cur & (PAGE_SIZE - 1u));
         size_t chunk = PAGE_SIZE - offset;
         if (chunk > size - done) chunk = size - done;

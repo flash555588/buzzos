@@ -1,4 +1,4 @@
-bits 32
+bits 64
 global _start
 
 %define SYS_EXIT  1
@@ -6,40 +6,40 @@ global _start
 
 section .text
 _start:
-    push ebp
-    mov ebp, esp
-    sub esp, 16
+    push rbp
+    mov rbp, rsp
+    sub rsp, 16
 
-    mov dword [ebp - 4], 6
-    mov dword [ebp - 8], 7
-    mov eax, [ebp - 4]
-    imul eax, [ebp - 8]
+    mov dword [rbp - 4], 6
+    mov dword [rbp - 8], 7
+    mov eax, [rbp - 4]
+    imul eax, [rbp - 8]
     cmp eax, 42
     setne al
     movzx eax, al
     test eax, eax
     jne .fail
 
-    lea esi, [scratch]
-    mov dword [esi + 4], 42
-    cmp dword [esi + 4], 42
+    lea rsi, [scratch]
+    mov dword [rsi + 4], 42
+    cmp dword [rsi + 4], 42
     jne .fail
 
     mov eax, SYS_WRITE
-    mov ebx, 1
-    mov ecx, message
+    mov edi, 1
+    mov rsi, message
     mov edx, message_len
     int 0x80
 
     leave
     mov eax, SYS_EXIT
-    mov ebx, 7
+    mov edi, 7
     int 0x80
 
 .fail:
     leave
     mov eax, SYS_EXIT
-    mov ebx, 99
+    mov edi, 99
     int 0x80
 
 section .rodata

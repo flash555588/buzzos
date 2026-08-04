@@ -13,7 +13,7 @@ enum {
 struct futex_waiter {
     int used;
     int task_id;
-    uint32_t addr;
+    uintptr_t addr;
     int woken;
 };
 
@@ -48,10 +48,10 @@ static void append_u32_dec(char *buf, int *pos, int cap, uint32_t value) {
         append_char(buf, pos, cap, tmp[--n]);
 }
 
-static void append_u32_hex(char *buf, int *pos, int cap, uint32_t value) {
+static void append_uintptr_hex(char *buf, int *pos, int cap, uintptr_t value) {
     static const char digits[] = "0123456789ABCDEF";
     append_text(buf, pos, cap, "0x");
-    for (int shift = 28; shift >= 0; shift -= 4)
+    for (int shift = (int)(sizeof(value) * 8u) - 4; shift >= 0; shift -= 4)
         append_char(buf, pos, cap, digits[(value >> shift) & 0xFu]);
 }
 
@@ -88,7 +88,7 @@ int futex_status_text(char *buf, int cap) {
         append_char(buf, &pos, cap, ' ');
         append_u32_dec(buf, &pos, cap, (uint32_t)futex_waiters[i].task_id);
         append_char(buf, &pos, cap, ' ');
-        append_u32_hex(buf, &pos, cap, futex_waiters[i].addr);
+        append_uintptr_hex(buf, &pos, cap, futex_waiters[i].addr);
         append_char(buf, &pos, cap, ' ');
         append_u32_dec(buf, &pos, cap, (uint32_t)futex_waiters[i].woken);
         append_char(buf, &pos, cap, '\n');
@@ -124,16 +124,22 @@ static int futex_deadline_reached(uint32_t deadline) {
 
 intptr_t sys_pipe(uintptr_t fds_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_range_writable(fds_arg, sizeof(int) * 2))
+    int fds[2];
+    if (vfs_pipe(fds) < 0)
         return -1;
-    return vfs_pipe((int *)(uintptr_t)fds_arg);
+    if (copy_to_user(fds_arg, fds, sizeof(fds)) < 0) {
+        (void)vfs_close(fds[0]);
+        (void)vfs_close(fds[1]);
+        return -1;
+    }
+    return 0;
 }
 
 static int futex_wait_common(uintptr_t addr_arg, uint32_t expected,
                              uint32_t timeout_ms, int use_timeout) {
-    if (!user_range_ok(addr_arg, sizeof(int)))
+    int value;
+    if (copy_from_user(&value, addr_arg, sizeof(value)) < 0)
         return -1;
-    volatile int *addr = (volatile int *)(uintptr_t)addr_arg;
     uint32_t deadline = 0;
     if (use_timeout) {
         uint32_t ticks = futex_ms_to_ticks(timeout_ms);
@@ -145,7 +151,8 @@ static int futex_wait_common(uintptr_t addr_arg, uint32_t expected,
     int slot = -1;
     int timed_out = 0;
     futex_enter();
-    if (*addr != (int)expected) {
+    if (copy_from_user(&value, addr_arg, sizeof(value)) < 0 ||
+        value != (int)expected) {
         futex_leave();
         return 0;
     }
@@ -166,7 +173,10 @@ static int futex_wait_common(uintptr_t addr_arg, uint32_t expected,
     }
 
     for (;;) {
-        if (futex_waiters[slot].woken || *addr != (int)expected)
+        if (futex_waiters[slot].woken)
+            break;
+        if (copy_from_user(&value, addr_arg, sizeof(value)) < 0 ||
+            value != (int)expected)
             break;
         if (use_timeout && futex_deadline_reached(deadline)) {
             timed_out = 1;
@@ -196,7 +206,8 @@ intptr_t sys_futex_wait_timeout(uintptr_t addr_arg, uintptr_t expected, uintptr_
 
 intptr_t sys_futex_wake(uintptr_t addr_arg, uintptr_t count, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)c; (void)d; (void)e;
-    if (!user_range_ok(addr_arg, sizeof(int)))
+    int value;
+    if (copy_from_user(&value, addr_arg, sizeof(value)) < 0)
         return -1;
     int woke = 0;
     futex_enter();

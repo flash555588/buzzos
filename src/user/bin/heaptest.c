@@ -15,6 +15,8 @@ int main(void) {
     uint8_t *first = malloc(FIRST_SIZE);
     if (!first)
         return fail("malloc");
+    if (((uintptr_t)first & 15u) != 0)
+        return fail("malloc-alignment");
     for (int i = 0; i < FIRST_SIZE; i++)
         first[i] = (uint8_t)(i * 37 + 11);
 

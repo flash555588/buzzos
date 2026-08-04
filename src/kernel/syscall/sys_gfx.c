@@ -48,24 +48,26 @@ static int user_owns_display(void) {
 intptr_t sys_font_glyph(uintptr_t codepoint, uintptr_t out_arg, uintptr_t cap,
                    uintptr_t d, uintptr_t e) {
     (void)d; (void)e;
-    if (cap < UFONT_BYTES || !user_range_writable(out_arg, UFONT_BYTES))
+    uint8_t glyph[UFONT_BYTES];
+    if (cap < UFONT_BYTES)
         return -1;
-    return font_unicode_lookup(codepoint, (uint8_t *)(uintptr_t)out_arg);
+    int ret = font_unicode_lookup(codepoint, glyph);
+    if (ret < 0)
+        return ret;
+    return copy_to_user(out_arg, glyph, sizeof(glyph));
 }
 
 intptr_t sys_gfx_info(uintptr_t out_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_range_writable(out_arg, sizeof(struct syscall_gfx_info)))
-        return -1;
-    struct syscall_gfx_info *out = (struct syscall_gfx_info *)(uintptr_t)out_arg;
+    struct syscall_gfx_info out;
     struct gfx_info info;
     fb_get_info(&info);
-    out->width = info.width;
-    out->height = info.height;
-    out->pitch = info.pitch;
-    out->bpp = info.bpp;
-    out->backend = info.backend;
-    return 0;
+    out.width = info.width;
+    out.height = info.height;
+    out.pitch = info.pitch;
+    out.bpp = info.bpp;
+    out.backend = info.backend;
+    return copy_to_user(out_arg, &out, sizeof(out));
 }
 
 intptr_t sys_gfx_clear(uintptr_t color, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
@@ -89,11 +91,12 @@ intptr_t sys_gfx_fill_rect(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h, u
 }
 
 intptr_t sys_gfx_text(uintptr_t x, uintptr_t y, uintptr_t s_arg, uintptr_t fg, uintptr_t bg) {
-    const char *s = (const char *)(uintptr_t)s_arg;
-    if (!user_owns_display() || !user_string_ok(s))
+    char text[4096];
+    if (!user_owns_display() ||
+        copy_string_from_user(text, sizeof(text), s_arg) < 0)
         return -1;
     /* bg is 0xFFFFFFFF (-1 as uint32) for transparent background. */
-    return fb_text((int)x, (int)y, s, fg, (int)bg);
+    return fb_text((int)x, (int)y, text, fg, (int)bg);
 }
 
 intptr_t sys_fb_blit(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h, uintptr_t pixels_arg) {
@@ -109,11 +112,17 @@ intptr_t sys_fb_blit(uintptr_t x, uintptr_t y, uintptr_t w, uintptr_t h, uintptr
         return -1;
     if (x + w > info.width || y + h > info.height)
         return -1;
-    uint64_t bytes = (uint64_t)w * (uint64_t)h * 4u;
-    if (bytes > 0xFFFFFFFFu || !user_range_ok(pixels_arg, (uint32_t)bytes))
+    uint32_t row[2048];
+    if (w > sizeof(row) / sizeof(row[0]))
         return -1;
-    const uint32_t *pixels = (const uint32_t *)(uintptr_t)pixels_arg;
-    return fb_blit32((int)x, (int)y, (int)w, (int)h, pixels);
+    for (size_t line = 0; line < h; line++) {
+        size_t offset = line * (size_t)w * sizeof(uint32_t);
+        if (copy_from_user(row, pixels_arg + offset,
+                           (size_t)w * sizeof(uint32_t)) < 0 ||
+            fb_blit32((int)x, (int)(y + line), (int)w, 1, row) < 0)
+            return -1;
+    }
+    return 0;
 }
 
 intptr_t sys_fb_blit_stride(uintptr_t x, uintptr_t y, uintptr_t packed_wh,
@@ -129,21 +138,25 @@ intptr_t sys_fb_blit_stride(uintptr_t x, uintptr_t y, uintptr_t packed_wh,
         x + w > info.width || y + h > info.height)
         return -1;
     /* stride is in pixels; buffer is 32bpp. */
-    uint64_t bytes = ((uint64_t)(h - 1u) * (uint64_t)stride + (uint64_t)w) * 4u;
-    if (bytes > 0xFFFFFFFFu || !user_range_ok(pixels_arg, (uint32_t)bytes))
+    uint32_t row[2048];
+    if (w > sizeof(row) / sizeof(row[0]) ||
+        (uint64_t)(h - 1u) * stride + w > SIZE_MAX / sizeof(uint32_t))
         return -1;
-    const uint32_t *pixels = (const uint32_t *)(uintptr_t)pixels_arg;
-    return fb_blit32_stride((int)x, (int)y, (int)w, (int)h,
-                            pixels, (int)stride);
+    for (uint32_t line = 0; line < h; line++) {
+        size_t offset = (size_t)line * (size_t)stride * sizeof(uint32_t);
+        if (copy_from_user(row, pixels_arg + offset,
+                           (size_t)w * sizeof(uint32_t)) < 0 ||
+            fb_blit32((int)x, (int)(y + line), (int)w, 1, row) < 0)
+            return -1;
+    }
+    return 0;
 }
 
 intptr_t sys_mouse_get(uintptr_t out_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_range_writable(out_arg, sizeof(struct mouse_state)))
-        return -1;
-    struct mouse_state *out = (struct mouse_state *)(uintptr_t)out_arg;
-    mouse_get_state(out);
-    return 0;
+    struct mouse_state out;
+    mouse_get_state(&out);
+    return copy_to_user(out_arg, &out, sizeof(out));
 }
 
 intptr_t sys_gfx_acquire(uintptr_t a, uintptr_t b, uintptr_t c,
@@ -182,20 +195,22 @@ intptr_t sys_gfx_set_mode(uintptr_t width, uintptr_t height, uintptr_t c,
 intptr_t sys_gfx_map_surface(uintptr_t out_arg, uintptr_t b, uintptr_t c,
                         uintptr_t d, uintptr_t e) {
     (void)b; (void)c; (void)d; (void)e;
-    if (!user_owns_display() ||
-        !user_range_writable(out_arg, sizeof(struct syscall_gfx_surface)))
+    if (!user_owns_display())
         return -1;
     struct fb_scanout_map map;
     if (fb_map_scanout_user(task_get_pid(), &map) < 0)
         return -1;
-    struct syscall_gfx_surface *out =
-        (struct syscall_gfx_surface *)(uintptr_t)out_arg;
-    out->address = map.user_va;
-    out->width = map.width;
-    out->height = map.height;
-    out->stride_pixels = map.stride_pixels;
-    out->bytes = map.bytes;
-    out->backend = map.backend;
+    struct syscall_gfx_surface out;
+    out.address = map.user_va;
+    out.width = map.width;
+    out.height = map.height;
+    out.stride_pixels = map.stride_pixels;
+    out.bytes = map.bytes;
+    out.backend = map.backend;
+    if (copy_to_user(out_arg, &out, sizeof(out)) < 0) {
+        (void)fb_unmap_scanout_user(task_get_pid());
+        return -1;
+    }
     return 0;
 }
 
@@ -221,11 +236,12 @@ intptr_t sys_gfx_cursor_define(uintptr_t pixels_arg, uintptr_t packed_wh,
     if (!user_owns_display() || !width || !height || width > 64u ||
         height > 64u)
         return -1;
+    uint32_t pixels[64u * 64u];
     bytes = width * height * sizeof(uint32_t);
-    if (!user_range_ok(pixels_arg, bytes))
+    if (copy_from_user(pixels, pixels_arg, bytes) < 0)
         return -1;
     return virtio_gpu_cursor_define(
-        (const uint32_t *)(uintptr_t)pixels_arg, width, height,
+        pixels, width, height,
         hot_x, hot_y, x, y);
 }
 

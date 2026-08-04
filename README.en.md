@@ -1,10 +1,10 @@
 # BuzzOS
 
-BuzzOS is an i386 POSIX-like operating system designed for learning and experimentation. It has evolved into a complete small system that boots to a user-mode shell, runs multiple tasks, mounts persistent file systems, connects to networks, and displays a desktop via the Limine framebuffer.
+BuzzOS is an x86_64 POSIX-like operating system designed for learning and experimentation. It has evolved into a complete small system that boots to a user-mode shell, runs multiple tasks, mounts persistent file systems, connects to networks, and displays a desktop via the Limine framebuffer.
 
 Chinese version: [README.zh.md](README.zh.md)
 
-Related documentation: [CHANGELOG.md](CHANGELOG.md), [Local Boot Guide](docs/boot-guide.md), [User Guide](docs/user-guide.md), [Project Status](docs/project-status.md), [User GUI App Guide](docs/user-gui.md). Run `make report` to generate a local verification report at `build/project-report.md`.
+Related documentation: [CHANGELOG.md](CHANGELOG.md), [Local Boot Guide](docs/boot-guide.md), [Build Dependencies](docs/dependencies.md), [User Guide](docs/user-guide.md), [Project Status](docs/project-status.md), [User GUI App Guide](docs/user-gui.md). Run `make report` to generate a local verification report at `build/project-report.md`.
 
 <table>
   <tr>
@@ -20,7 +20,7 @@ Related documentation: [CHANGELOG.md](CHANGELOG.md), [Local Boot Guide](docs/boo
 ## Current Status
 
 - **Boot chain**: Limine BIOS + multiboot2, requesting `1280x800x32` framebuffer by default.
-- **Kernel**: GDT, IDT, exception handling, PIC, PIT, serial port, PS/2 keyboard & mouse, paging, E820/PMM, ELF32 loader.
+- **Kernel**: GDT, IDT, exception handling, PIC, PIT, serial port, PS/2 keyboard & mouse, four-level paging, E820/PMM, ELF64 loader.
 - **User mode**: `/bin/sh` shell, `nano`, `basm`, `cat`, `echo`, `gui`.
 - **Desktop**: User-mode multi-window desktop with support for window activation (raise to top), dragging, resizing, minimize, maximize, close, and scrollbars.
 - **Graphics acceleration**: virgl composites per-window GPU surfaces, imports normal app SHM without a desktop CPU copy, and offers a validated GPU Canvas for rounded rectangles and UTF-8 text; the desktop sleeps on events while idle.
@@ -44,7 +44,7 @@ Required tools:
 | `llvm-objcopy` | Generate auxiliary binary artifacts |
 | `python` | Generate initrd, app registry, disk images |
 | `powershell` | Run scripts on Windows |
-| `qemu-system-i386` | Run BuzzOS |
+| `qemu-system-x86_64` | Run BuzzOS |
 | Limine (vendored) | In-repo `third_party/limine/` for BIOS boot stages |
 
 Build uses the vendored Limine package (v12.5.2) by default:
@@ -65,7 +65,7 @@ make help
 Check your local environment:
 
 ```sh
-make doctor QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make doctor QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 This target runs `tools/doctor.py`; pass `--soft` to that script when you only
@@ -81,13 +81,13 @@ make run
 Run with a visible QEMU window and serial logs written to `build/serial-live.log`:
 
 ```sh
-make run-local QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make run-local QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Boot directly into the desktop:
 
 ```sh
-make run-gui QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make run-gui QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Rebuild the image and clear `/fs`:
@@ -279,19 +279,19 @@ make check-project
 Serial smoke test:
 
 ```sh
-make smoke QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make smoke QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 GUI smoke test:
 
 ```sh
-make gui-smoke QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make gui-smoke QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Full verification:
 
 ```sh
-make verify QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make verify QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 ## Design Boundaries
@@ -307,7 +307,7 @@ BuzzOS remains a teaching and experimentation system, not a complete Unix:
 ## Code Entry Points
 
 - Kernel entry: [src/kernel/core/kernel.c](src/kernel/core/kernel.c)
-- Multiboot2 entry: [src/kernel/arch/i386/mb2_entry.asm](src/kernel/arch/i386/mb2_entry.asm)
+- Multiboot2 entry: [src/kernel/arch/x86_64/mb2_entry.asm](src/kernel/arch/x86_64/mb2_entry.asm)
 - Framebuffer driver: [src/kernel/drv/fb.c](src/kernel/drv/fb.c)
 - Scheduler/processes: [src/kernel/sched/task.c](src/kernel/sched/task.c)
 - Syscalls: [src/kernel/syscall/syscall.c](src/kernel/syscall/syscall.c)

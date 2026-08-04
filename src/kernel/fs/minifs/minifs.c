@@ -1,4 +1,5 @@
 #include "minifs.h"
+#include "mount_policy.h"
 #include "block/ata.h"
 #include "block/cache.h"
 #include "serial.h"
@@ -78,6 +79,9 @@ static struct minifs_inode inodes[MINIFS_INODES];
 static uint8_t block_used[MINIFS_BLOCKS];
 static int alloc_cursor;
 static int mounted;
+static int mount_corrupt;
+static int mount_dirty;
+static enum minifs_error mount_last_error;
 static volatile int minifs_locked;
 
 static void minifs_lock(void) {
@@ -272,7 +276,23 @@ static void free_inode_blocks(int ino) {
     }
     inodes[ino].size = 0;
     alloc_cursor = 0;
-    flush_bitmap();
+}
+
+/* Reclamation must be durable before unlink/truncate reports success.  In
+ * particular, never leave an on-disk inode pointing at a block whose bitmap
+ * entry has already reached the device as free.  A journal is still needed
+ * for full crash atomicity, but this ordered commit keeps completed metadata
+ * operations self-consistent and exposes an incomplete flush through /proc/fs. */
+static int commit_reclaimed_inode(int ino) {
+    mount_dirty = 1;
+    if (flush_inode(ino) < 0 || flush_bitmap() < 0 ||
+        block_cache_flush() < 0) {
+        mount_last_error = MINIFS_ERROR_METADATA;
+        return -1;
+    }
+    mount_dirty = 0;
+    mount_last_error = MINIFS_ERROR_NONE;
+    return 0;
 }
 
 static int block_for_logical(int ino, int logical) {
@@ -606,7 +626,7 @@ static int resolve_parent(const char *path, int *parent_out, const char **leaf, 
     return 0;
 }
 
-static void format_fs(void) {
+static int format_fs(void) {
     zero(&sb, sizeof(sb));
     zero(inodes, sizeof(inodes));
     zero(block_used, sizeof(block_used));
@@ -618,44 +638,70 @@ static void format_fs(void) {
     inodes[MINIFS_ROOT_INO].used = 1;
     inodes[MINIFS_ROOT_INO].type = MINIFS_DIR;
     inodes[MINIFS_ROOT_INO].parent = MINIFS_ROOT_INO;
-    flush_super();
-    for (int i = 0; i < MINIFS_INODES; i++)
-        flush_inode(i);
-    flush_bitmap();
+    if (flush_super() < 0)
+        return -1;
+    for (int i = 1; i < MINIFS_INODES; i++) {
+        if (flush_inode(i) < 0)
+            return -1;
+    }
+    if (flush_bitmap() < 0 || block_cache_flush() < 0)
+        return -1;
+    return 0;
 }
 
 int minifs_mount(void) {
     uint8_t sector[512];
     minifs_locked = 0;
     mounted = 0;
+    mount_corrupt = 0;
+    mount_dirty = 0;
+    mount_last_error = MINIFS_ERROR_NONE;
     alloc_cursor = 0;
     minifs_lock();
     if (ata_init() < 0)
     {
+        mount_last_error = MINIFS_ERROR_DEVICE;
         minifs_unlock();
         return -1;
     }
     block_cache_init();
     if (block_read_sector(MINIFS_LBA_START, sector) < 0)
     {
+        mount_last_error = MINIFS_ERROR_READ;
         minifs_unlock();
         return -1;
     }
     sb = *(struct minifs_super *)sector;
-    if (sb.magic == MINIFS_MAGIC && sb.inode_count == MINIFS_V1_INODES) {
+    enum minifs_superblock_action action = minifs_classify_superblock(
+        sector, sizeof(sector), MINIFS_MAGIC, MINIFS_INODES, MINIFS_BLOCKS,
+        MINIFS_LBA_START + 1 + MINIFS_INODES + MINIFS_BITMAP_SECTORS,
+        MINIFS_V1_INODES);
+    if (action == MINIFS_SUPERBLOCK_REJECT_CORRUPT) {
+        mount_corrupt = 1;
+        mount_last_error = MINIFS_ERROR_CORRUPT_SUPERBLOCK;
+        serial_puts("[minifs] corrupt superblock; refusing to modify disk\n");
+        minifs_unlock();
+        return -1;
+    }
+    if (action == MINIFS_SUPERBLOCK_MIGRATE_V1) {
         if (migrate_v1_layout() < 0) {
             serial_puts("[minifs] inode migration failed\n");
+            mount_last_error = MINIFS_ERROR_MIGRATION;
             minifs_unlock();
             return -1;
         }
     }
-    if (sb.magic != MINIFS_MAGIC || sb.inode_count != MINIFS_INODES ||
-        sb.block_count != MINIFS_BLOCKS) {
-        serial_puts("[minifs] formatting disk area\n");
-        format_fs();
+    if (action == MINIFS_SUPERBLOCK_FORMAT_BLANK) {
+        serial_puts("[minifs] formatting blank disk area\n");
+        if (format_fs() < 0) {
+            mount_last_error = MINIFS_ERROR_FORMAT;
+            minifs_unlock();
+            return -1;
+        }
     } else {
         for (int i = 0; i < MINIFS_INODES; i++) {
             if (block_read_sector(inode_lba(i), sector) < 0) {
+                mount_last_error = MINIFS_ERROR_METADATA;
                 minifs_unlock();
                 return -1;
             }
@@ -663,6 +709,7 @@ int minifs_mount(void) {
         }
         for (int s = 0; s < MINIFS_BITMAP_SECTORS; s++) {
             if (block_read_sector(bitmap_lba() + (uint32_t)s, sector) < 0) {
+                mount_last_error = MINIFS_ERROR_METADATA;
                 minifs_unlock();
                 return -1;
             }
@@ -678,9 +725,37 @@ int minifs_mount(void) {
             alloc_cursor = 0;
     }
     mounted = 1;
+    mount_last_error = MINIFS_ERROR_NONE;
     serial_puts("[minifs] mounted /fs\n");
     minifs_unlock();
     return 0;
+}
+
+int minifs_get_mount_status(struct minifs_mount_status *out) {
+    if (!out)
+        return -1;
+    minifs_lock();
+    out->mounted = mounted;
+    out->corrupt = mount_corrupt;
+    out->dirty = mount_dirty;
+    out->recovery_required = mount_corrupt || mount_dirty;
+    out->journal_enabled = 0;
+    out->last_error = mount_last_error;
+    minifs_unlock();
+    return 0;
+}
+
+const char *minifs_error_text(enum minifs_error error) {
+    switch (error) {
+    case MINIFS_ERROR_NONE: return "none";
+    case MINIFS_ERROR_DEVICE: return "device";
+    case MINIFS_ERROR_READ: return "read";
+    case MINIFS_ERROR_CORRUPT_SUPERBLOCK: return "corrupt-superblock";
+    case MINIFS_ERROR_MIGRATION: return "migration";
+    case MINIFS_ERROR_METADATA: return "metadata";
+    case MINIFS_ERROR_FORMAT: return "format";
+    default: return "unknown";
+    }
 }
 
 int minifs_info(struct fs_info *out) {
@@ -815,7 +890,10 @@ int minifs_unlink(const char *path) {
     }
     free_inode_blocks(ino);
     zero(&inodes[ino], sizeof(inodes[ino]));
-    flush_inode(ino);
+    if (commit_reclaimed_inode(ino) < 0) {
+        minifs_unlock();
+        return -1;
+    }
     minifs_unlock();
     return 0;
 }
@@ -840,7 +918,10 @@ int minifs_rmdir(const char *path) {
     }
     free_inode_blocks(ino);
     zero(&inodes[ino], sizeof(inodes[ino]));
-    flush_inode(ino);
+    if (commit_reclaimed_inode(ino) < 0) {
+        minifs_unlock();
+        return -1;
+    }
     minifs_unlock();
     return 0;
 }
@@ -890,7 +971,10 @@ int minifs_truncate(const char *path) {
         return -1;
     }
     free_inode_blocks(ino);
-    flush_inode(ino);
+    if (commit_reclaimed_inode(ino) < 0) {
+        minifs_unlock();
+        return -1;
+    }
     minifs_unlock();
     return 0;
 }

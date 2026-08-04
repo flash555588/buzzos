@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "net.h"
 #include "netdev.h"
+#include "packet.h"
 #include "irq.h"
 #include "serial.h"
 #include "task.h"
@@ -50,6 +51,9 @@ static uint32_t net_udp_tx, net_udp_rx;
 static uint32_t net_tcp_tx, net_tcp_rx;
 static uint32_t net_dhcp_tx, net_dhcp_rx;
 static uint32_t net_dns_tx, net_dns_rx;
+static uint32_t net_invalid_frames;
+static uint32_t net_checksum_failures;
+static uint32_t net_fragment_drops;
 static volatile uint32_t net_rx_waiters;
 
 static void dbg(const char *s) { serial_puts("[net] "); serial_puts(s); }
@@ -114,6 +118,17 @@ static void count_pair(uint32_t *tx, uint32_t *rx, int is_tx) {
         (*tx)++;
     else
         (*rx)++;
+}
+
+static void note_packet_error(enum net_packet_error error) {
+    if (error == NET_PACKET_OK || error == NET_PACKET_NOT_IPV4 ||
+        error == NET_PACKET_WRONG_PROTOCOL)
+        return;
+    net_invalid_frames++;
+    if (error == NET_PACKET_BAD_CHECKSUM)
+        net_checksum_failures++;
+    if (error == NET_PACKET_FRAGMENTED)
+        net_fragment_drops++;
 }
 
 static void count_frame_protocols(const void *data, size_t len, int is_tx) {
@@ -405,27 +420,21 @@ int net_icmp_recv_echo(uint32_t src_ip, uint16_t id, uint16_t *seq_out,
         uint8_t rbuf[1514];
         size_t n = dev_recv(rbuf, sizeof(rbuf));
         if (n == 0) { net_poll_backoff(); continue; }
-        if (n < sizeof(struct eth_frame) + sizeof(struct ip_hdr) + sizeof(struct icmp_echo))
+        struct net_icmp_view packet;
+        enum net_packet_error error;
+        if (net_parse_icmp(rbuf, n, &packet, &error) < 0) {
+            note_packet_error(error);
             continue;
-        struct eth_frame *eth = (struct eth_frame *)rbuf;
-        if (bswap16(eth->ethertype) != 0x0800)
+        }
+        if (src_ip && packet.ipv4.ip->src_ip != src_ip)
             continue;
-        struct ip_hdr *ip = (struct ip_hdr *)eth->payload;
-        if (ip->protocol != 1)
-            continue;
-        if (src_ip && ip->src_ip != src_ip)
-            continue;
-        uint16_t ip_total = bswap16(ip->total_len);
-        uint8_t ip_hlen = (uint8_t)((ip->ver_ihl & 0x0F) * 4);
-        if (ip_hlen < sizeof(struct ip_hdr) || ip_total < ip_hlen + sizeof(struct icmp_echo))
-            continue;
-        struct icmp_echo *echo = (struct icmp_echo *)((uint8_t *)ip + ip_hlen);
+        const struct icmp_echo *echo = packet.icmp;
         if (echo->type != 0 || bswap16(echo->id) != id)
             continue;
-        size_t plen = ip_total - ip_hlen - sizeof(*echo);
+        size_t plen = packet.payload_len;
         if (plen > max)
             plen = max;
-        memcpy(buf, echo->data, plen);
+        memcpy(buf, packet.payload, plen);
         if (seq_out)
             *seq_out = bswap16(echo->seq);
         return (int)plen;
@@ -501,31 +510,21 @@ int net_udp_recv(uint16_t local_port, uint32_t *src_ip, uint16_t *src_port,
         uint8_t rbuf[1514];
         size_t n = dev_recv(rbuf, sizeof(rbuf));
         if (n == 0) { net_poll_backoff(); continue; }
-        if (n < sizeof(struct eth_frame) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr))
+        struct net_udp_view packet;
+        enum net_packet_error error;
+        if (net_parse_udp(rbuf, n, &packet, &error) < 0) {
+            note_packet_error(error);
             continue;
-        struct eth_frame *eth = (struct eth_frame *)rbuf;
-        if (bswap16(eth->ethertype) != 0x0800)
-            continue;
-        struct ip_hdr *ip = (struct ip_hdr *)eth->payload;
-        if (ip->protocol != 17)
-            continue;
-        uint8_t ip_hlen = (uint8_t)((ip->ver_ihl & 0x0F) * 4);
-        if (ip_hlen < sizeof(struct ip_hdr))
-            continue;
-        if (n < sizeof(struct eth_frame) + ip_hlen + sizeof(struct udp_hdr))
-            continue;
-        struct udp_hdr *udp = (struct udp_hdr *)((uint8_t *)ip + ip_hlen);
+        }
+        const struct udp_hdr *udp = packet.udp;
         if (bswap16(udp->dst_port) != local_port)
             continue;
-        size_t ulen = bswap16(udp->length);
-        if (ulen < sizeof(*udp))
-            continue;
-        size_t plen = ulen - sizeof(*udp);
+        size_t plen = packet.payload_len;
         if (plen > max)
             plen = max;
-        memcpy(buf, udp + 1, plen);
+        memcpy(buf, packet.payload, plen);
         if (src_ip)
-            *src_ip = ip->src_ip;
+            *src_ip = packet.ipv4.ip->src_ip;
         if (src_port)
             *src_port = bswap16(udp->src_port);
         return (int)plen;
@@ -903,25 +902,16 @@ static int net_tcp_poll_available(void) {
 }
 
 static int net_tcp_dispatch_frame(const void *frame, size_t len) {
-    if (!frame || len < sizeof(struct eth_frame) + sizeof(struct ip_hdr) + sizeof(struct tcp_hdr))
+    struct net_tcp_view packet;
+    enum net_packet_error error;
+    if (net_parse_tcp(frame, len, &packet, &error) < 0) {
+        note_packet_error(error);
         return 0;
-    const struct eth_frame *eth = (const struct eth_frame *)frame;
-    if (bswap16(eth->ethertype) != 0x0800)
+    }
+    const struct ip_hdr *ip = packet.ipv4.ip;
+    const struct tcp_hdr *tcp = packet.tcp;
+    if (net_ip && ip->dst_ip != net_ip)
         return 0;
-    const struct ip_hdr *ip = (const struct ip_hdr *)eth->payload;
-    if (ip->protocol != 6 || (net_ip && ip->dst_ip != net_ip))
-        return 0;
-
-    uint16_t ip_total = bswap16(ip->total_len);
-    uint8_t ip_hlen = (uint8_t)((ip->ver_ihl & 0x0F) * 4);
-    if (ip_hlen < sizeof(struct ip_hdr))
-        return 0;
-    if (ip_total < ip_hlen + sizeof(struct tcp_hdr))
-        return 0;
-    if (len < sizeof(struct eth_frame) + ip_total)
-        return 0;
-
-    const struct tcp_hdr *tcp = (const struct tcp_hdr *)((const uint8_t *)ip + ip_hlen);
     uint16_t src_port = bswap16(tcp->src_port);
     uint16_t dst_port = bswap16(tcp->dst_port);
     struct net_tcp_pcb *pcb = net_tcp_match_pcb(ip->src_ip, src_port, dst_port);
@@ -963,15 +953,8 @@ static int net_tcp_dispatch_frame(const void *frame, size_t len) {
     if (pcb->state != TCP_STATE_ESTABLISHED)
         return 1;
 
-    uint8_t doff = (uint8_t)((tcp->data_off >> 4) * 4);
-    if (doff < sizeof(struct tcp_hdr))
-        return 1;
-    size_t tcp_len = (size_t)ip_total - ip_hlen;
-    if (tcp_len < doff)
-        return 1;
-
-    const uint8_t *payload = ((const uint8_t *)tcp) + doff;
-    size_t plen = tcp_len - doff;
+    const uint8_t *payload = packet.payload;
+    size_t plen = packet.payload_len;
     uint32_t peer_seq = bswap32(tcp->seq);
     uint32_t fin_seq = peer_seq + (uint32_t)plen;
     uint32_t irq_flags = irq_save();
@@ -1658,6 +1641,18 @@ int net_status_text(char *buf, int size) {
 
     status_append_text(buf, &pos, size, "rx_frames ");
     status_append_u32(buf, &pos, size, net_rx_frames);
+    status_append_char(buf, &pos, size, '\n');
+
+    status_append_text(buf, &pos, size, "invalid_frames ");
+    status_append_u32(buf, &pos, size, net_invalid_frames);
+    status_append_char(buf, &pos, size, '\n');
+
+    status_append_text(buf, &pos, size, "checksum_failures ");
+    status_append_u32(buf, &pos, size, net_checksum_failures);
+    status_append_char(buf, &pos, size, '\n');
+
+    status_append_text(buf, &pos, size, "fragment_drops ");
+    status_append_u32(buf, &pos, size, net_fragment_drops);
     status_append_char(buf, &pos, size, '\n');
 
     status_append_counter_pair(buf, &pos, size, "arp_frames", net_arp_tx, net_arp_rx);

@@ -1403,7 +1403,7 @@ int fscanf(FILE *stream, const char *fmt, ...) {
  *  Memory allocation — reusable blocks backed by an sbrk syscall
  * ================================================================ */
 
-#define HEAP_ALIGN 8u
+#define HEAP_ALIGN 16u
 #define HEAP_CHUNK (64u * 1024u)
 #define HEAP_MAGIC 0x42555A5Au
 
@@ -1414,6 +1414,7 @@ struct heap_block {
     uint32_t magic;
     uint32_t is_free;
     uint32_t reserved;
+    uint64_t alignment_pad;
 };
 
 static struct heap_block *heap_head;
@@ -1638,6 +1639,7 @@ static void heap_split(struct heap_block *block, size_t size) {
     tail->magic = HEAP_MAGIC;
     tail->is_free = 1;
     tail->reserved = 0;
+    tail->alignment_pad = 0;
     if (tail->next)
         tail->next->prev = tail;
     else
@@ -1679,6 +1681,7 @@ static struct heap_block *heap_grow(size_t size) {
     block->magic = HEAP_MAGIC;
     block->is_free = 1;
     block->reserved = 0;
+    block->alignment_pad = 0;
     if (!heap_head) {
         heap_head = block;
         heap_tail = block;

@@ -1,6 +1,6 @@
 # Project Status
 
-BuzzOS is a lightweight educational i386 operating system. The project is now
+BuzzOS is a lightweight educational x86_64 operating system. The project is now
 organized around a small kernel, user-space programs, a persistent mini
 filesystem, and a user-space GUI app manager.
 
@@ -100,7 +100,7 @@ make help
 Check local tools before building:
 
 ```sh
-make doctor QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make doctor QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Build:
@@ -112,19 +112,19 @@ make
 Run a visible QEMU session without stealing terminal input:
 
 ```sh
-make run-local QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make run-local QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Start directly in the GUI desktop:
 
 ```sh
-make run-gui QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make run-gui QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Run the smoke test:
 
 ```sh
-make smoke QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make smoke QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Run the fast host-side consistency check:
@@ -179,13 +179,13 @@ python tools/check_project.py --list-apps
 Run the GUI smoke test:
 
 ```sh
-make gui-smoke QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make gui-smoke QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Run all current checks:
 
 ```sh
-make verify QEMU="C:\Program Files\qemu\qemu-system-i386.exe"
+make verify QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"
 ```
 
 Generate a local project status report:

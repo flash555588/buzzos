@@ -8,7 +8,9 @@ param(
     [string]$PythonPath = "",
     [ValidateSet("none", "dsound", "sdl", "wav")]
     [string]$AudioDriver = "none",
-    [int]$TimeoutSeconds = 45
+    [int]$TimeoutSeconds = 45,
+    [ValidateRange(64, 4096)]
+    [int]$MemoryMiB = 256
 )
 
 $ErrorActionPreference = "Stop"
@@ -249,7 +251,7 @@ $monitorPort = Get-FreeTcpPort
 $qemuArgs = @(
     "-accel", $QemuAccel,
     "-cpu", $QemuCpu,
-    "-m", "256",
+    "-m", "$MemoryMiB",
     "-drive", "format=raw,file=$TestImage",
     "-serial", "file:$SerialLog",
     "-display", "none",
@@ -280,6 +282,9 @@ try {
     $appsPpm = (Join-Path $OutDir "app-center.ppm")
     $screens += Capture-Screen "app-center" $appsPpm (Join-Path $OutDir "app-center.png")
 
+    # Launcher order follows the seeded app manifests: Terminal, Task Manager,
+    # TextEdit, Paint, Calculator, Files, Browser, DOOM, ...
+    Press-Many "down" 2
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $texteditPpm = (Join-Path $OutDir "textedit.ppm")
@@ -297,7 +302,7 @@ try {
     # Opening a regular /bin ELF through Files must hand it to Terminal
     # without terminating the File Manager GUI protocol session.
     Type-Command "gui"
-    Press-Many "down" 3
+    Press-Many "down" 5
     Send-Key "ret"
     Start-Sleep -Milliseconds 600
     Send-Key "left"
@@ -315,7 +320,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
+    Press-Many "down" 3
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $paintPpm = (Join-Path $OutDir "paint.ppm")
@@ -324,8 +329,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
-    Send-Key "down"
+    Press-Many "down" 4
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $calculatorPpm = (Join-Path $OutDir "calculator.ppm")
@@ -334,10 +338,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
+    Press-Many "down" 6
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $browserPpm = (Join-Path $OutDir "browser.ppm")
@@ -346,9 +347,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
+    Press-Many "down" 5
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
     $filesPpm = (Join-Path $OutDir "filemanager.ppm")
@@ -387,20 +386,27 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     Type-Command "gui"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
-    Send-Key "down"
+    Press-Many "down" 7
+    Send-Key "ret"
+    Start-Sleep -Seconds 1
+    $doomPpm = (Join-Path $OutDir "doom.ppm")
+    $screens += Capture-Screen "doom" $doomPpm (Join-Path $OutDir "doom.png")
+    Send-Key "esc"
+    Wait-ForLog "\[gui\] exited" 10
+
+    # The clean source tree intentionally does not bundle the separately
+    # licensed DOOM WAD. Exercise audio with the bundled Music demo instead.
+    Type-Command "gui"
+    Press-Many "down" 8
     Send-Key "ret"
     Wait-ForLog "PCM playback started \(AC97 bus master\)" 15
     Start-Sleep -Seconds 2
-    $doomPpm = (Join-Path $OutDir "doom.ppm")
-    $screens += Capture-Screen "doom" $doomPpm (Join-Path $OutDir "doom.png")
-    Send-Key "ret"
-    Start-Sleep -Seconds 2
-    $doomInputPpm = (Join-Path $OutDir "doom-input.ppm")
-    $screens += Capture-Screen "doom-input" $doomInputPpm (Join-Path $OutDir "doom-input.png")
+    $musicPpm = (Join-Path $OutDir "music.ppm")
+    $screens += Capture-Screen "music" $musicPpm (Join-Path $OutDir "music.png")
+    Send-Key "spc"
+    Start-Sleep -Seconds 1
+    $musicPausedPpm = (Join-Path $OutDir "music-paused.ppm")
+    $screens += Capture-Screen "music-paused" $musicPausedPpm (Join-Path $OutDir "music-paused.png")
     Send-Key "esc"
     Wait-ForLog "\[gui\] exited" 10
 

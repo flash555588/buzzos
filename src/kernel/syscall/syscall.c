@@ -25,15 +25,43 @@ int user_range_writable(uintptr_t ptr, size_t len) {
 
 int user_string_ok(const char *s) {
     uintptr_t ptr = (uintptr_t)s;
-    if (!user_range_ok(ptr, 1))
-        return 0;
+    char value;
     for (size_t i = 0; i < 4096; i++) {
-        if (!user_range_ok(ptr + i, 1))
+        if (copy_from_user(&value, ptr + i, 1) < 0)
             return 0;
-        if (s[i] == 0)
+        if (value == 0)
             return 1;
     }
     return 0;
+}
+
+int copy_from_user(void *dst, uintptr_t src, size_t len) {
+    if (len == 0)
+        return 0;
+    if (!dst || !user_range_bounds_ok(src, len))
+        return -1;
+    return paging_copy_from_user_space(paging_current_cr3(), dst, src, len);
+}
+
+int copy_to_user(uintptr_t dst, const void *src, size_t len) {
+    if (len == 0)
+        return 0;
+    if (!src || !user_range_bounds_ok(dst, len))
+        return -1;
+    return paging_copy_to_user_space(paging_current_cr3(), dst, src, len);
+}
+
+int copy_string_from_user(char *dst, size_t capacity, uintptr_t src) {
+    if (!dst || capacity == 0)
+        return -1;
+    for (size_t i = 0; i < capacity; i++) {
+        if (copy_from_user(&dst[i], src + i, 1) < 0)
+            return -1;
+        if (dst[i] == 0)
+            return 0;
+    }
+    dst[capacity - 1] = 0;
+    return -1;
 }
 
 static syscall_handler_fn syscall_table[256];

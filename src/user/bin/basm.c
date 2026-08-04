@@ -10,7 +10,7 @@
 #define OPERAND_MAX 128
 #define LINE_MAX 512
 
-#define USER_BASE 0x20000000u
+#define USER_BASE UINT64_C(0x0000000100000000)
 #define LOAD_OFF  0x1000u
 
 enum section_id {
@@ -23,7 +23,7 @@ struct sym {
     int used;
     int is_equ;
     int section;
-    uint32_t value;
+    uint64_t value;
     int defined_pass;
     char name[NAME_MAX + 1];
 };
@@ -117,8 +117,8 @@ static int parse_token(char **pp, char *out, int out_size) {
     return n > 0;
 }
 
-static int parse_number(const char *s, uint32_t *out) {
-    uint32_t v = 0;
+static int parse_number(const char *s, uint64_t *out) {
+    uint64_t v = 0;
     int i = 0;
     int base = 10;
     if (s[0] == '0' && lower_char(s[1]) == 'x') {
@@ -138,7 +138,7 @@ static int parse_number(const char *s, uint32_t *out) {
             return 0;
         if (d >= base)
             return 0;
-        v = v * (uint32_t)base + (uint32_t)d;
+        v = v * (uint64_t)base + (uint64_t)d;
     }
     *out = v;
     return 1;
@@ -190,7 +190,7 @@ static void define_label(const char *name) {
                           cur_section == SEC_DATA ? data_len : bss_len);
 }
 
-static void define_equ(const char *name, uint32_t value) {
+static void define_equ(const char *name, uint64_t value) {
     struct sym *s = get_sym_slot(name);
     if (!s)
         return;
@@ -204,23 +204,23 @@ static void define_equ(const char *name, uint32_t value) {
     s->value = value;
 }
 
-static uint32_t section_offset(void) {
-    return (uint32_t)(cur_section == SEC_TEXT ? text_len :
+static uint64_t section_offset(void) {
+    return (uint64_t)(cur_section == SEC_TEXT ? text_len :
                       cur_section == SEC_DATA ? data_len : bss_len);
 }
 
-static uint32_t sym_runtime_value(const struct sym *s) {
+static uint64_t sym_runtime_value(const struct sym *s) {
     if (s->is_equ)
         return s->value;
     if (s->section == SEC_TEXT)
         return USER_BASE + s->value;
     if (s->section == SEC_DATA)
-        return USER_BASE + (uint32_t)final_text_len + s->value;
-    return USER_BASE + (uint32_t)final_text_len +
-           (uint32_t)final_data_len + s->value;
+        return USER_BASE + (uint64_t)final_text_len + s->value;
+    return USER_BASE + (uint64_t)final_text_len +
+           (uint64_t)final_data_len + s->value;
 }
 
-static uint32_t current_runtime_addr(void);
+static uint64_t current_runtime_addr(void);
 
 struct expr_parser { const char *p; };
 
@@ -229,13 +229,13 @@ static void expr_ws(struct expr_parser *ep) {
         ep->p++;
 }
 
-static uint32_t expr_or(struct expr_parser *ep);
+static uint64_t expr_or(struct expr_parser *ep);
 
-static uint32_t expr_primary(struct expr_parser *ep) {
+static uint64_t expr_primary(struct expr_parser *ep) {
     expr_ws(ep);
     if (*ep->p == '(') {
         ep->p++;
-        uint32_t value = expr_or(ep);
+        uint64_t value = expr_or(ep);
         expr_ws(ep);
         if (*ep->p != ')') {
             set_error("missing ')' in expression");
@@ -250,7 +250,7 @@ static uint32_t expr_primary(struct expr_parser *ep) {
     }
     if (*ep->p == '\'') {
         ep->p++;
-        uint32_t value = (uint8_t)*ep->p++;
+        uint64_t value = (uint8_t)*ep->p++;
         if (value == '\\' && *ep->p) {
             char e = *ep->p++;
             value = e == 'n' ? '\n' : e == 'r' ? '\r' : e == 't' ? '\t' : (uint8_t)e;
@@ -271,7 +271,7 @@ static uint32_t expr_primary(struct expr_parser *ep) {
                n + 1 < (int)sizeof(number))
             number[n++] = *ep->p++;
         number[n] = 0;
-        uint32_t value = 0;
+        uint64_t value = 0;
         if (!parse_number(number, &value))
             set_error("bad number");
         return value;
@@ -295,7 +295,7 @@ static uint32_t expr_primary(struct expr_parser *ep) {
     return 0;
 }
 
-static uint32_t expr_unary(struct expr_parser *ep) {
+static uint64_t expr_unary(struct expr_parser *ep) {
     expr_ws(ep);
     if (*ep->p == '+') { ep->p++; return expr_unary(ep); }
     if (*ep->p == '-') { ep->p++; return 0u - expr_unary(ep); }
@@ -303,14 +303,14 @@ static uint32_t expr_unary(struct expr_parser *ep) {
     return expr_primary(ep);
 }
 
-static uint32_t expr_mul(struct expr_parser *ep) {
-    uint32_t value = expr_unary(ep);
+static uint64_t expr_mul(struct expr_parser *ep) {
+    uint64_t value = expr_unary(ep);
     for (;;) {
         expr_ws(ep);
         char op = *ep->p;
         if (op != '*' && op != '/' && op != '%') return value;
         ep->p++;
-        uint32_t rhs = expr_unary(ep);
+        uint64_t rhs = expr_unary(ep);
         if ((op == '/' || op == '%') && rhs == 0) {
             set_error("division by zero in expression");
             return 0;
@@ -319,32 +319,32 @@ static uint32_t expr_mul(struct expr_parser *ep) {
     }
 }
 
-static uint32_t expr_add(struct expr_parser *ep) {
-    uint32_t value = expr_mul(ep);
+static uint64_t expr_add(struct expr_parser *ep) {
+    uint64_t value = expr_mul(ep);
     for (;;) {
         expr_ws(ep);
         char op = *ep->p;
         if (op != '+' && op != '-') return value;
         ep->p++;
-        uint32_t rhs = expr_mul(ep);
+        uint64_t rhs = expr_mul(ep);
         value = op == '+' ? value + rhs : value - rhs;
     }
 }
 
-static uint32_t expr_shift(struct expr_parser *ep) {
-    uint32_t value = expr_add(ep);
+static uint64_t expr_shift(struct expr_parser *ep) {
+    uint64_t value = expr_add(ep);
     for (;;) {
         expr_ws(ep);
         if (ep->p[0] == '<' && ep->p[1] == '<') {
-            ep->p += 2; value <<= (expr_add(ep) & 31u);
+            ep->p += 2; value <<= (expr_add(ep) & 63u);
         } else if (ep->p[0] == '>' && ep->p[1] == '>') {
-            ep->p += 2; value >>= (expr_add(ep) & 31u);
+            ep->p += 2; value >>= (expr_add(ep) & 63u);
         } else return value;
     }
 }
 
-static uint32_t expr_and(struct expr_parser *ep) {
-    uint32_t value = expr_shift(ep);
+static uint64_t expr_and(struct expr_parser *ep) {
+    uint64_t value = expr_shift(ep);
     for (;;) {
         expr_ws(ep);
         if (*ep->p != '&') return value;
@@ -352,8 +352,8 @@ static uint32_t expr_and(struct expr_parser *ep) {
     }
 }
 
-static uint32_t expr_xor(struct expr_parser *ep) {
-    uint32_t value = expr_and(ep);
+static uint64_t expr_xor(struct expr_parser *ep) {
+    uint64_t value = expr_and(ep);
     for (;;) {
         expr_ws(ep);
         if (*ep->p != '^') return value;
@@ -361,8 +361,8 @@ static uint32_t expr_xor(struct expr_parser *ep) {
     }
 }
 
-static uint32_t expr_or(struct expr_parser *ep) {
-    uint32_t value = expr_xor(ep);
+static uint64_t expr_or(struct expr_parser *ep) {
+    uint64_t value = expr_xor(ep);
     for (;;) {
         expr_ws(ep);
         if (*ep->p != '|') return value;
@@ -370,7 +370,7 @@ static uint32_t expr_or(struct expr_parser *ep) {
     }
 }
 
-static int eval_expr(const char *expr, uint32_t *out) {
+static int eval_expr(const char *expr, uint64_t *out) {
     struct expr_parser ep = {expr};
     *out = expr_or(&ep);
     expr_ws(&ep);
@@ -415,18 +415,23 @@ static void emit_u32(uint32_t v) {
     emit_byte((uint8_t)((v >> 24) & 0xFF));
 }
 
+static void emit_u64(uint64_t v) {
+    emit_u32((uint32_t)v);
+    emit_u32((uint32_t)(v >> 32));
+}
+
 static void emit_u16(uint32_t v) {
     emit_byte((uint8_t)(v & 0xFF));
     emit_byte((uint8_t)((v >> 8) & 0xFF));
 }
 
-static uint32_t current_runtime_addr(void) {
+static uint64_t current_runtime_addr(void) {
     if (cur_section == SEC_TEXT)
-        return USER_BASE + (uint32_t)text_len;
+        return USER_BASE + (uint64_t)text_len;
     if (cur_section == SEC_DATA)
-        return USER_BASE + (uint32_t)final_text_len + (uint32_t)data_len;
-    return USER_BASE + (uint32_t)final_text_len +
-           (uint32_t)final_data_len + (uint32_t)bss_len;
+        return USER_BASE + (uint64_t)final_text_len + (uint64_t)data_len;
+    return USER_BASE + (uint64_t)final_text_len +
+           (uint64_t)final_data_len + (uint64_t)bss_len;
 }
 
 static int split_operands(char *s, char ops[][OPERAND_MAX], int max_ops) {
@@ -474,15 +479,17 @@ struct operand {
     int base;
     int index;
     int scale;
-    int32_t disp;
-    uint32_t imm;
+    int64_t disp;
+    uint64_t imm;
 };
 
 static int reg_info(const char *s, int *width) {
+    static const char *r64[] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi"};
     static const char *r32[] = {"eax","ecx","edx","ebx","esp","ebp","esi","edi"};
     static const char *r16[] = {"ax","cx","dx","bx","sp","bp","si","di"};
     static const char *r8[] = {"al","cl","dl","bl","ah","ch","dh","bh"};
     for (int i = 0; i < 8; i++) {
+        if (streq(s, r64[i])) { *width = 64; return i; }
         if (streq(s, r32[i])) { *width = 32; return i; }
         if (streq(s, r16[i])) { *width = 16; return i; }
         if (streq(s, r8[i])) { *width = 8; return i; }
@@ -503,12 +510,12 @@ static int parse_scale_reg(char *term, int *reg, int *scale) {
     rtrim(b);
     int width = 0;
     int r = reg_info(a, &width);
-    uint32_t n = 0;
-    if (r >= 0 && width == 32 && parse_number(b, &n)) {
+    uint64_t n = 0;
+    if (r >= 0 && width == 64 && parse_number(b, &n)) {
         *reg = r; *scale = (int)n; return n == 1 || n == 2 || n == 4 || n == 8;
     }
     r = reg_info(b, &width);
-    if (r >= 0 && width == 32 && parse_number(a, &n)) {
+    if (r >= 0 && width == 64 && parse_number(a, &n)) {
         *reg = r; *scale = (int)n; return n == 1 || n == 2 || n == 4 || n == 8;
     }
     return 0;
@@ -545,7 +552,7 @@ static int parse_memory(char *text, struct operand *op) {
         char *t = skip_ws(term);
         int width = 0;
         int r = reg_info(t, &width);
-        if (r >= 0 && width == 32) {
+        if (r >= 0 && width == 64) {
             if (sign < 0) { set_error("register cannot be subtracted"); return 0; }
             if (op->base < 0)
                 op->base = r;
@@ -567,10 +574,10 @@ static int parse_memory(char *text, struct operand *op) {
                 op->index = sr;
                 op->scale = scale;
             } else {
-                uint32_t value = 0;
+                uint64_t value = 0;
                 if (!eval_expr(t, &value))
                     return 0;
-                op->disp += sign > 0 ? (int32_t)value : -(int32_t)value;
+                op->disp += sign > 0 ? (int64_t)value : -(int64_t)value;
             }
         }
         sign = 1;
@@ -590,6 +597,9 @@ static int parse_operand(char *text, struct operand *op) {
     } else if (p[0] == 'd' && p[1] == 'w' && p[2] == 'o' && p[3] == 'r' &&
                p[4] == 'd' && is_space(p[5])) {
         op->width = 32; p = skip_ws(p + 5);
+    } else if (p[0] == 'q' && p[1] == 'w' && p[2] == 'o' && p[3] == 'r' &&
+               p[4] == 'd' && is_space(p[5])) {
+        op->width = 64; p = skip_ws(p + 5);
     }
     if (p[0] == 'p' && p[1] == 't' && p[2] == 'r' && is_space(p[3]))
         p = skip_ws(p + 3);
@@ -615,6 +625,8 @@ static int parse_operand(char *text, struct operand *op) {
 static void emit_prefix(int width) {
     if (width == 16)
         emit_byte(0x66);
+    if (width == 64)
+        emit_byte(0x48);
 }
 
 static int scale_bits(int scale) {
@@ -635,7 +647,8 @@ static void emit_modrm(int field, const struct operand *op) {
     }
     if (op->base < 0 && op->index < 0) {
         emit_byte((uint8_t)(((field & 7) << 3) | 5));
-        emit_u32((uint32_t)op->disp);
+        int64_t next = (int64_t)current_runtime_addr() + 4;
+        emit_u32((uint32_t)(op->disp - next));
         return;
     }
     int need_sib = op->index >= 0 || op->base == 4 || op->base < 0;
@@ -684,7 +697,7 @@ static void emit_db(char *args) {
             while (*p && *p != ',' && n < (int)sizeof(term) - 1)
                 term[n++] = *p++;
             term[n] = 0;
-            uint32_t v = 0;
+            uint64_t v = 0;
             if (!eval_expr(term, &v))
                 return;
             emit_byte((uint8_t)v);
@@ -726,6 +739,7 @@ static void emit_mov(const struct operand *dst, const struct operand *src) {
         emit_byte((uint8_t)((width == 8 ? 0xB0 : 0xB8) + dst->reg));
         if (width == 8) emit_byte((uint8_t)src->imm);
         else if (width == 16) emit_u16(src->imm);
+        else if (width == 64) emit_u64(src->imm);
         else emit_u32(src->imm);
         return;
     }
@@ -806,13 +820,13 @@ static void emit_binary(const struct bin_encoding *enc,
 }
 
 static void emit_reserve(int unit, char *args) {
-    uint32_t count = 0;
+    uint64_t count = 0;
     if (!eval_expr(args, &count)) return;
     if (count > (uint32_t)DATA_MAX || count * (uint32_t)unit > (uint32_t)DATA_MAX) {
         set_error("reserve too large");
         return;
     }
-    for (uint32_t i = 0; i < count * (uint32_t)unit; i++)
+    for (uint64_t i = 0; i < count * (uint64_t)unit; i++)
         emit_byte(0);
 }
 
@@ -820,9 +834,11 @@ static void emit_words(char *args, int width) {
     char ops[16][OPERAND_MAX];
     int n = split_operands(args, ops, 16);
     for (int i = 0; i < n; i++) {
-        uint32_t v = 0;
+        uint64_t v = 0;
         if (!eval_expr(ops[i], &v)) return;
-        if (width == 2) emit_u16(v); else emit_u32(v);
+        if (width == 2) emit_u16(v);
+        else if (width == 8) emit_u64(v);
+        else emit_u32(v);
     }
 }
 
@@ -846,11 +862,17 @@ static void emit_instruction(const char *mn, char *args) {
         else emit_words(args, 4);
         return;
     }
+    if (streq(mn, "dq")) {
+        if (cur_section == SEC_BSS) set_error("initialized data is not allowed in bss");
+        else emit_words(args, 8);
+        return;
+    }
     if (streq(mn, "resb")) { emit_reserve(1, args); return; }
     if (streq(mn, "resw")) { emit_reserve(2, args); return; }
     if (streq(mn, "resd")) { emit_reserve(4, args); return; }
+    if (streq(mn, "resq")) { emit_reserve(8, args); return; }
     if (streq(mn, "align")) {
-        uint32_t boundary = 0;
+        uint64_t boundary = 0;
         if (!eval_expr(args, &boundary) || !boundary ||
             (boundary & (boundary - 1u))) {
             set_error("align needs a power of two");
@@ -867,7 +889,7 @@ static void emit_instruction(const char *mn, char *args) {
         while (*p && !is_space(*p) && k < (int)sizeof(count_text) - 1)
             count_text[k++] = *p++;
         count_text[k] = 0;
-        uint32_t count = 0;
+        uint64_t count = 0;
         if (!eval_expr(count_text, &count) || count > 65536u) {
             set_error("bad times count");
             return;
@@ -879,7 +901,7 @@ static void emit_instruction(const char *mn, char *args) {
             return;
         }
         p = skip_ws(p);
-        for (uint32_t i = 0; i < count && !failed; i++)
+        for (uint64_t i = 0; i < count && !failed; i++)
             emit_instruction(nested, p);
         return;
     }
@@ -924,10 +946,10 @@ static void emit_instruction(const char *mn, char *args) {
         emit_mov(&a, &b); return;
     }
     if (streq(mn, "lea")) {
-        if (n != 2 || a.kind != OP_REG || a.width != 32 || b.kind != OP_MEM) {
-            set_error("lea needs reg32, memory"); return;
+        if (n != 2 || a.kind != OP_REG || a.width != 64 || b.kind != OP_MEM) {
+            set_error("lea needs reg64, memory"); return;
         }
-        emit_byte(0x8D); emit_modrm(a.reg, &b); return;
+        emit_prefix(64); emit_byte(0x8D); emit_modrm(a.reg, &b); return;
     }
     struct bin_encoding enc;
     if (find_bin_encoding(mn, &enc)) {
@@ -961,7 +983,7 @@ static void emit_instruction(const char *mn, char *args) {
     }
     if (streq(mn, "push")) {
         if (n != 1) { set_error("push needs one operand"); return; }
-        if (a.kind == OP_REG && a.width == 32) emit_byte((uint8_t)(0x50 + a.reg));
+        if (a.kind == OP_REG && a.width == 64) emit_byte((uint8_t)(0x50 + a.reg));
         else if (a.kind == OP_IMM) { emit_byte(0x68); emit_u32(a.imm); }
         else if (a.kind == OP_MEM) { emit_byte(0xFF); emit_modrm(6, &a); }
         else set_error("unsupported push operand");
@@ -969,20 +991,16 @@ static void emit_instruction(const char *mn, char *args) {
     }
     if (streq(mn, "pop")) {
         if (n != 1) { set_error("pop needs one operand"); return; }
-        if (a.kind == OP_REG && a.width == 32) emit_byte((uint8_t)(0x58 + a.reg));
+        if (a.kind == OP_REG && a.width == 64) emit_byte((uint8_t)(0x58 + a.reg));
         else if (a.kind == OP_MEM) { emit_byte(0x8F); emit_modrm(0, &a); }
         else set_error("unsupported pop operand");
         return;
     }
     if (streq(mn, "inc") || streq(mn, "dec")) {
         if (n != 1) { set_error("inc/dec needs one operand"); return; }
-        if (a.kind == OP_REG && a.width == 32)
-            emit_byte((uint8_t)((streq(mn, "inc") ? 0x40 : 0x48) + a.reg));
-        else {
-            emit_prefix(a.width);
-            emit_byte((uint8_t)(a.width == 8 ? 0xFE : 0xFF));
-            emit_modrm(streq(mn, "inc") ? 0 : 1, &a);
-        }
+        emit_prefix(a.width);
+        emit_byte((uint8_t)(a.width == 8 ? 0xFE : 0xFF));
+        emit_modrm(streq(mn, "inc") ? 0 : 1, &a);
         return;
     }
     if (streq(mn, "not") || streq(mn, "neg") || streq(mn, "mul") ||
@@ -1036,7 +1054,7 @@ static void emit_instruction(const char *mn, char *args) {
     if (streq(mn, "call") || streq(mn, "jmp")) {
         if (n != 1) { set_error("call/jmp needs one operand"); return; }
         if (a.kind == OP_IMM) {
-            uint32_t cur = current_runtime_addr();
+            uint64_t cur = current_runtime_addr();
             emit_byte(streq(mn, "call") ? 0xE8 : 0xE9);
             emit_u32(a.imm - (cur + 5));
         } else {
@@ -1050,7 +1068,7 @@ static void emit_instruction(const char *mn, char *args) {
         if (n != 1 || a.kind != OP_IMM) {
             set_error("conditional jump needs a label/immediate"); return;
         }
-        uint32_t cur = current_runtime_addr();
+        uint64_t cur = current_runtime_addr();
         emit_byte(0x0F); emit_byte((uint8_t)(0x80 + cc));
         emit_u32(a.imm - (cur + 6)); return;
     }
@@ -1086,7 +1104,7 @@ static int handle_equ_line(char *line) {
         return 0;
     if (!streq(tok, "equ"))
         return 0;
-    uint32_t v = 0;
+    uint64_t v = 0;
     if (!eval_expr(p, &v))
         return 1;
     define_equ(name, v);
@@ -1110,7 +1128,7 @@ static void process_line(char *line) {
                 set_error("bad define");
                 return;
             }
-            uint32_t v = 0;
+            uint64_t v = 0;
             if (!eval_expr(p, &v))
                 return;
             define_equ(name, v);
@@ -1141,9 +1159,9 @@ static void process_line(char *line) {
     p = skip_ws(p);
 
     if (streq(mnemonic, "bits")) {
-        uint32_t bits = 0;
-        if (!eval_expr(p, &bits) || bits != 32)
-            set_error("basm only emits 32-bit i386 code");
+        uint64_t bits = 0;
+        if (!eval_expr(p, &bits) || bits != 64)
+            set_error("basm only emits 64-bit x86_64 code");
         return;
     }
     if (streq(mnemonic, "global")) {
@@ -1211,6 +1229,11 @@ static void put32(int off, uint32_t v) {
     elf_buf[off + 3] = (uint8_t)((v >> 24) & 0xFF);
 }
 
+static void put64(int off, uint64_t v) {
+    put32(off, (uint32_t)v);
+    put32(off + 4, (uint32_t)(v >> 32));
+}
+
 static int build_elf(void) {
     int have_data_segment = data_len > 0 || bss_len > 0;
     int data_file_off = (int)LOAD_OFF + final_text_len;
@@ -1226,11 +1249,11 @@ static int build_elf(void) {
     elf_buf[1] = 'E';
     elf_buf[2] = 'L';
     elf_buf[3] = 'F';
-    elf_buf[4] = 1;
+    elf_buf[4] = 2;
     elf_buf[5] = 1;
     elf_buf[6] = 1;
     put16(0x10, 2);
-    put16(0x12, 3);
+    put16(0x12, 62);
     put32(0x14, 1);
 
     struct sym *entry = find_sym(global_entry);
@@ -1238,35 +1261,35 @@ static int build_elf(void) {
         set_error("global entry symbol is missing or not in text");
         return -1;
     }
-    uint32_t entry_addr = sym_runtime_value(entry);
-    put32(0x18, entry_addr);
-    put32(0x1C, 52);
-    put32(0x20, 0);
-    put32(0x24, 0);
-    put16(0x28, 52);
-    put16(0x2A, 32);
-    put16(0x2C, (uint16_t)(have_data_segment ? 2 : 1));
+    uint64_t entry_addr = sym_runtime_value(entry);
+    put64(0x18, entry_addr);
+    put64(0x20, 64);
+    put64(0x28, 0);
+    put32(0x30, 0);
+    put16(0x34, 64);
+    put16(0x36, 56);
+    put16(0x38, (uint16_t)(have_data_segment ? 2 : 1));
 
-    int ph = 52;
+    int ph = 64;
     put32(ph + 0, 1);
-    put32(ph + 4, LOAD_OFF);
-    put32(ph + 8, USER_BASE);
-    put32(ph + 12, USER_BASE);
-    put32(ph + 16, (uint32_t)text_len);
-    put32(ph + 20, (uint32_t)final_text_len);
-    put32(ph + 24, 5);
-    put32(ph + 28, 0x1000);
+    put32(ph + 4, 5);
+    put64(ph + 8, LOAD_OFF);
+    put64(ph + 16, USER_BASE);
+    put64(ph + 24, USER_BASE);
+    put64(ph + 32, (uint64_t)text_len);
+    put64(ph + 40, (uint64_t)final_text_len);
+    put64(ph + 48, 0x1000);
 
     if (have_data_segment) {
-        ph += 32;
+        ph += 56;
         put32(ph + 0, 1);
-        put32(ph + 4, (uint32_t)data_file_off);
-        put32(ph + 8, USER_BASE + (uint32_t)final_text_len);
-        put32(ph + 12, USER_BASE + (uint32_t)final_text_len);
-        put32(ph + 16, (uint32_t)data_len);
-        put32(ph + 20, (uint32_t)(data_len + bss_len));
-        put32(ph + 24, 6);
-        put32(ph + 28, 0x1000);
+        put32(ph + 4, 6);
+        put64(ph + 8, (uint64_t)data_file_off);
+        put64(ph + 16, USER_BASE + (uint64_t)final_text_len);
+        put64(ph + 24, USER_BASE + (uint64_t)final_text_len);
+        put64(ph + 32, (uint64_t)data_len);
+        put64(ph + 40, (uint64_t)(data_len + bss_len));
+        put64(ph + 48, 0x1000);
     }
 
     memcpy(elf_buf + LOAD_OFF, text_buf, (size_t)text_len);

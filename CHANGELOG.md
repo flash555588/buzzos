@@ -174,7 +174,7 @@ short log for reviewers and contributors; deeper design notes live under
 
 ### Verification Log
 
-- `make verify QEMU="C:\Program Files\qemu\qemu-system-i386.exe"`
+- `make verify QEMU="C:\Program Files\qemu\qemu-system-x86_64.exe"`
 - `make report`
 - `python -m py_compile tools/check_project.py tools/project_report.py tools/mkinitrd.py`
 - `make check-project`

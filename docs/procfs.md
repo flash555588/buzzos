@@ -25,10 +25,10 @@ system without adding a new syscall for every diagnostic.
 
 ```text
 name BuzzOS
-kind lightweight-i386-posix-like-os
+kind native-x86_64-posix-os
 status experimental
-arch i386
-mode protected32
+arch x86_64
+mode long64
 entrypoints shell,gui,procfs,fs,apps,report
 docs README.md,README.en.md,docs/project-status.md
 log CHANGELOG.md
@@ -111,6 +111,12 @@ These are read-only capacity facts, not tunables.
 mount /fs
 driver minifs
 status ok
+mounted yes
+dirty no
+corrupt no
+recovery_required no
+journal disabled
+last_error none
 lba_start 67584
 sectors 4096
 magic 1397113421
@@ -159,6 +165,9 @@ arp
 tcp
 tcp_rx_buffered
 tcp_rx_dropped
+invalid_frames
+checksum_failures
+fragment_drops
 tx_frames
 rx_frames
 arp_frames
@@ -170,7 +179,8 @@ dhcp_packets
 dns_packets
 ```
 
-The `tcp` line reports whether any TCP PCB is connected and the current open
+The validation counters record frames rejected before protocol code can inspect
+packet-declared offsets or lengths. The `tcp` line reports whether any TCP PCB is connected and the current open
 PCB count, for example `tcp closed open 0`. `tcp_rx_buffered` and
 `tcp_rx_dropped` expose the lightweight TCP demux receive queue state.
 
