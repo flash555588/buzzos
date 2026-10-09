@@ -54,6 +54,7 @@ static volatile uint32_t net_rx_waiters;
 
 static void dbg(const char *s) { serial_puts("[net] "); serial_puts(s); }
 static int net_tcp_dispatch_frame(const void *frame, size_t len);
+static int net_dns_dispatch_frame(const void *frame, size_t len);
 
 static uint32_t net_ms_to_ticks(uint32_t ms) {
     return (ms / 1000u) * TIMER_HZ
@@ -192,7 +193,7 @@ static size_t dev_recv(void *buf, size_t max) {
         size_t n = dev_recv_raw(rxbuf, rxmax);
         if (n == 0)
             return 0;
-        if (net_tcp_dispatch_frame(rxbuf, n))
+        if (net_dns_dispatch_frame(rxbuf, n) || net_tcp_dispatch_frame(rxbuf, n))
             continue;
         if (rxbuf != buf) {
             size_t copy = n < max ? n : max;
@@ -578,16 +579,91 @@ void net_rx_interrupt_notify(void) {
 static uint16_t dns_next_id = 0x1234;
 static uint16_t dns_next_port = 49152;
 
-int net_dns_resolve(const char *hostname, uint32_t *ip_out) {
-    if (!hostname || !hostname[0] || !ip_out)
-        return -1;
+/* Every network reader uses dev_recv. Deliver DNS replies to their waiting
+ * transaction there, so a TCP poller or another resolver cannot consume and
+ * discard them. Slots remain owned until the resolver exits. */
+struct dns_pending_query {
+    int used;
+    uint16_t txid;
+    uint16_t port;
+    size_t reply_length;
+    uint8_t reply[512];
+};
+static struct dns_pending_query dns_queries[MAX_TASKS];
+
+static struct dns_pending_query *dns_query_open(void) {
+    uint32_t flags = irq_save();
+    struct dns_pending_query *slot = NULL;
+    for (unsigned i = 0; i < MAX_TASKS; i++) {
+        if (dns_queries[i].used) continue;
+        slot = &dns_queries[i];
+        slot->used = 1;
+        slot->reply_length = 0;
+        slot->txid = ++dns_next_id;
+        slot->port = ++dns_next_port;
+        if (dns_next_port < 49152 || dns_next_port == 65535)
+            dns_next_port = 49152;
+        break;
+    }
+    irq_restore(flags);
+    return slot;
+}
+
+static int net_dns_dispatch_frame(const void *frame, size_t len) {
+    if (len < sizeof(struct eth_frame) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr))
+        return 0;
+    const struct eth_frame *eth = frame;
+    if (bswap16(eth->ethertype) != 0x0800) return 0;
+    const struct ip_hdr *ip = (const struct ip_hdr *)eth->payload;
+    size_t ihl = (ip->ver_ihl & 15) * 4;
+    if ((ip->ver_ihl >> 4) != 4 || ip->protocol != 17 ||
+            ip->src_ip != net_dns_ip || ip->dst_ip != net_ip ||
+            ihl < sizeof(*ip) || len < sizeof(*eth) + ihl + sizeof(struct udp_hdr))
+        return 0;
+    if (bswap16(ip->frag_off) & 0x3fff) return 0;
+    const struct udp_hdr *udp = (const struct udp_hdr *)((const uint8_t *)ip + ihl);
+    size_t ulen = bswap16(udp->length);
+    size_t ilen = bswap16(ip->total_len);
+    if (bswap16(udp->src_port) != 53 || ulen < sizeof(*udp) + 12 ||
+            ulen > len - sizeof(*eth) - ihl || ilen < ihl + ulen ||
+            ilen > len - sizeof(*eth) || ulen - sizeof(*udp) > 512)
+        return 0;
+    const uint8_t *dns = (const uint8_t *)(udp + 1);
+    if (!(dns[2] & 0x80)) return 0;
+    uint16_t port = bswap16(udp->dst_port);
+    uint16_t txid = ((uint16_t)dns[0] << 8) | dns[1];
+    uint32_t flags = irq_save();
+    int handled = 0;
+    for (unsigned i = 0; i < MAX_TASKS; i++) {
+        struct dns_pending_query *slot = &dns_queries[i];
+        if (!slot->used || slot->port != port || slot->txid != txid) continue;
+        if (!slot->reply_length) {
+            memcpy(slot->reply, dns, ulen - sizeof(*udp));
+            slot->reply_length = ulen - sizeof(*udp);
+        }
+        handled = 1;
+        break;
+    }
+    irq_restore(flags);
+    return handled;
+}
+
+static size_t dns_query_take(struct dns_pending_query *slot, uint8_t *out) {
+    uint32_t flags = irq_save();
+    size_t n = slot->reply_length;
+    if (n) memcpy(out, slot->reply, n);
+    slot->reply_length = 0;
+    irq_restore(flags);
+    return n;
+}
+
+static int net_dns_query(const char *hostname, uint32_t *ip_out,
+                         struct dns_pending_query *slot) {
 
     uint8_t qbuf[512];
     memset(qbuf, 0, sizeof(qbuf));
-    uint16_t txid = ++dns_next_id;
-    uint16_t local_port = ++dns_next_port;
-    if (dns_next_port < 49152 || dns_next_port == 65535)
-        dns_next_port = 49152;
+    uint16_t txid = slot->txid;
+    uint16_t local_port = slot->port;
     qbuf[0] = (uint8_t)(txid >> 8);
     qbuf[1] = (uint8_t)txid;
     qbuf[2] = 0x01; qbuf[3] = 0x00;
@@ -607,34 +683,20 @@ int net_dns_resolve(const char *hostname, uint32_t *ip_out) {
 
         uint32_t deadline = net_deadline_after_ms(NET_DNS_RETRY_TIMEOUT_MS);
         while (!net_deadline_expired(deadline)) {
-            uint8_t rbuf[1514];
-            size_t n = dev_recv(rbuf, sizeof(rbuf));
-            if (n == 0) {
+            uint8_t reply[512];
+            size_t dlen = dns_query_take(slot, reply);
+            if (dlen == 0) {
+                uint8_t frame[1514];
+                (void)dev_recv(frame, sizeof(frame));
+                /* dev_recv may just have routed this query's reply. */
+                if (slot->reply_length) continue;
                 if (net_timer_ready())
                     task_sleep_until(timer_ticks() + 1);
                 else
                     net_poll_backoff();
                 continue;
             }
-            if (n < sizeof(struct eth_frame) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr))
-                continue;
-            struct eth_frame *re = (struct eth_frame *)rbuf;
-            if (bswap16(re->ethertype) != 0x0800) continue;
-            struct ip_hdr *rip = (struct ip_hdr *)re->payload;
-            uint8_t ip_hlen = (uint8_t)((rip->ver_ihl & 0x0F) * 4);
-            if (rip->protocol != 17 || ip_hlen < sizeof(*rip)) continue;
-            if (rip->src_ip != net_dns_ip) continue;
-            if (n < sizeof(struct eth_frame) + ip_hlen + sizeof(struct udp_hdr)) continue;
-            struct udp_hdr *rudp = (struct udp_hdr *)((uint8_t *)rip + ip_hlen);
-            if (bswap16(rudp->src_port) != 53) continue;
-            if (bswap16(rudp->dst_port) != local_port) continue;
-
-            size_t udp_len = bswap16(rudp->length);
-            if (udp_len < sizeof(*rudp) + 12 ||
-                udp_len > n - sizeof(struct eth_frame) - ip_hlen)
-                continue;
-            const uint8_t *dns = (const uint8_t *)(rudp + 1);
-            size_t dlen = udp_len - sizeof(*rudp);
+            const uint8_t *dns = reply;
             const uint8_t *end = dns + dlen;
             if (dns[0] != (uint8_t)(txid >> 8) || dns[1] != (uint8_t)txid)
                 continue;
@@ -677,6 +739,18 @@ int net_dns_resolve(const char *hostname, uint32_t *ip_out) {
     }
     dbg("dns: timeout\n");
     return -1;
+}
+
+int net_dns_resolve(const char *hostname, uint32_t *ip_out) {
+    if (!hostname || !hostname[0] || !ip_out) return -1;
+    struct dns_pending_query *slot = dns_query_open();
+    if (!slot) return -1;
+    int result = net_dns_query(hostname, ip_out, slot);
+    uint32_t flags = irq_save();
+    slot->used = 0;
+    slot->reply_length = 0;
+    irq_restore(flags);
+    return result;
 }
 
 /* ================================================================
@@ -740,6 +814,7 @@ void net_tcp_pcb_init(struct net_tcp_pcb *pcb) {
             net_tcp_rx_buffered = 0;
     }
     net_tcp_unregister_pcb_locked(pcb);
+    __atomic_store_n(&pcb->cancelled, 0, __ATOMIC_RELEASE);
     pcb->dst_ip = 0;
     pcb->dst_port = 0;
     pcb->src_port = 0;
@@ -884,7 +959,8 @@ static int net_tcp_poll_once(void) {
     size_t n = dev_recv_raw(rbuf, sizeof(rbuf));
     if (n == 0)
         return 0;
-    (void)net_tcp_dispatch_frame(rbuf, n);
+    if (!net_dns_dispatch_frame(rbuf, n))
+        (void)net_tcp_dispatch_frame(rbuf, n);
     return 1;
 }
 
@@ -1035,7 +1111,7 @@ static int net_tcp_send_syn(struct net_tcp_pcb *pcb) {
 }
 
 int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
-    if (!pcb)
+    if (!pcb || __atomic_load_n(&pcb->cancelled, __ATOMIC_ACQUIRE))
         return -1;
     uint32_t irq_flags = irq_save();
     if (pcb->state != TCP_STATE_CLOSED || pcb->registered) {
@@ -1075,6 +1151,7 @@ int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
         net_deadline_after_ms(NET_TCP_RETRY_MS) : 0;
     int retries = 0;
     for (int tries = 0;; tries++) {
+        if (__atomic_load_n(&pcb->cancelled, __ATOMIC_ACQUIRE)) return -1;
         net_tcp_poll_once();
         if (pcb->state == TCP_STATE_ESTABLISHED)
             return 0;
@@ -1099,12 +1176,14 @@ int net_tcp_connect_pcb(struct net_tcp_pcb *pcb, uint32_t ip, uint16_t port) {
 }
 
 int net_tcp_send_pcb(struct net_tcp_pcb *pcb, const void *data, size_t len) {
-    if (!pcb || pcb->state != TCP_STATE_ESTABLISHED) return -1;
+    if (!pcb || __atomic_load_n(&pcb->cancelled, __ATOMIC_ACQUIRE) ||
+        pcb->state != TCP_STATE_ESTABLISHED) return -1;
     const uint8_t *p = (const uint8_t *)data;
     size_t left = len;
     if (left == 0)
         return 0;
     while (left > 0) {
+        if (__atomic_load_n(&pcb->cancelled, __ATOMIC_ACQUIRE)) return -1;
         size_t chunk = left > 1200 ? 1200 : left;
         uint8_t pkt[sizeof(struct tcp_hdr) + 1200];
         struct tcp_hdr *th = (struct tcp_hdr *)pkt;
@@ -1136,6 +1215,7 @@ int net_tcp_send_pcb(struct net_tcp_pcb *pcb, const void *data, size_t len) {
             uint32_t deadline = net_timer_ready() ?
                 net_deadline_after_ms(NET_TCP_RETRY_MS) : 0;
             for (int polls = 0;; polls++) {
+                if (__atomic_load_n(&pcb->cancelled, __ATOMIC_ACQUIRE)) return -1;
                 net_tcp_poll_once();
                 if ((int32_t)(pcb->snd_una - want_ack) >= 0) {
                     acknowledged = 1;
@@ -1158,7 +1238,7 @@ int net_tcp_send_pcb(struct net_tcp_pcb *pcb, const void *data, size_t len) {
 }
 
 int net_tcp_recv_pcb(struct net_tcp_pcb *pcb, void *buf, size_t max) {
-    if (!pcb) return -1;
+    if (!pcb || __atomic_load_n(&pcb->cancelled, __ATOMIC_ACQUIRE)) return -1;
     net_tcp_poll_available();
     int queued = net_tcp_take_rx(pcb, buf, max);
     if (queued > 0)
@@ -1173,6 +1253,7 @@ int net_tcp_recv_pcb(struct net_tcp_pcb *pcb, void *buf, size_t max) {
     uint32_t deadline = net_timer_ready() ?
         net_deadline_after_ms(NET_TCP_RECV_TIMEOUT_MS) : 0;
     for (int tries = 0;; tries++) {
+        if (__atomic_load_n(&pcb->cancelled, __ATOMIC_ACQUIRE)) return -1;
         net_tcp_poll_available();
         queued = net_tcp_take_rx(pcb, buf, max);
         if (queued > 0)
@@ -1197,6 +1278,22 @@ int net_tcp_recv_pcb(struct net_tcp_pcb *pcb, void *buf, size_t max) {
 
 void net_tcp_close_pcb(struct net_tcp_pcb *pcb) {
     if (!pcb || pcb->state == TCP_STATE_CLOSED) return;
+    if (__atomic_load_n(&pcb->cancelled, __ATOMIC_ACQUIRE)) {
+        /* Only the I/O owner performs teardown. shutdown() merely sets the
+         * flag, so a concurrent recv never observes a freed/reused PCB. */
+        struct tcp_hdr reset;
+        memset(&reset, 0, sizeof(reset));
+        reset.src_port = bswap16(pcb->src_port);
+        reset.dst_port = bswap16(pcb->dst_port);
+        reset.seq = bswap32(pcb->seq);
+        reset.ack = bswap32(pcb->ack);
+        reset.data_off = (uint8_t)(sizeof(reset) / 4) << 4;
+        reset.flags = TCP_RST | TCP_ACK;
+        reset.checksum = trans_checksum(net_ip, pcb->dst_ip, 6, &reset, sizeof(reset));
+        (void)ip_send(pcb->dst_ip, 6, &reset, sizeof(reset));
+        net_tcp_mark_closed(pcb);
+        return;
+    }
     if (pcb->state == TCP_STATE_ESTABLISHED) {
         uint8_t fn[sizeof(struct tcp_hdr)];
         struct tcp_hdr *fh = (struct tcp_hdr *)fn;

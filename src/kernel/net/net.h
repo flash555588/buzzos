@@ -106,6 +106,7 @@ int  net_dns_resolve(const char *hostname, uint32_t *ip_out);
 #define NET_TCP_RX_CAP 32768
 
 struct net_tcp_pcb {
+    volatile int cancelled; /* shutdown wakes I/O; the I/O owner still closes. */
     uint32_t dst_ip;
     uint16_t dst_port;
     uint16_t src_port;

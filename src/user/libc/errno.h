@@ -4,6 +4,8 @@
 extern int errno;
 
 #define EDOM 33
+#define E2BIG 7
+#define EBADF 9
 #define ERANGE 34
 #define EINVAL 22
 #define ENOMEM 12

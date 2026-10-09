@@ -91,12 +91,14 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_GPU3D_SUBMIT=74, SYS_GPU3D_PRESENT=75, SYS_GPU3D_SCANOUT=76,
        SYS_GPU3D_IMPORT_SHM=77, SYS_GUI_EVENT_SEQUENCE=78,
        SYS_GUI_EVENT_WAIT=79, SYS_GUI_EVENT_SIGNAL=80,
-       SYS_GFX_CURSOR_DEFINE=81, SYS_GFX_CURSOR_MOVE=82 };
+       SYS_GFX_CURSOR_DEFINE=81, SYS_GFX_CURSOR_MOVE=82,
+       SYS_SHUTDOWN=83, SYS_HEAP_PAGES=84 };
 
 void syscall_init(void);
 void syscall_handler(struct syscall_frame *frame);
 void syscall_reset_process(int task_id);
 void syscall_set_heap_start(int task_id, uintptr_t start);
+int syscall_heap_range_contains(uintptr_t addr);
 void syscall_cleanup_process(int task_id);
 void syscall_release_thread(int task_id);
 void syscall_process_exited(int task_id);

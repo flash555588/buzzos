@@ -1,12 +1,14 @@
 #include "paging.h"
 #include "pmm.h"
 #include "serial.h"
+#include "syscall.h"
 #include "task.h"
 #include "user_bounds.h"
 
 #define PT_ENTRIES 512u
 #define ENTRY_ADDR_MASK UINT64_C(0x000FFFFFFFFFF000)
 #define TWO_MIB UINT64_C(0x200000)
+#define PAGE_PENDING UINT64_C(0x400)
 #define FB_TABLES ((size_t)(KERNEL_FB_SIZE / TWO_MIB))
 #define MMIO_TABLES ((size_t)(KERNEL_MMIO_SIZE / TWO_MIB))
 
@@ -113,7 +115,29 @@ void paging_set_framebuffer(uintptr_t phys_addr, size_t size) {
     if (!phys_addr || !size)
         return;
     framebuffer_phys = phys_addr & ~(uintptr_t)(PAGE_SIZE - 1u);
-    framebuffer_size = size > KERNEL_FB_SIZE ? KERNEL_FB_SIZE : size;
+    size_t offset = phys_addr - framebuffer_phys;
+    framebuffer_size = size > KERNEL_FB_SIZE - offset
+        ? KERNEL_FB_SIZE : size + offset;
+}
+
+int paging_ensure_framebuffer_size(size_t size) {
+    if (!size || size > KERNEL_FB_SIZE)
+        return -1;
+    paging_lock();
+    /* Every address space shares these preinstalled kernel page tables.
+     * Add pages in place before a larger mode can write its framebuffer. */
+    if (size > framebuffer_size) {
+        size_t first = (framebuffer_size + PAGE_SIZE - 1u) / PAGE_SIZE;
+        size_t end = (size + PAGE_SIZE - 1u) / PAGE_SIZE;
+        for (size_t slot = first; slot < end; slot++)
+            framebuffer_pts[slot / PT_ENTRIES][slot % PT_ENTRIES] =
+                (pte_t)(framebuffer_phys + slot * PAGE_SIZE) |
+                PAGE_PRESENT | PAGE_RW | PAGE_WT | PAGE_CD;
+        framebuffer_size = size;
+        flush_tlb();
+    }
+    paging_unlock();
+    return 0;
 }
 
 static int configure_pat(void) {
@@ -241,27 +265,74 @@ void *paging_map_mmio(uintptr_t phys_addr, size_t size) {
     return (void *)(KERNEL_MMIO_VIRT + first * PAGE_SIZE + offset);
 }
 
+static int table_empty(const pte_t *table) {
+    for (size_t index = 0; index < PT_ENTRIES; index++)
+        if (table[index]) return 0;
+    return 1;
+}
+
+static void prune_user_tables(uintptr_t cr3, uintptr_t va) {
+    pte_t *tables[4];
+    size_t indices[3] = {(size_t)((va >> 39) & 0x1FFu),
+                         (size_t)((va >> 30) & 0x1FFu),
+                         (size_t)((va >> 21) & 0x1FFu)};
+    tables[0] = (pte_t *)cr3;
+    int depth = 0;
+    while (depth < 3) {
+        pte_t entry = tables[depth][indices[depth]];
+        if (!(entry & PAGE_PRESENT) || !(entry & PAGE_USER) || (entry & PAGE_LARGE))
+            break;
+        tables[depth + 1] = (pte_t *)entry_address(entry);
+        depth++;
+    }
+    for (; depth > 0; depth--) {
+        if (!table_empty(tables[depth])) break;
+        tables[depth - 1][indices[depth - 1]] = 0;
+        pmm_free_pages((uintptr_t)tables[depth], 1);
+    }
+}
+
 int paging_map_user_range_in_space(uintptr_t cr3, uintptr_t va, size_t size) {
     uintptr_t end;
     if (!user_bounds(va, size, &end))
         return -1;
     uintptr_t cur = va & ~(uintptr_t)(PAGE_SIZE - 1u);
+    uintptr_t first = cur;
     end = (end + PAGE_SIZE - 1u) & ~(uintptr_t)(PAGE_SIZE - 1u);
     paging_lock();
     for (; cur < end; cur += PAGE_SIZE) {
         pte_t *pte = walk_pte(cr3, cur, 1, 1);
-        if (!pte) { paging_unlock(); return -1; }
+        if (!pte) goto rollback;
         if (*pte & PAGE_PRESENT)
             continue;
-        uintptr_t phys = pmm_alloc_pages(1);
-        if (!phys) { paging_unlock(); return -1; }
+        uintptr_t phys = pmm_alloc_user_pages(1);
+        if (!phys) goto rollback;
         uint8_t *page = (uint8_t *)phys;
         for (size_t i = 0; i < PAGE_SIZE; i++) page[i] = 0;
-        *pte = (pte_t)phys | PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_NX;
+        *pte = (pte_t)phys | PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_NX | PAGE_PENDING;
+    }
+    for (cur = first; cur < end; cur += PAGE_SIZE) {
+        pte_t *pte = walk_pte(cr3, cur, 0, 1);
+        if (pte) *pte &= ~PAGE_PENDING;
     }
     if (paging_current_cr3() == cr3) flush_tlb();
     paging_unlock();
     return 0;
+rollback:
+    for (uintptr_t address = first; address < cur; address += PAGE_SIZE) {
+        pte_t *pte = walk_pte(cr3, address, 0, 1);
+        if (pte && (*pte & PAGE_PENDING)) {
+            uintptr_t phys = entry_address(*pte);
+            *pte = 0;
+            pmm_free_pages(phys, 1);
+        }
+    }
+    for (uintptr_t address = first & ~(uintptr_t)(TWO_MIB - 1u);
+         address <= cur; address += TWO_MIB)
+        prune_user_tables(cr3, address);
+    if (paging_current_cr3() == cr3) flush_tlb();
+    paging_unlock();
+    return -1;
 }
 
 int paging_map_user_range(uintptr_t va, size_t size) {
@@ -480,8 +551,26 @@ static int is_kernel_table(uintptr_t phys) {
     return 0;
 }
 
+/* Free a page during teardown unless it belongs to a live heap.  A stale or
+ * duplicated teardown once returned a running process's heap page to the PMM,
+ * and the process then faulted writing its own heap. */
+static void destroy_free(uintptr_t phys) {
+    if (phys == 0)
+        return;
+    if (syscall_heap_range_contains(phys)) {
+        serial_puts("[pg] refused to free live heap page ");
+        serial_puthex64(phys);
+        serial_puts("\n");
+        return;
+    }
+    pmm_free_pages(phys, 1);
+}
+
 void paging_destroy_user_space(uintptr_t cr3) {
     if (!cr3 || cr3 == paging_kernel_cr3()) return;
+    serial_puts("[pg] destroy cr3=");
+    serial_puthex64(cr3);
+    serial_puts("\n");
     pte_t *pml4 = (pte_t *)cr3;
     paging_lock();
     for (size_t i4 = 0; i4 < PT_ENTRIES; i4++) {
@@ -499,14 +588,14 @@ void paging_destroy_user_space(uintptr_t cr3) {
                 pte_t *pt = (pte_t *)pt_phys;
                 for (size_t i1 = 0; i1 < PT_ENTRIES; i1++) {
                     if ((pt[i1] & PAGE_PRESENT) && !(pt[i1] & PAGE_SHARED))
-                        pmm_free_pages(entry_address(pt[i1]), 1);
+                        destroy_free(entry_address(pt[i1]));
                 }
-                pmm_free_pages(pt_phys, 1);
+                destroy_free(pt_phys);
             }
-            pmm_free_pages(pd_phys, 1);
+            destroy_free(pd_phys);
         }
-        if (!is_kernel_table(pdpt_phys)) pmm_free_pages(pdpt_phys, 1);
+        if (!is_kernel_table(pdpt_phys)) destroy_free(pdpt_phys);
     }
-    pmm_free_pages(cr3, 1);
+    destroy_free(cr3);
     paging_unlock();
 }

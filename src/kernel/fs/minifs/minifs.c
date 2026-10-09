@@ -226,7 +226,8 @@ static int alloc_block(int clear_data) {
     return -1;
 }
 
-static void free_inode_blocks(int ino) {
+static int free_inode_blocks(int ino) {
+    int result = 0;
     for (int i = 0; i < MINIFS_DIRECT; i++) {
         uint16_t b = inodes[ino].block[i];
         if (b) {
@@ -243,6 +244,8 @@ static void free_inode_blocks(int ino) {
                 if (entries[i])
                     block_used[entries[i] - 1] = 0;
             }
+        } else {
+            result = -1;
         }
         block_used[indirect_block] = 0;
         inodes[ino].indirect = 0;
@@ -263,16 +266,22 @@ static void free_inode_blocks(int ino) {
                         if (inner[j])
                             block_used[inner[j] - 1] = 0;
                     }
+                } else {
+                    result = -1;
                 }
                 block_used[inner_block] = 0;
             }
+        } else {
+            result = -1;
         }
         block_used[outer_block] = 0;
         inodes[ino].double_indirect = 0;
     }
     inodes[ino].size = 0;
     alloc_cursor = 0;
-    flush_bitmap();
+    if (flush_bitmap() < 0)
+        result = -1;
+    return result;
 }
 
 static int block_for_logical(int ino, int logical) {
@@ -813,11 +822,12 @@ int minifs_unlink(const char *path) {
         minifs_unlock();
         return -1;
     }
-    free_inode_blocks(ino);
+    int result = free_inode_blocks(ino);
     zero(&inodes[ino], sizeof(inodes[ino]));
-    flush_inode(ino);
+    if (flush_inode(ino) < 0)
+        result = -1;
     minifs_unlock();
-    return 0;
+    return result;
 }
 
 int minifs_rmdir(const char *path) {
@@ -838,11 +848,12 @@ int minifs_rmdir(const char *path) {
         minifs_unlock();
         return -1;
     }
-    free_inode_blocks(ino);
+    int result = free_inode_blocks(ino);
     zero(&inodes[ino], sizeof(inodes[ino]));
-    flush_inode(ino);
+    if (flush_inode(ino) < 0)
+        result = -1;
     minifs_unlock();
-    return 0;
+    return result;
 }
 
 int minifs_rename(const char *old_path, const char *new_path) {
@@ -889,10 +900,11 @@ int minifs_truncate(const char *path) {
         minifs_unlock();
         return -1;
     }
-    free_inode_blocks(ino);
-    flush_inode(ino);
+    int result = free_inode_blocks(ino);
+    if (flush_inode(ino) < 0)
+        result = -1;
     minifs_unlock();
-    return 0;
+    return result;
 }
 
 int minifs_size_ino(uint16_t ino, size_t *size_out) {

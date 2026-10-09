@@ -4,7 +4,8 @@ param(
     [string]$QemuPath = "",
     [string]$SerialLog = "build/serial-smoke.log",
     [string]$TestImage = "build/buzzos-test.img",
-    [int]$TimeoutSeconds = 45
+    [int]$TimeoutSeconds = 45,
+    [switch]$CoreOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -310,8 +311,16 @@ try {
         "futexcanceltest",
         "threads",
         "futexblocktest",
-        "ps"
+        "ps",
+        # Closing a minifs descriptor syncs its write-back cache. The final
+        # directory listing flushes metadata dirtied by unlink tests before
+        # QEMU quits, so host filesystem checks see a consistent image.
+        "ls /fs"
     )
+    if ($CoreOnly) {
+        Write-Host "Core smoke: legacy ELF32 basm/bcc execution is excluded."
+        $commands = @($commands | Where-Object { $_ -notmatch 'basm-full|hello-bcc|^bcc ' })
+    }
     foreach ($command in $commands) {
         Type-Command $command
         if ($command -like "wget 10.0.2.2 *") {
@@ -352,7 +361,7 @@ try {
         "interfaces",
         "limits",
         "name\s+BuzzOS",
-        "kind\s+lightweight-i386-posix-like-os",
+        "kind\s+native-x86_64-posix-os",
         "entrypoints\s+shell,gui,procfs,fs,apps,report",
         "docs\s+README\.md,README\.en\.md,docs/project-status\.md",
         "log\s+CHANGELOG\.md",
@@ -373,7 +382,7 @@ try {
         "pipe_buf_bytes\s+8192",
         "max_mounts\s+8",
         "fs_name_len\s+24",
-        "managed_limit_bytes\s+268435456",
+        "managed_limit_bytes\s+3758096384",
         "minifs_lba_start\s+67584",
         "minifs_sectors\s+65536",
         "minifs_status\s+ok",
@@ -408,7 +417,7 @@ try {
         "host_check\s+make fs-check",
         "host_repair\s+make fs-repair",
         "page_size\s+4096",
-        "managed_limit\s+268435456",
+        "managed_limit\s+3758096384",
         "OWNER\s+FD\s+OF\s+REFS\s+FLAGS\s+KIND\s+NAME\s+DETAIL",
         "[0-9]+\s+0\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",
         "[0-9]+\s+1\s+[0-9]+\s+1\s+rw\s+dev\s+console\s+pos=0",
@@ -437,9 +446,9 @@ try {
         "paint",
         "calculator",
         "/fs minifs",
-        "inodes\s+[0-9]+/128",
-        "blocks\s+[0-9]+/3959",
-        "data_lba\s+67721",
+        "inodes\s+[0-9]+/2048",
+        "blocks\s+[0-9]+/63363",
+        "data_lba\s+69757",
         "GUI apps are launched through the desktop",
         "gui opens the desktop",
         "/proc is read-only runtime state",
@@ -482,6 +491,7 @@ try {
         "\[exec\] exited 42",
         "write: open failed",
         "touch: failed",
+        "elfbad: valid 0",
         "elfbad: vaddr -1",
         "elfbad: filesz -1",
         "elfbad: memsz -1",
@@ -493,6 +503,9 @@ try {
         "threadreuse: joined 40",
         "socketleak: opened 8",
         "heaptest: ok 320K realloc reuse",
+        "heaptest: ok alignment 16",
+        "heaptest: ok 64-bit allocation boundaries",
+        "heaptest: ok 4096 mixed allocation cycles",
         "audiotest: ok 33075 bytes",
         "nsporttest: ok surface scheduler",
         "nshtmltest: ok HTML DOM CSS form img",
@@ -516,6 +529,18 @@ try {
         "futexblock: woke\s+1",
         "PID\s+STATE"
     )
+    if ($CoreOnly) {
+        $legacyPatterns = @(
+            "basm: wrote /fs/basm-full \([0-9]+ bytes\)",
+            "\[basm\] exited 0",
+            "basm-full-ok",
+            "\[exec\] exited 7",
+            "bcc: wrote /fs/hello-bcc",
+            "bcc-hello-ok",
+            "\[exec\] exited 42"
+        )
+        $expected = @($expected | Where-Object { $_ -notin $legacyPatterns })
+    }
     foreach ($pattern in $expected) {
         if ($log -notmatch $pattern) {
             Fail-WithLog "Missing expected serial output: $pattern"

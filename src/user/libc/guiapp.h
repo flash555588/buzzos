@@ -37,6 +37,8 @@ enum {
     GUIAPP_EVT_TICK = 8,
     /* Desktop -> app: shared->capabilities changed (also mirrored in key). */
     GUIAPP_EVT_CAPABILITIES = 9,
+    /* Browser input overflow: release held input after queued events. */
+    GUIAPP_EVT_INPUT_RESET = 10,
 };
 
 enum { GUIAPP_CMD_COPY = 1, GUIAPP_CMD_PASTE = 2, GUIAPP_CMD_CUT = 3 };
@@ -78,6 +80,10 @@ enum {
     GUIAPP_KEY_DOWN,
     GUIAPP_KEY_RIGHT,
     GUIAPP_KEY_LEFT,
+    GUIAPP_KEY_ZOOM_IN = 263,
+    GUIAPP_KEY_ZOOM_OUT,
+    GUIAPP_KEY_ZOOM_RESET,
+    GUIAPP_KEY_COUNT,
 };
 
 struct guiapp_event {
@@ -136,6 +142,16 @@ struct guiapp_shared_surface {
     volatile uint16_t canvas_string_bytes;
     struct guiapp_canvas_command canvas[GUIAPP_CANVAS_MAX_COMMANDS];
     char canvas_strings[GUIAPP_CANVAS_STRING_BYTES];
+    /* Optional app -> desktop execution monitor; zero for other apps.
+     * Append within the reserved header to preserve existing field offsets. */
+    volatile uint32_t script_control_enabled;
+    volatile uint32_t script_running;
+    volatile uint32_t script_started_ms;
+    /* Desktop -> app explicit cancellation, independent of the event pipe. */
+    volatile uint32_t script_cancel_sequence;
+    volatile uint32_t script_control_key;
+    /* App -> desktop event-pipe credits (one complete event consumed). */
+    volatile uint32_t events_consumed;
 };
 typedef char guiapp_shared_header_fits[
     sizeof(struct guiapp_shared_surface) <= GUIAPP_SHARED_HEADER_SIZE ? 1 : -1];

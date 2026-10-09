@@ -37,16 +37,17 @@ Add-Range 0x2000 0x206F  # General punctuation
 Add-Range 0x3000 0x30FF  # CJK punctuation, Hiragana, Katakana
 Add-Range 0xFF00 0xFFEF  # Full-width forms
 
-# GB2312 gives a compact, deterministic set of roughly 7,500 common Chinese
-# characters without embedding all 20,992 unified ideographs.
-$gb = [System.Text.Encoding]::GetEncoding(936)
-for ($lead = 0xA1; $lead -le 0xF7; $lead++) {
-    for ($trail = 0xA1; $trail -le 0xFE; $trail++) {
-        $text = $gb.GetString([byte[]]@($lead, $trail))
-        if ($text.Length -gt 0 -and $text[0] -ne [char]0xFFFD) {
-            $cp = [char]::ConvertToUtf32($text, 0)
-            if ($cp -gt 0x7F) { [void]$set.Add($cp) }
-        }
+$gb = [System.Text.Encoding]::GetEncoding(936,
+    [System.Text.EncoderExceptionFallback]::new(),
+    [System.Text.DecoderExceptionFallback]::new())
+for ($lead = 0x81; $lead -le 0xFE; $lead++) {
+    for ($trail = 0x40; $trail -le 0xFE; $trail++) {
+        if ($trail -eq 0x7F) { continue }
+        try { $text = $gb.GetString([byte[]]@($lead, $trail)) }
+        catch [System.Text.DecoderFallbackException] { continue }
+        if ($text.Length -ne 1) { continue }
+        $cp = [char]::ConvertToUtf32($text, 0)
+        if ($cp -gt 0x7F -and $cp -ne 0xFFFD) { [void]$set.Add($cp) }
     }
 }
 $points = [int[]]$set

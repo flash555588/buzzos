@@ -12,6 +12,7 @@ from pathlib import Path
 
 from check_minifs import FsError, MiniFsImage, parse_make_int
 from workflow import WORKFLOW
+import elf64
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -103,6 +104,7 @@ def collect_guide_docs():
         ("README.md", "main quickstart and feature map"),
         ("README.en.md", "English quickstart and feature map"),
         ("docs/boot-guide.md", "host setup, build, run, QEMU input, and boot troubleshooting"),
+        ("docs/x86_64.md", "native ELF64 ABI, memory layout and validation boundaries"),
         ("docs/user-guide.md", "inside-BuzzOS shell, GUI, filesystem, and diagnostics guide"),
         ("docs/project-status.md", "maturity status, gates, and roadmap"),
         ("docs/user-gui.md", "seeded user GUI app examples"),
@@ -120,22 +122,10 @@ def collect_guide_docs():
 
 
 def elf_load_end(path):
-    data = path.read_bytes()
-    if len(data) < 52 or data[:4] != b"\x7fELF":
+    try:
+        return elf64.load_end(path.read_bytes())
+    except ValueError:
         return None
-    _ident, _etype, _emachine, _version, _entry, phoff, _shoff, _flags, _ehsize, phentsize, phnum, *_rest = struct.unpack_from(
-        "<16sHHIIIIIHHHHHH", data, 0
-    )
-    if phentsize != 32 or phoff + phnum * phentsize > len(data):
-        return None
-    highest = 0
-    for i in range(phnum):
-        off = phoff + i * phentsize
-        ptype, _poff, vaddr, _paddr, _filesz, memsz, _flags, _align = struct.unpack_from("<IIIIIIII", data, off)
-        if ptype == 1:
-            highest = max(highest, vaddr + memsz)
-    return highest or None
-
 
 def collect_user_elves():
     user_dir = ROOT / "build" / "user"
@@ -146,11 +136,12 @@ def collect_user_elves():
         data = elf.read_bytes()
         end = elf_load_end(elf)
         stripped = "-"
-        if len(data) >= 52 and data[:4] == b"\x7fELF":
-            shoff = struct.unpack_from("<I", data, 32)[0]
-            shentsize = struct.unpack_from("<H", data, 46)[0]
-            shnum = struct.unpack_from("<H", data, 48)[0]
+        try:
+            fields = elf64.header(data)
+            shoff, shentsize, shnum = fields[6], fields[11], fields[12]
             stripped = "yes" if shoff == 0 and shentsize == 0 and shnum == 0 else "no"
+        except ValueError:
+            stripped = "invalid ELF64"
         rows.append({
             "name": elf.name,
             "size": elf.stat().st_size,
@@ -282,7 +273,7 @@ def collect_project_identity():
 def collect_health_interfaces():
     procfs = read_text_if_exists("src/kernel/fs/procfs.c")
     shell = read_text_if_exists("src/user/bin/shell.c")
-    gui = read_text_if_exists("src/user/bin/gui.c")
+    gui = read_text_if_exists("src/user/bin/terminal.c")
     smoke = read_text_if_exists("scripts/smoke.ps1")
     return [
         {
@@ -311,7 +302,7 @@ def collect_health_interfaces():
 def collect_fs_interfaces():
     procfs = read_text_if_exists("src/kernel/fs/procfs.c")
     shell = read_text_if_exists("src/user/bin/shell.c")
-    gui = read_text_if_exists("src/user/bin/gui.c")
+    gui = read_text_if_exists("src/user/bin/terminal.c")
     smoke = read_text_if_exists("scripts/smoke.ps1")
     docs = read_text_if_exists("docs/procfs.md") + "\n" + read_text_if_exists("docs/user-guide.md")
     return [
@@ -458,7 +449,7 @@ def collect_ipc_status():
 def collect_screenshots():
     names = ["app-center", "textedit", "textedit-maximized", "paint", "calculator",
              "filemanager", "filemanager-textedit", "terminal-about"]
-    names += ["many-windows", "dock-expanded"]
+    names += ["many-windows", "dock-expanded", "app-startup"]
     rows = []
     for name in names:
         path = ROOT / "build" / "gui-smoke" / f"{name}.png"
@@ -492,7 +483,7 @@ def table(headers, rows):
     return out
 
 
-def build_report(python_cmd="python", make_cmd="make", qemu_cmd="qemu-system-i386"):
+def build_report(python_cmd="python", make_cmd="make", qemu_cmd="qemu-system-x86_64"):
     makefile = read_text_if_exists("Makefile")
     boot_sectors = parse_make_int("BOOT_PARTITION_SECTORS", 0)
     fs_start = parse_make_int("FS_START_SECTOR", 512)
@@ -513,6 +504,11 @@ def build_report(python_cmd="python", make_cmd="make", qemu_cmd="qemu-system-i38
     lines.append("# BuzzOS Project Report")
     lines.append("")
     lines.append(f"Generated: {stamp}")
+    lines.append("")
+    lines.append("Native x86_64/ELF64 validation: use `make core-smoke` and "
+                 "`make gui-startup-smoke`. Legacy basm/bcc emit ELF32; "
+                 "full `make verify` still includes their execution tests. "
+                 "Log and screenshot presence alone does not establish a passing suite.")
     lines.append("")
 
     lines.append("## Host Doctor")
@@ -665,7 +661,7 @@ def main():
     parser.add_argument("--print", action="store_true", help="also print the report to stdout")
     parser.add_argument("--python", default="python", help="Python command shown in host doctor")
     parser.add_argument("--make", default="make", help="Make command shown in host doctor")
-    parser.add_argument("--qemu", default="qemu-system-i386", help="QEMU command/path shown in host doctor")
+    parser.add_argument("--qemu", default="qemu-system-x86_64", help="QEMU command/path shown in host doctor")
     args = parser.parse_args()
 
     report = build_report(args.python, args.make, args.qemu)

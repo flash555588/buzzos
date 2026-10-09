@@ -28,6 +28,7 @@
 #include "libc.h"
 #include "palette.h"
 #include "uikit.h"
+#include "app_identity.h"
 #include "../../kernel/drv/font_builtin.h"
 
 struct appui_rect {
@@ -388,11 +389,10 @@ static inline void appui_button_ex(uint32_t *fb, int w, int h,
         edge = UI_ACCENT_DARK1;
         fg = UI_TEXT_ON_ACCENT;
     } else if (variant == APPUI_BTN_DANGER) {
-        bg = pressed ? plt_shade(UI_SYS_CRITICAL, 70)
-                     : (hovered ? UI_SYS_CRITICAL
-                                : plt_shade(UI_SYS_CRITICAL, 85));
+        bg = ui_blend(UI_SYS_CRITICAL, UI_BG_SOLID,
+                       pressed ? 100 : (hovered ? 65 : 35));
         edge = UI_SYS_CRITICAL;
-        fg = UI_TEXT_ON_ACCENT;
+        fg = UI_SYS_CRITICAL;
     } else if (variant == APPUI_BTN_GHOST) {
         bg = pressed ? UI_SUBTLE_PRESSED
                      : (hovered ? UI_SUBTLE_HOVER : UI_BG_SOLID);
@@ -409,7 +409,10 @@ static inline void appui_button_ex(uint32_t *fb, int w, int h,
     ui_stroke_round(&s, box, UI_RADIUS_CONTROL, 1, edge, 255);
     ts = ui_style(UI_FONT_BODY, fg);
     ts.align = UI_ALIGN_CENTER;
-    ui_text_in(&s, ui_rect_inset(box, 6), label, ts);
+    int pad_y = ui_max(0, ui_min(6, (box.h - ui_font_height(ts.size)) / 2));
+    ui_text_in(&s, ui_rect_make(box.x + 6, box.y + pad_y,
+                              ui_max(0, box.w - 12), ui_max(0, box.h - pad_y * 2)),
+               label, ts);
 }
 
 static inline void appui_button(uint32_t *fb, int w, int h,
@@ -533,6 +536,27 @@ static inline void appui_separator(uint32_t *fb, int w, int h, int x, int y,
               UI_STROKE_DIVIDER, 255);
 }
 
+static inline void appui_statusbar(uint32_t *fb, int w, int h,
+                                   struct appui_rect r, const char *text) {
+    struct ui_surface s = appui_surface(fb, w, h);
+    ui_fill(&s, appui_to_ui(r), UI_BG_MICA);
+    ui_fill(&s, ui_rect_make(r.x, r.y, r.w, 1), UI_STROKE_DIVIDER);
+    appui_label(fb, w, h, appui_rect_make(r.x + 12, r.y, r.w - 24, r.h),
+                text, UI_FONT_CAPTION, UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
+}
+
+static inline void appui_empty_state(uint32_t *fb, int w, int h,
+                                     struct appui_rect r, const char *app,
+                                     const char *title, const char *hint) {
+    struct ui_surface s = appui_surface(fb, w, h);
+    int cy = r.y + appui_max(0, (r.h - 132) / 2);
+    ui_app_badge(&s, app, r.x + (r.w - 48) / 2, cy, 48);
+    appui_label(fb, w, h, appui_rect_make(r.x + 16, cy + 60, r.w - 32, 30),
+                title, UI_FONT_SUBTITLE, UI_TEXT_PRIMARY, UI_ALIGN_CENTER);
+    appui_label(fb, w, h, appui_rect_make(r.x + 16, cy + 94, r.w - 32, 26),
+                hint, UI_FONT_BODY, UI_TEXT_SECONDARY, UI_ALIGN_CENTER);
+}
+
 /* Dim everything behind a modal.  Draw before the dialog itself. */
 static inline void appui_scrim(uint32_t *fb, int w, int h) {
     struct ui_surface s = appui_surface(fb, w, h);
@@ -568,7 +592,9 @@ static inline void appui_list_row(uint32_t *fb, int w, int h,
                       1, UI_ACCENT_FILL);
     if (icon >= 0) {
         ui_icon(&s, icon, r.x + 14, r.y + (r.h - 18) / 2, 18,
-                selected ? UI_ACCENT_FILL : fg, 255);
+                selected ? UI_ACCENT_FILL :
+                    (icon == UI_ICON_FOLDER ? 0xE5B45Eu :
+                     (icon == UI_ICON_DOCUMENT ? 0x80B5FAu : fg)), 255);
         text_x = r.x + 42;
     }
     appui_label(fb, w, h, appui_rect_make(text_x, r.y, r.x + r.w - text_x - 8,

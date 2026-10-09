@@ -322,3 +322,6 @@ BuzzOS remains a teaching and experimentation system, not a complete Unix:
 - Calculator: [src/user/bin/calculator.c](src/user/bin/calculator.c)
 - GUI app protocol: [src/user/libc/guiapp.h](src/user/libc/guiapp.h)
 - User libc: [src/user/libc/libc.c](src/user/libc/libc.c)
+
+
+2026-10-09: [系统平台更新](docs/system-update-20261009.md)，桌面应用使用 `appui.h` / `guiapp.h`。

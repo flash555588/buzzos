@@ -2,6 +2,10 @@
 #include "guiapp.h"
 #include "palette.h"
 #include "uikit.h"
+#include "font_ui_display.h"
+#include "app_identity.h"
+#include "metro_tiles.h"
+#include "ui_motion.h"
 #include "gpucomp.h"
 #include "pinyin_data.h"
 #include "../../kernel/drv/font_builtin.h"
@@ -13,6 +17,16 @@ enum {
     KEY_DOWN,
     KEY_RIGHT,
     KEY_LEFT,
+    KEY_HOME,
+    KEY_END,
+    KEY_DELETE,
+    KEY_WINDOW_CLOSE = 300,
+    KEY_WORKSPACE,
+    KEY_TASK_SWITCH,
+    KEY_MAXIMIZE,
+    KEY_MINIMIZE,
+    KEY_SNAP_RIGHT,
+    KEY_SNAP_LEFT,
 
     WIN_LAUNCHER = 0,
     WIN_STATUS = 1,
@@ -21,13 +35,13 @@ enum {
     WIN_COUNT = WIN_APP_BASE + MAX_GUI_APPS,
 
     MAX_APPS = 16,
-    APP_DEFAULT_W = 560,
-    APP_DEFAULT_H = 360,
+    APP_DEFAULT_W = 680,
+    APP_DEFAULT_H = 430,
     APP_SURFACE_MAX_W = GUIAPP_MAX_W,
     APP_SURFACE_MAX_H = GUIAPP_MAX_H,
     MAX_SW = GUIAPP_MAX_W,
     MAX_SH = GUIAPP_MAX_H,
-    DISPLAY_MODE_COUNT = 11,
+    DISPLAY_MODE_COUNT = 14,
     DISPLAY_MODE_COLS = 2,
     DISPLAY_BTN_H = 34,
     DISPLAY_BTN_GAP = 6,
@@ -36,17 +50,15 @@ enum {
     /* The System pane's resolution section starts below the flowed text rows;
      * its Y is derived by status_res_head_y(), not hardcoded, so it cannot
      * collide with the last row when the UI font or the row count changes. */
-    STATUS_TEXT_ROWS = 9,
+    STATUS_TEXT_ROWS = 10,
     STATUS_SECTION_GAP = 10,
-    /* modern desktop layout: no top bar, so the work area starts at the screen top and
-     * ends at the taskbar.  WORK_TOP is kept as a named zero because window
-     * clamping, damage and maximise all measure from it. */
-    WORK_TOP = 0,
+    /* Brand strip and floating dock frame the application workspace. */
+    WORK_TOP = 72,
     WINDOW_TITLE_H = UI_TITLEBAR_H,
     TASKBAR_H = UI_TASKBAR_H,
-    LAUNCHER_HEADER_H = 36,
-    LAUNCHER_ROW_STEP = 42,
-    LAUNCHER_ROW_H = 36,
+    LAUNCHER_HEADER_H = 224,
+    LAUNCHER_ROW_STEP = 144,
+    LAUNCHER_ROW_H = 128,
     /* Taskbar buttons are icon-only and square-ish, as in the theme; the label
      * moves to the hover tooltip. */
     TB_BTN_W = UI_TASKBAR_BTN_W,
@@ -59,11 +71,10 @@ enum {
     TB_MAX_ITEMS = WIN_COUNT + 8,
     /* Start menu flyout. */
     START_W = 480,
-    START_COLS = 4,
-    START_TILE = 96,
-    START_TILE_GAP = 8,
-    START_PAD = 20,
-    START_FOOTER_H = 56,
+    START_ROW_H = 72,
+    START_PAD = 24,
+    START_HEADER_H = 108,
+    START_FOOTER_H = 72,
     CONTEXT_MENU_W = 150,
     CONTEXT_ITEM_STEP = 40,
     CONTEXT_ITEM_H = 36,
@@ -106,6 +117,9 @@ static const struct display_mode display_modes[DISPLAY_MODE_COUNT] = {
     {1280, 960, "1280x960", "4:3"},
     {1600, 1200, "1600x1200", "4:3"},
     {1280, 1024, "1280x1024", "5:4"},
+    {800, 600, "800x600", "4:3"},
+    {640, 960, "640x960", "2:3 portrait"},
+    {800, 1200, "800x1200", "2:3 portrait"},
 };
 
 struct window {
@@ -159,6 +173,9 @@ struct app_session {
     int wants_tick;
     uint32_t shm_token;
     struct guiapp_shared_surface *shared;
+    uint32_t events_sent;
+    int script_busy_visible;
+    int input_overflow;
     uint32_t gpu_resource;
     uint32_t *gpu_pixels;
     int gpu_resource_w;
@@ -188,9 +205,9 @@ struct app_session {
 static int sw;
 static int sh;
 static uint32_t display_backend;
-/* Local fallback when scanout cannot be mapped into user space. */
+/* Compose linear framebuffers offscreen; also used if GPU mapping fails. */
 static uint32_t fb_local[MAX_SW * MAX_SH];
-/* Compose target: GPU/LFB scanout (zero-copy) or fb_local. */
+/* Compose target: GPU backing memory (explicit flush) or fb_local. */
 static uint32_t *fb = fb_local;
 static int fb_stride = MAX_SW; /* pixels per row in fb */
 static int scanout_direct;     /* 1 = writing guest scanout memory */
@@ -202,11 +219,31 @@ static struct app_entry apps[MAX_APPS];
 static struct app_session app_sessions[MAX_GUI_APPS];
 static int app_count;
 static int app_selected;
-static int app_last_click = -1;
-static unsigned int app_last_click_tick;
+static int preferences_saved;
 static int taskbar_hover = -1;
 static int taskbar_expanded;
 static int start_open;
+static char start_query[64];
+static int start_selected;
+static int start_scroll;
+enum { MOTION_FRAME_MS = 16, HOME_MOTION_MS = 220, HOME_STAGGER_MS = 14 };
+static struct ui_motion search_motion;
+static struct ui_motion window_motion[WIN_COUNT];
+static int window_motion_pending[WIN_COUNT];
+enum { WINDOW_EXIT_NONE, WINDOW_EXIT_MINIMIZE, WINDOW_EXIT_CLOSE };
+static int window_exit[WIN_COUNT];
+static struct ui_motion caption_motion[WIN_COUNT][3];
+static struct ui_motion dock_hover_motion[WIN_COUNT + 4];
+static struct ui_motion dock_press_motion[WIN_COUNT + 4];
+static struct ui_motion dock_active_motion[WIN_COUNT + 4];
+static struct ui_motion home_scroll_motion[2], result_scroll_motion;
+static struct ui_motion tile_hover_motion[MAX_APPS];
+static struct ui_motion tile_press_motion[MAX_APPS];
+static uint32_t motion_frame_ms, home_motion_start;
+static int home_motion_active, motion_home_visible, motion_pointer_down;
+static int launcher_press = -1;
+static void finish_window_exits(void);
+static void refresh_pointer_hover_damage(void);
 static int pointer_x;
 static int pointer_y;
 static int prev_buttons;
@@ -244,8 +281,10 @@ static int pointer_drawn_y;
 static int pointer_drawn_valid;
 static int hardware_cursor_ready;
 static int keyevent_fd = -1;
+/* Releases follow the app that received the press, even while searching or
+ * switching windows. A palette must not leave games with a stuck held key. */
+static uint8_t key_owner[GUIAPP_KEY_COUNT];
 static unsigned int tick;
-static unsigned int last_render_tick;
 static uint32_t last_app_tick_ms;
 static uint32_t last_clock_second = (uint32_t)-1;
 static volatile int desktop_dirty = 1;
@@ -400,18 +439,57 @@ static struct rect shadow_bounds(struct rect r) {
 }
 
 /* Damage a window including its drop shadow. */
+/* Presentation-only translation: layout, hit tests and app configures retain
+ * their final geometry. Both software pixels and imported GPU layers use it. */
+static struct rect motion_paint_rect(int id, struct rect r) {
+    r.y += window_motion[id].value;
+    return r;
+}
+
+static void window_motion_cancel(int id) {
+    struct rect old = motion_paint_rect(id, windows[id].r);
+    ui_motion_reset(&window_motion[id], 0);
+    window_motion_pending[id] = 0;
+    window_exit[id] = WINDOW_EXIT_NONE;
+    queue_damage(union_rect(shadow_bounds(old), shadow_bounds(windows[id].r)));
+}
+
+static void motion_cancel_all(void) {
+    finish_window_exits();
+    for (int id = 0; id < WIN_COUNT; id++) window_motion_cancel(id);
+    for (int i = 0; i < MAX_APPS; i++) {
+        ui_motion_reset(&tile_hover_motion[i], 0);
+        ui_motion_reset(&tile_press_motion[i], 0);
+    }
+    ui_motion_reset(&search_motion, start_open ? 255 : 0);
+    home_motion_active = 0;
+    motion_home_visible = focus == WIN_LAUNCHER;
+    launcher_press = -1;
+    for (int id = 0; id < WIN_COUNT; id++)
+        for (int control = 0; control < 3; control++)
+            ui_motion_reset(&caption_motion[id][control], 0);
+    for (int i = 0; i < WIN_COUNT + 4; i++) {
+        ui_motion_reset(&dock_hover_motion[i], 0);
+        ui_motion_reset(&dock_press_motion[i], 0);
+        ui_motion_reset(&dock_active_motion[i], 0);
+    }
+    ui_motion_reset(&home_scroll_motion[0], scroll_x[WIN_LAUNCHER]);
+    ui_motion_reset(&home_scroll_motion[1], scroll_y[WIN_LAUNCHER]);
+    ui_motion_reset(&result_scroll_motion, start_scroll);
+}
+
 static void win_damage(int id) {
     if (id < 0 || id >= WIN_COUNT)
         return;
-    queue_damage(shadow_bounds(windows[id].r));
+    queue_damage(union_rect(shadow_bounds(windows[id].r),
+                           shadow_bounds(motion_paint_rect(id, windows[id].r))));
 }
 
-/* Region a window may occupy: the screen minus the taskbar.  With the top bar
- * gone this starts at y=0, and a maximised window fills it edge to edge
- * rather than sitting inside a margin as it did around the old
- * floating dock. */
+/* Compact applications use all space above the taskbar. Larger displays retain
+ * the workspace heading above floating, maximised and snapped windows. */
 static struct rect work_area(void) {
-    return (struct rect){0, WORK_TOP, sw, sh - WORK_TOP - TASKBAR_H};
+    int top = sw < 1000 ? 0 : WORK_TOP;
+    return (struct rect){0, top, sw, sh - top - TASKBAR_H};
 }
 
 /* Damage the taskbar plus the tooltip and overflow-flyout area above it.
@@ -745,16 +823,6 @@ static int gui_codepoint_advance(uint32_t cp, int x_from_line_start) {
     return gui_codepoint_width(cp);
 }
 
-static int gui_text_width(const char *s) {
-    int width = 0;
-    while (s && *s) {
-        uint32_t cp = gui_utf8_next(&s);
-        if (cp == '\n') break;
-        width += gui_codepoint_advance(cp, width);
-    }
-    return width;
-}
-
 /* Themed button: a filled rounded rect with a hairline stroke, accent-filled
  * when it is the default action.  Accent fills use the light end of the ramp
  * with black text, which is what makes a the theme primary button read as bright
@@ -828,7 +896,26 @@ static int read_key_poll(void) {
     case 'B': return KEY_DOWN;
     case 'C': return KEY_RIGHT;
     case 'D': return KEY_LEFT;
-    default: return KEY_ESC;
+    case 'H': return KEY_HOME;
+    case 'F': return KEY_END;
+    case '+': return GUIAPP_KEY_ZOOM_IN;
+    case '-': return GUIAPP_KEY_ZOOM_OUT;
+    case '0': return GUIAPP_KEY_ZOOM_RESET;
+    case '3':
+        (void)read_raw_poll(); /* Delete's terminating '~'. */
+        return KEY_DELETE;
+    case 'Q': return KEY_WINDOW_CLOSE;
+    case 'W': return KEY_WORKSPACE;
+    case 'T': return KEY_TASK_SWITCH;
+    case 'a': return KEY_MAXIMIZE;
+    case 'b': return KEY_MINIMIZE;
+    case 'c': return KEY_SNAP_RIGHT;
+    case 'd': return KEY_SNAP_LEFT;
+    default:
+        /* Consume an unsupported CSI without mistaking it for Escape. */
+        for (int i = 0; i < 12 && c2 >= 0 && c2 < 0x40; i++)
+            c2 = read_raw_poll();
+        return 299;
     }
 }
 
@@ -843,6 +930,7 @@ static void clamp_scroll(int id);
 static void activate(int id);
 static void update_hover_app(int force);
 static void run_app_with_arg(const char *path, const char *argument);
+static void save_preferences(void);
 static void gui_log(const char *message) {
     puts(message);
 }
@@ -896,9 +984,44 @@ static int app_slot_for_win(int id) {
     return slot >= 0 && slot < MAX_GUI_APPS ? slot : -1;
 }
 
+/* Keep the shell out of a blocking write when the browser's renderer cannot
+ * consume input. 64 complete events fit well inside the 8192-byte pipe.
+ * The bounded backlog retains input; further input is rejected while full.
+ * Stop/close is signalled separately and remains available even then. */
+static int app_event_has_capacity(int slot) {
+    struct app_session *app = &app_sessions[slot];
+    if (!app->shared || !app->shared->script_control_enabled) return 1;
+    uint32_t consumed = __atomic_load_n(&app->shared->events_consumed, __ATOMIC_ACQUIRE);
+    return (uint32_t)(app->events_sent - consumed) < 64;
+}
+
 static int app_send_event(int slot, int type, int x, int y, int key, int buttons, int wheel) {
     if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used)
         return -1;
+    struct guiapp_shared_surface *shared = app_sessions[slot].shared;
+    if (shared && shared->script_control_enabled &&
+        (type == GUIAPP_EVT_CLOSE ||
+         (type == GUIAPP_EVT_KEY && buttons && shared->script_running &&
+          (key == GUIAPP_KEY_ESC || key == 18)))) {
+        shared->script_control_key = type == GUIAPP_EVT_CLOSE ? 0 : (uint32_t)key;
+        __atomic_add_fetch(&shared->script_cancel_sequence, 1, __ATOMIC_RELEASE);
+        /* Escape belongs to the browser stop action while script is busy,
+         * never to a later page key event. Reload is also out of band and
+         * is consumed by the renderer's main loop after it unwinds. */
+        if (type == GUIAPP_EVT_KEY) return 0;
+    }
+    if (!app_event_has_capacity(slot)) {
+        app_sessions[slot].input_overflow = 1;
+        return 0;
+    }
+    if (app_sessions[slot].input_overflow && type != GUIAPP_EVT_INPUT_RESET) {
+        app_sessions[slot].input_overflow = 0;
+        app_send_event(slot, GUIAPP_EVT_INPUT_RESET, 0, 0, 0, 0, 0);
+        if (!app_event_has_capacity(slot)) {
+            app_sessions[slot].input_overflow = 1;
+            return 0;
+        }
+    }
     struct guiapp_event ev;
     memset(&ev, 0, sizeof(ev));
     ev.magic = GUIAPP_MAGIC;
@@ -910,12 +1033,26 @@ static int app_send_event(int slot, int type, int x, int y, int key, int buttons
     ev.key = key;
     ev.buttons = buttons;
     ev.wheel = wheel;
-    return write_full(app_sessions[slot].to_fd, &ev, (int)sizeof(ev));
+    int result = write_full(app_sessions[slot].to_fd, &ev, (int)sizeof(ev));
+    if (result == 0) app_sessions[slot].events_sent++;
+    return result;
 }
 
 static int app_send_text(int slot, const char *value) {
     if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used || !value)
         return -1;
+    if (!app_event_has_capacity(slot)) {
+        app_sessions[slot].input_overflow = 1;
+        return 0;
+    }
+    if (app_sessions[slot].input_overflow) {
+        app_sessions[slot].input_overflow = 0;
+        app_send_event(slot, GUIAPP_EVT_INPUT_RESET, 0, 0, 0, 0, 0);
+        if (!app_event_has_capacity(slot)) {
+            app_sessions[slot].input_overflow = 1;
+            return 0;
+        }
+    }
     struct guiapp_event ev;
     memset(&ev, 0, sizeof(ev));
     ev.magic = GUIAPP_MAGIC;
@@ -923,7 +1060,18 @@ static int app_send_text(int slot, const char *value) {
     ev.width = app_sessions[slot].want_w;
     ev.height = app_sessions[slot].want_h;
     copy_text(ev.text, value, sizeof(ev.text));
-    return write_full(app_sessions[slot].to_fd, &ev, (int)sizeof(ev));
+    int result = write_full(app_sessions[slot].to_fd, &ev, (int)sizeof(ev));
+    if (result == 0) app_sessions[slot].events_sent++;
+    return result;
+}
+
+static int app_handle_escape(int id) {
+    int slot = app_slot_for_win(id);
+    if (slot < 0 || !app_sessions[slot].used || !app_sessions[slot].shared ||
+        !app_sessions[slot].shared->script_control_enabled) return 0;
+    app_send_event(slot, GUIAPP_EVT_KEY, 0, 0, GUIAPP_KEY_ESC, 1, 0);
+    key_owner[GUIAPP_KEY_ESC] = slot + 1;
+    return 1;
 }
 
 static void app_target_size(int id, int *tw, int *th);
@@ -1212,6 +1360,12 @@ static void run_app_with_arg(const char *path, const char *argument) {
     shared->capabilities = gpu_present_ready ? GUIAPP_CAP_GPU_CANVAS : 0;
     shared->canvas_count = 0;
     shared->canvas_string_bytes = 0;
+    shared->script_control_enabled = 0;
+    shared->script_running = 0;
+    shared->script_started_ms = 0;
+    shared->script_cancel_sequence = 0;
+    shared->script_control_key = 0;
+    shared->events_consumed = 0;
 
     int ev_pipe[2] = {-1, -1};
     int frame_pipe[2] = {-1, -1};
@@ -1272,17 +1426,26 @@ static void run_app_with_arg(const char *path, const char *argument) {
                 base = p + 1;
         copy_text(windows[id].app_name, base, sizeof(windows[id].app_name));
     }
+    int initial_w = min_i(default_w, sw - 120);
+    int initial_h = min_i(default_h, work_area().h - 64);
     windows[id].r = (struct rect){
-        80 + slot * 36, 74 + slot * 34,
-        min_i(default_w, sw - 120),
-        min_i(default_h, sh - 150)
+        clamp_i((sw - initial_w) / 2 + slot * 24, 24, sw - initial_w - 24),
+        min_i(work_area().y + 40 + slot * 24, sh - TASKBAR_H - initial_h - 16),
+        initial_w, initial_h
     };
     windows[id].restore = windows[id].r;
     windows[id].visible = 1;
     windows[id].minimized = 0;
     windows[id].maximized = 0;
+    if (sw < 1000) {
+        windows[id].r = work_area();
+        windows[id].maximized = 1;
+    }
 
     app_sessions[slot].used = 1;
+    app_sessions[slot].events_sent = 0;
+    app_sessions[slot].script_busy_visible = 0;
+    app_sessions[slot].input_overflow = 0;
     app_sessions[slot].pid = pid;
     app_sessions[slot].to_fd = ev_pipe[1];
     app_sessions[slot].from_fd = frame_pipe[0];
@@ -1326,6 +1489,13 @@ static void run_app_with_arg(const char *path, const char *argument) {
     append_uint(msg, (unsigned int)pid, sizeof(msg));
     gui_log(msg);
     activate(id);
+    for (int i = 0; i < app_count; i++) {
+        if (strcmp(apps[i].path, path) == 0) {
+            app_selected = i;
+            save_preferences();
+            break;
+        }
+    }
 }
 
 static void run_app(const char *path) {
@@ -1336,6 +1506,17 @@ static void activate(int id) {
     if (id < 0 || id >= WIN_COUNT)
         return;
     int old_focus = focus;
+    int was_hidden = !windows[id].visible || windows[id].minimized;
+    if (old_focus != id) {
+        int old_slot = app_slot_for_win(old_focus);
+        if (old_slot >= 0 && app_sessions[old_slot].used) {
+            for (int key = 0; key < GUIAPP_KEY_COUNT; key++) {
+                if (key_owner[key] != old_slot + 1) continue;
+                (void)app_send_event(old_slot, GUIAPP_EVT_KEY, 0, 0, key, 0, 0);
+                key_owner[key] = 0;
+            }
+        }
+    }
     windows[id].visible = 1;
     windows[id].minimized = 0;
     for (int i = 0; i < WIN_COUNT; i++)
@@ -1348,12 +1529,20 @@ static void activate(int id) {
             break;
         }
     }
-    if (pos >= 0) {
+    if (pos >= 0 && id != WIN_LAUNCHER) {
         for (int i = pos; i < WIN_COUNT - 1; i++)
             z_order[i] = z_order[i + 1];
         z_order[WIN_COUNT - 1] = id;
     }
     focus = id;
+    if (id != WIN_LAUNCHER && (old_focus != id || was_hidden) && !motion_pointer_down) {
+        window_motion_cancel(id);
+        ui_motion_reset(&window_motion[id], 24);
+        /* Start the clock after launch/configure/preferences I/O returns to
+         * the event loop, rather than spending the arrival during that I/O. */
+        window_motion_pending[id] = 1;
+        win_damage(id);
+    }
     if (old_focus != id) {
         taskbar_damage();
         win_damage(old_focus);
@@ -1369,22 +1558,18 @@ static void activate(int id) {
 
 static void layout(void) {
     int margin = max_i(18, sw / 48);
-    int top = WORK_TOP;
+    int top = work_area().y;
     int dock = TASKBAR_H;
     int content_h = sh - top - dock - margin * 2;
-    int left_w = min_i(max_i(360, sw / 3), 620);
     int right_w = min_i(max_i(400, sw / 3), 620);
-    int launcher_h = min_i(content_h,
-                           max_i(300, 126 + app_count * LAUNCHER_ROW_STEP));
 
-    windows[WIN_LAUNCHER].title = "Applications";
+    windows[WIN_LAUNCHER].title = "Workspace";
     windows[WIN_LAUNCHER].dock_label = "Apps";
-    windows[WIN_LAUNCHER].r = (struct rect){margin, top + margin,
-                                            left_w, launcher_h};
+    windows[WIN_LAUNCHER].r = work_area();
     windows[WIN_LAUNCHER].restore = windows[WIN_LAUNCHER].r;
     windows[WIN_LAUNCHER].visible = 1;
 
-    windows[WIN_STATUS].title = "System";
+    windows[WIN_STATUS].title = "Settings";
     windows[WIN_STATUS].dock_label = "Sys";
     windows[WIN_STATUS].r = (struct rect){
         sw - right_w - margin,
@@ -1393,7 +1578,7 @@ static void layout(void) {
         min_i(content_h, max_i(460, (content_h * 2) / 3))
     };
     windows[WIN_STATUS].restore = windows[WIN_STATUS].r;
-    windows[WIN_STATUS].visible = 1;
+    windows[WIN_STATUS].visible = 0;
 
     z_order[0] = WIN_LAUNCHER;
     z_order[1] = WIN_STATUS;
@@ -1412,46 +1597,12 @@ static void layout(void) {
     activate(WIN_LAUNCHER);
 }
 
-/* Desktop wallpaper: a blue bloom over near-black, a calm desktop backdrop.
- *
- * The glow is separable -- a horizontal falloff times a vertical one -- which
- * makes it an axis-aligned elliptical gradient computable from two 1-D terms
- * per pixel.  A true radial bloom would need a square root per pixel, and the
- * background is repainted on every window drag, so the cost would be paid
- * continuously for a difference nobody can see through a blur this soft. */
-static int wall_falloff(int pos, int centre, int spread) {
-    int d = pos - centre;
-    int t;
-    if (d < 0)
-        d = -d;
-    if (spread <= 0 || d >= spread)
-        return 0;
-    /* Smoothstep, so the bloom has no visible edge where it fades out. */
-    t = 255 - d * 255 / spread;
-    return t * t / 255;
-}
+/* Static paper-and-shape wallpaper; clipped circles keep damage cheap. */
+static int metro_start_visible(void) { return focus == WIN_LAUNCHER; }
 
 static void draw_background(void) {
     struct ui_surface s = ui_target();
-    struct ui_rect c = ui_clipped(&s, ui_rect_make(0, 0, sw, sh));
-    int cx = sw / 2;
-    int cy = sh / 3;
-    int spread_x = sw * 3 / 4;
-    int spread_y = sh * 2 / 3;
-
-    if (ui_rect_empty(c))
-        return;
-    for (int y = c.y; y < c.y + c.h; y++) {
-        int vy = wall_falloff(y, cy, spread_y);
-        uint32_t base = ui_lerp(UI_WALL_BASE, UI_WALL_MID,
-                                sh > 1 ? y * 255 / (sh - 1) : 0);
-        uint32_t *row = s.px + (size_t)y * s.stride;
-        for (int x = c.x; x < c.x + c.w; x++) {
-            int glow = wall_falloff(x, cx, spread_x) * vy / 255;
-            row[x] = glow > 0 ? ui_blend(UI_WALL_GLOW, base, (uint32_t)glow)
-                              : base;
-        }
-    }
+    ui_fill(&s, ui_rect_make(0, 0, sw, sh), 0x180052u);
 }
 
 static struct rect caption_rect(int id, int control);
@@ -1462,7 +1613,7 @@ static int top_window_at(int x, int y);
 /* One caption button: subtle fill on hover, red on close, and the outer
  * corner rounded so it sits flush inside the window frame. */
 static void draw_caption_button(struct ui_surface *s, int id, int control) {
-    struct rect b = caption_rect(id, control);
+    struct rect b = motion_paint_rect(id, caption_rect(id, control));
     struct ui_rect box = ui_of(b);
     int hovered = control_hovered(id, control);
     int pressed = hovered && (prev_buttons & 1);
@@ -1471,12 +1622,14 @@ static void draw_caption_button(struct ui_surface *s, int id, int control) {
     uint32_t glyph = windows[id].active ? UI_TEXT_PRIMARY : UI_TEXT_TERTIARY;
     int icon;
 
-    if (hovered) {
+    int feedback = caption_motion[id][control].value;
+    if (feedback || pressed) {
         uint32_t fill = is_close
             ? (pressed ? UI_CAPTION_CLOSE_PRESS : UI_CAPTION_CLOSE)
             : (pressed ? UI_SUBTLE_PRESSED : UI_SUBTLE_HOVER);
-        ui_fill_round_mask(s, box, UI_RADIUS_WINDOW, corners, fill, 255);
-        glyph = UI_TEXT_PRIMARY;
+        ui_fill_round_mask(s, box, UI_RADIUS_WINDOW, corners, fill,
+                           pressed ? 255 : feedback);
+        glyph = is_close ? ui_blend(0xFFFFFFu, glyph, feedback) : UI_TEXT_PRIMARY;
     }
     if (control == 0)
         icon = UI_ICON_MINIMIZE;
@@ -1497,27 +1650,34 @@ static void draw_window_frame(int id) {
     if (!w->visible || w->minimized)
         return;
     s = ui_target();
-    frame = ui_of(w->r);
+    frame = ui_of(motion_paint_rect(id, w->r));
     /* A maximised window has no wallpaper around it to round against, so it
      * squares off as it does on any modern desktop. */
     radius = w->maximized ? 0 : UI_RADIUS_WINDOW;
 
     if (!w->maximized)
         ui_shadow(&s, frame, radius, UI_ELEV_FLYOUT_R,
-                  w->active ? UI_ELEV_DIALOG_A : UI_ELEV_CARD_A, 4);
+                  w->active ? UI_ELEV_DIALOG_A / 2 : UI_ELEV_CARD_A / 2, 4);
     ui_fill_round(&s, frame, radius, UI_BG_SOLID);
     title = ui_rect_make(frame.x, frame.y, frame.w, WINDOW_TITLE_H);
+    const char *identity = id == WIN_STATUS ? "settings" : w->app_name;
+    uint32_t title_color = ui_blend(ui_app_identity(identity)->color,
+                                     UI_BG_SOLID, w->active ? 95 : 45);
     ui_fill_round_mask(&s, title, radius, UI_CORNER_TOP,
-                       w->active ? UI_BG_LAYER : UI_BG_SOLID, 255);
+                       title_color, 255);
     ui_fill_a(&s, ui_rect_make(frame.x, frame.y + WINDOW_TITLE_H, frame.w, 1),
               UI_STROKE_DIVIDER, w->active ? 255 : 160);
 
     ts = ui_style(UI_FONT_BODY,
                   w->active ? UI_TEXT_PRIMARY : UI_TEXT_TERTIARY);
-    ui_text_in(&s, ui_rect_make(frame.x + 12, frame.y,
-                                frame.w - 12 - 3 * UI_CAPTION_BTN_W - 8,
+    ui_app_badge(&s, id == WIN_STATUS ? "settings" : w->app_name,
+                 frame.x + 14, frame.y + (WINDOW_TITLE_H - 26) / 2, 26);
+    ui_text_in(&s, ui_rect_make(frame.x + 52, frame.y,
+                                frame.w - 52 - 3 * UI_CAPTION_BTN_W - 8,
                                 WINDOW_TITLE_H),
-               w->title, ts);
+               app_slot_for_win(id) >= 0 &&
+                   app_sessions[app_slot_for_win(id)].script_busy_visible
+                   ? "Page busy - Esc to stop" : w->title, ts);
 
     draw_caption_button(&s, id, 0);
     draw_caption_button(&s, id, 1);
@@ -1532,16 +1692,63 @@ static void draw_window_frame(int id) {
         /* Resize grip: three hairlines in the bottom-right corner. */
         for (int i = 0; i < 3; i++)
             ui_fill_a(&s,
-                      ui_rect_make(w->r.x + w->r.w - 6 - i * 4,
-                                   w->r.y + w->r.h - 14 + i * 4, 4, 1),
+                      ui_rect_make(frame.x + frame.w - 6 - i * 4,
+                                   frame.y + frame.h - 14 + i * 4, 4, 1),
                       UI_TEXT_TERTIARY, 200);
     }
 }
 
 static struct rect content_rect(int id) {
+    if (id == WIN_LAUNCHER) {
+        int pad = sw >= 1280 ? 120 : (sw < 1000 ? 24 : 64);
+        int top = sw < 1000 ? 132 : 184;
+        return (struct rect){pad, top, sw - pad * 2, sh - top - 64};
+    }
     struct rect r = windows[id].r;
     return (struct rect){r.x + 12, r.y + WINDOW_TITLE_H + 12,
                          r.w - 30, r.h - WINDOW_TITLE_H - 44};
+}
+
+/* Compact layouts use the available width while keeping readable controls.
+ * Landscape cards stay short; portrait cards gain space for icons and data. */
+static int compact_columns(struct rect c) { return c.w < 600 ? 2 : 3; }
+static int compact_tile_width(struct rect c) {
+    int cols = compact_columns(c);
+    return (c.w - (cols - 1) * 12) / cols;
+}
+static int compact_tile_height(struct rect c) {
+    return sh < 700 ? 150 : min_i(200, compact_tile_width(c));
+}
+static int compact_grid_x(struct rect c) {
+    int cols = compact_columns(c);
+    return c.x + (c.w - cols * compact_tile_width(c) - (cols - 1) * 12) / 2;
+}
+
+static int metro_layout_scale(struct rect c) {
+    int tablet = sw >= 1000 && (sw < 1440 || sh < 850);
+    int scale = metro_scale(c.h + (tablet ? 160 : 0));
+    int native_width = metro_group_x(2, 100) + metro_span(4, 100);
+    int width_scale = c.w * 100 / native_width;
+    return min_i(scale, max_i(30, width_scale));
+}
+
+static int launcher_neighbor(int key) {
+    if (app_count < 1) return 0;
+    struct rect current = launcher_row_paint_rect(app_selected);
+    int cx = current.x + current.w / 2, cy = current.y + current.h / 2;
+    int best = app_selected, best_score = 0x7FFFFFFF;
+    for (int i = 0; i < app_count; i++) {
+        if (i == app_selected) continue;
+        struct rect tile = launcher_row_paint_rect(i);
+        int dx = tile.x + tile.w / 2 - cx, dy = tile.y + tile.h / 2 - cy;
+        int vertical = key == KEY_UP || key == KEY_DOWN;
+        int forward = vertical ? dy : dx, cross = vertical ? dx : dy;
+        if (key == KEY_UP || key == KEY_LEFT) forward = -forward;
+        if (forward <= 0) continue;
+        int score = forward * forward + 4 * cross * cross;
+        if (score < best_score) { best_score = score; best = i; }
+    }
+    return best;
 }
 
 /* Fit a committed source aspect ratio into the current content rect.  GPU
@@ -1748,11 +1955,12 @@ static int content_width(int id) {
     if (slot >= 0 && app_sessions[slot].used)
         return content_rect(id).w;
     if (id == WIN_LAUNCHER) {
-        struct rect c = content_rect(id);
-        int width = 120;
+        if (sw < 1000) return content_rect(id).w;
+        int scale = metro_layout_scale(content_rect(id));
+        int groups = 3;
         for (int i = 0; i < app_count; i++)
-            width = max_i(width, 42 + gui_text_width(apps[i].name));
-        return max_i(c.w, width);
+            if (metro_tile_for(apps[i].name, i).group == 3) groups = 4;
+        return metro_group_x(groups - 1, scale) + metro_span(4, scale);
     }
     if (id == WIN_STATUS)
         return content_rect(id).w;
@@ -1763,9 +1971,14 @@ static int content_height(int id) {
     int slot = app_slot_for_win(id);
     if (slot >= 0 && app_sessions[slot].used)
         return content_rect(id).h;
-    if (id == WIN_LAUNCHER)
-        return LAUNCHER_HEADER_H +
-               max_i(app_count, 1) * LAUNCHER_ROW_STEP + 12;
+    if (id == WIN_LAUNCHER) {
+        if (sw < 1000) {
+            struct rect c = content_rect(id);
+            int cols = compact_columns(c);
+            return ((app_count + cols - 1) / cols) * (compact_tile_height(c) + 12) + 80;
+        }
+        return content_rect(id).h;
+    }
     if (id == WIN_STATUS)
         return status_resolution_bottom();
     return 250;
@@ -1933,7 +2146,15 @@ static struct rect status_group_label_rect(int group_index) {
     return (struct rect){ox, oy + status_res_body_y(), c.w, DISPLAY_GROUP_LABEL_H};
 }
 
-static struct rect fit_window_rect(struct rect r, int old_sw, int old_sh,
+static int window_min_width(int id) {
+    return strcmp(windows[id].app_name, "calculator") == 0 ? 320 : WIN_MIN_W;
+}
+
+static int window_min_height(int id) {
+    return strcmp(windows[id].app_name, "calculator") == 0 ? 380 : WIN_MIN_H;
+}
+
+static struct rect fit_window_rect(int id, struct rect r, int old_sw, int old_sh,
                                    int dock_y) {
     if (old_sw > 0) {
         r.x = r.x * sw / old_sw;
@@ -1944,11 +2165,14 @@ static struct rect fit_window_rect(struct rect r, int old_sw, int old_sh,
         r.h = r.h * sh / old_sh;
     }
     int max_w = max_i(WIN_MIN_W, sw - 16);
-    int max_h = max_i(WIN_MIN_H, dock_y - WORK_TOP - 10);
+    int top = work_area().y;
+    int max_h = max_i(WIN_MIN_H, dock_y - top - 10);
+    if (r.w < window_min_width(id)) r.w = window_min_width(id);
+    if (r.h < window_min_height(id)) r.h = window_min_height(id);
     if (r.w > max_w) r.w = max_w;
     if (r.h > max_h) r.h = max_h;
     if (r.x < 8) r.x = 8;
-    if (r.y < WORK_TOP + 4) r.y = WORK_TOP + 4;
+    if (r.y < top + 4) r.y = top + 4;
     if (r.x + r.w > sw - 8) r.x = sw - 8 - r.w;
     if (r.y + r.h > dock_y - 6) r.y = dock_y - 6 - r.h;
     return r;
@@ -1956,21 +2180,18 @@ static struct rect fit_window_rect(struct rect r, int old_sw, int old_sh,
 
 static void relayout_after_mode_change(int old_sw, int old_sh) {
     int margin = max_i(18, sw / 48);
-    int content_h = sh - WORK_TOP - TASKBAR_H - margin * 2;
-    int left_w = min_i(max_i(360, sw / 3), 620);
+    int top = work_area().y;
+    int content_h = sh - top - TASKBAR_H - margin * 2;
     int right_w = min_i(max_i(400, sw / 3), 620);
-    int launcher_h = min_i(content_h,
-                           max_i(300, 126 + app_count * LAUNCHER_ROW_STEP));
-    struct rect launcher = {margin, WORK_TOP + margin, left_w, launcher_h};
     struct rect status = {
-        sw - right_w - margin, WORK_TOP + margin, right_w,
+        sw - right_w - margin, top + margin, right_w,
         min_i(content_h, max_i(460, (content_h * 2) / 3))
     };
     int dock_y = sh - TASKBAR_H;
     struct rect work = work_area();
 
-    windows[WIN_LAUNCHER].restore = launcher;
-    windows[WIN_LAUNCHER].r = windows[WIN_LAUNCHER].maximized ? work : launcher;
+    windows[WIN_LAUNCHER].restore = work;
+    windows[WIN_LAUNCHER].r = work;
     windows[WIN_STATUS].restore = status;
     windows[WIN_STATUS].r = windows[WIN_STATUS].maximized ? work : status;
 
@@ -1978,7 +2199,7 @@ static void relayout_after_mode_change(int old_sw, int old_sh) {
         int id = WIN_APP_BASE + slot;
         struct rect restore = windows[id].maximized ? windows[id].restore
                                                      : windows[id].r;
-        restore = fit_window_rect(restore, old_sw, old_sh, dock_y);
+        restore = fit_window_rect(id, restore, old_sw, old_sh, dock_y);
         windows[id].restore = restore;
         windows[id].r = windows[id].maximized ? work : restore;
         if (app_sessions[slot].used) {
@@ -2005,6 +2226,19 @@ static void relayout_after_mode_change(int old_sw, int old_sh) {
     desktop_dirty = 1;
 }
 
+static void save_preferences(void) {
+    const uint32_t data[4] = {0x425A5531u, (uint32_t)sw, (uint32_t)sh,
+                              (uint32_t)app_selected};
+    int fd = open("/fs/desktop.settings", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0) {
+        preferences_saved = -1;
+        return;
+    }
+    int written = write_full(fd, data, sizeof(data));
+    int closed = close(fd);
+    preferences_saved = written == 0 && closed == 0 ? 1 : -1;
+}
+
 static int switch_display_mode(int index) {
     if (index < 0 || index >= DISPLAY_MODE_COUNT)
         return -1;
@@ -2012,6 +2246,7 @@ static int switch_display_mode(int index) {
         return 0;
     int old_sw = sw;
     int old_sh = sh;
+    motion_cancel_all();
     /* Destroy virgl surfaces before the kernel replaces their scanout
      * resource.  Reusing object handles that still reference the old target
      * is rejected by virglrenderer on the next frame. */
@@ -2045,6 +2280,7 @@ static int switch_display_mode(int index) {
     if (hardware_cursor_ready &&
         gfx_cursor_move(pointer_x, pointer_y, 1) < 0)
         hardware_cursor_ready = 0;
+    save_preferences();
     return 0;
 }
 
@@ -2090,99 +2326,179 @@ static void draw_scrollbars(int id) {
     struct rect vt, ht;
 
     clamp_scroll(id);
-    vt = vscroll_track(id);
-    ht = hscroll_track(id);
+    vt = motion_paint_rect(id, vscroll_track(id));
+    ht = motion_paint_rect(id, hscroll_track(id));
     /* Tracks live just outside the content clip.  Clear them on every
      * redraw so a window that shrinks from scrollable to non-scrollable does
      * not retain the previous track/thumb pixels. */
-    fill(vt, UI_BG_SOLID);
-    fill(ht, UI_BG_SOLID);
+    int start = id == WIN_LAUNCHER;
+    uint32_t track = start ? 0x180052u : UI_BG_SOLID;
+    uint32_t thumb = start ? 0xDAD2EAu : UI_TEXT_TERTIARY;
+    uint32_t hover = start ? 0xFFFFFFu : UI_TEXT_SECONDARY;
+    fill(vt, track);
+    fill(ht, track);
     if (max_scroll_y(id) > 0) {
-        struct rect th = vscroll_thumb(id);
+        struct rect th = motion_paint_rect(id, vscroll_thumb(id));
         int hot = inside(pointer_x, pointer_y, vt) || scroll_drag_win == id;
         if (hot)
-            ui_fill_round(&s, ui_of(vt), vt.w / 2, UI_BG_MICA_ALT);
+            ui_fill_round(&s, ui_of(vt), 0, start ? 0x32156Bu : UI_BG_MICA_ALT);
         ui_fill_round(&s,
                       ui_rect_make(th.x + (hot ? 2 : 3), th.y + 2,
                                    th.w - (hot ? 4 : 6), th.h - 4),
-                      3, hot ? UI_TEXT_SECONDARY : UI_TEXT_TERTIARY);
+                      0, hot ? hover : thumb);
     }
     if (max_scroll_x(id) > 0) {
-        struct rect th = hscroll_thumb(id);
+        struct rect th = motion_paint_rect(id, hscroll_thumb(id));
         int hot = inside(pointer_x, pointer_y, ht) || scroll_drag_win == id;
         if (hot)
-            ui_fill_round(&s, ui_of(ht), ht.h / 2, UI_BG_MICA_ALT);
+            ui_fill_round(&s, ui_of(ht), 0, start ? 0x32156Bu : UI_BG_MICA_ALT);
         ui_fill_round(&s,
                       ui_rect_make(th.x + 2, th.y + (hot ? 2 : 3),
                                    th.w - 4, th.h - (hot ? 4 : 6)),
-                      3, hot ? UI_TEXT_SECONDARY : UI_TEXT_TERTIARY);
+                      0, hot ? hover : thumb);
     }
 }
 
+/* Native Segoe UI Light headlines avoid magnifying the small chrome atlas. */
+static void desktop_display_text(struct ui_surface *s, struct ui_rect area,
+                                 const char *text, uint32_t color) {
+    static int ink_top = -1, ink_bottom;
+    if (ink_top < 0) {
+        ink_top = UIFONT_DISPLAY_HEIGHT;
+        for (int glyph = 0; glyph < UIFONT_DISPLAY_COUNT; glyph++)
+            for (int y = 0; y < UIFONT_DISPLAY_HEIGHT; y++)
+                for (int x = 0; x < UIFONT_DISPLAY_WIDTH; x++)
+                    if (uifont_display_alpha[glyph][y][x]) {
+                        if (y < ink_top) ink_top = y;
+                        if (y > ink_bottom) ink_bottom = y;
+                    }
+    }
+    struct ui_rect saved = ui_clip_push(s, area);
+    int cursor = area.x;
+    int top = area.y + (area.h - (ink_bottom - ink_top + 1)) / 2;
+    while (*text && cursor < area.x + area.w) {
+        unsigned int cp = (unsigned char)*text++;
+        if (cp < UIFONT_DISPLAY_FIRST || cp >= UIFONT_DISPLAY_FIRST + UIFONT_DISPLAY_COUNT)
+            cp = '?';
+        int glyph = (int)cp - UIFONT_DISPLAY_FIRST;
+        for (int y = ink_top; y <= ink_bottom; y++)
+            for (int x = 0; x < UIFONT_DISPLAY_WIDTH; x++) {
+                int alpha = uifont_display_alpha[glyph][y][x];
+                if (alpha) ui_pixel_a(s, cursor + x, top + y - ink_top, color, alpha);
+            }
+        cursor += uifont_display_advance[glyph];
+    }
+    ui_clip_pop(s, saved);
+}
+
+static struct rect metro_tile_rect(struct metro_tile tile) {
+    struct rect c = content_rect(WIN_LAUNCHER);
+    int tablet = sw >= 1000 && (sw < 1440 || sh < 850);
+    if (tablet) {
+        if (strcmp(tile.name, "browser") == 0) tile.rows = 2;
+        if (strcmp(tile.name, "taskmanager") == 0) { tile.group = 2; tile.row = 0; }
+        if (strcmp(tile.name, "music") == 0) tile.row = 2;
+        if (strcmp(tile.name, "doom") == 0 || strcmp(tile.name, "gameboy") == 0) tile.row = 4;
+    }
+    int scale = metro_layout_scale(c), step = metro_unit(scale) + metro_gap(scale);
+    return (struct rect){c.x - scroll_x[WIN_LAUNCHER] + metro_group_x(tile.group, scale) + tile.col * step,
+                         c.y + tile.row * step, metro_span(tile.cols, scale), metro_span(tile.rows, scale)};
+}
+
+/* 0 Settings, 1 Search, 2 All apps, 3 header Search, 4 return to shell. */
+static struct rect metro_action_rect(int action) {
+    struct rect c = content_rect(WIN_LAUNCHER);
+    if (action < 2) {
+        if (sw < 1000) {
+            int cols = compact_columns(c);
+            int x = compact_grid_x(c);
+            return (struct rect){x + action * 80, c.y - scroll_y[WIN_LAUNCHER] +
+                                 ((app_count + cols - 1) / cols) * (compact_tile_height(c) + 12), 70, 70};
+        }
+        return metro_tile_rect(metro_tile_for(action ? "search" : "settings", 0));
+    }
+    if (action == 2) return (struct rect){c.x, sh - 54, 36, 36};
+    return (struct rect){sw - c.x - (action == 3 ? 40 : 94), 52, 40, 40};
+}
+
 static void draw_launcher(void) {
-    struct ui_surface s;
-    struct rect c, saved_clip, clip;
-    struct ui_text_style head;
-    int ox, oy, y, hover_row;
-
-    if (!windows[WIN_LAUNCHER].visible || windows[WIN_LAUNCHER].minimized)
-        return;
-    draw_window_frame(WIN_LAUNCHER);
-    s = ui_target();
-    c = content_rect(WIN_LAUNCHER);
-    fill(c, UI_BG_SOLID);
-    /* Same content clip as System: row fills must not paint past the body. */
-    saved_clip = compose_clip_push(c);
-    clip = c;
-    /* ui_target() snapshots compose_clip, so take it after the push. */
-    s = ui_target();
-    ox = c.x - scroll_x[WIN_LAUNCHER];
-    oy = c.y - scroll_y[WIN_LAUNCHER];
-
-    head = ui_style(UI_FONT_BODY, UI_TEXT_SECONDARY);
-    head.bold = 1;
-    ui_text_in(&s, ui_rect_make(ox, oy, c.w, LAUNCHER_HEADER_H - 8),
-               "Installed", head);
-    y = oy + LAUNCHER_HEADER_H;
-    if (app_count == 0) {
-        ui_text_in(&s, ui_rect_make(ox, y, c.w, LAUNCHER_ROW_H),
-                   "No apps in /fs/apps",
-                   ui_style(UI_FONT_BODY, UI_TEXT_TERTIARY));
-        compose_clip_pop(saved_clip);
-        draw_scrollbars(WIN_LAUNCHER);
-        return;
+    if (!windows[WIN_LAUNCHER].visible || windows[WIN_LAUNCHER].minimized) return;
+    struct ui_surface s = ui_target();
+    struct rect c = content_rect(WIN_LAUNCHER);
+    desktop_display_text(&s, ui_rect_make(c.x, sw < 1000 ? 20 : 32, 400,
+                                        sw < 1000 ? 70 : 90), "Start", 0xFFFFFFu);
+    struct ui_text_style user = ui_style(UI_FONT_SUBTITLE, 0xFFFFFFu);
+    user.align = UI_ALIGN_RIGHT;
+    ui_text_in(&s, ui_rect_make(sw - c.x - 304, 50, 150, 44), "BuzzOS", user);
+    ui_fill(&s, ui_rect_make(sw - c.x - 142, 52, 40, 40), 0xFFFFFFu);
+    ui_circle(&s, sw - c.x - 122, 64, 6, 0x180052u, 255);
+    ui_circle(&s, sw - c.x - 122, 85, 11, 0x180052u, 255);
+    for (int action = 2; action < 5; action++) {
+        struct ui_rect box = ui_of(metro_action_rect(action));
+        int icon = action == 2 ? UI_ICON_CHEVRON_DOWN : action == 3 ? UI_ICON_SEARCH : UI_ICON_POWER;
+        if (action == 2) ui_stroke_round(&s, box, 18, 2, 0xFFFFFFu, 220);
+        if (metro_start_visible() && inside(pointer_x, pointer_y, metro_action_rect(action)))
+            ui_fill_a(&s, box, 0xFFFFFFu, 35);
+        ui_icon_in(&s, icon, box, action == 2 ? 16 : 22, 0xFFFFFFu, 255);
     }
-    hover_row = hit_launcher_row_at(pointer_x, pointer_y);
+    static const char *groups[] = {"Everyday", "Create", "Play", "More apps"};
+    int scale = metro_layout_scale(c);
+    struct ui_rect label_clip = ui_clip_push(&s, ui_rect_make(c.x, c.y - 48, c.w, 40));
+    for (int g = 0; g < (sw < 1000 ? 1 : (content_width(WIN_LAUNCHER) > metro_group_x(3, scale) ? 4 : 3)); g++)
+        ui_text_in(&s, ui_rect_make(c.x - scroll_x[WIN_LAUNCHER] + metro_group_x(g, scale), c.y - 40,
+                                  metro_span(g ? 4 : 6, scale), 32), sw < 1000 ? "Apps" : groups[g],
+                   ui_style(UI_FONT_SUBTITLE, 0xDAD2EAu));
+    ui_clip_pop(&s, label_clip);
+    struct rect saved = compose_clip_push(c);
+    s = ui_target();
     for (int i = 0; i < app_count; i++) {
-        struct rect row = launcher_row_paint_rect(i);
-        struct rect visible = intersect_rect(row, clip);
-        struct ui_rect fill_r;
-        int selected = i == app_selected;
-        int hovered = i == hover_row;
-        if (visible.w <= 0 || visible.h <= 0)
-            continue;
-        fill_r = ui_rect_make(row.x, row.y, row.w - 6, row.h);
-        if (selected)
-            ui_fill_round(&s, fill_r, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
-        else if (hovered)
-            ui_fill_round(&s, fill_r, UI_RADIUS_CONTROL, UI_SUBTLE_PRESSED);
-        /* the theme marks the selected list row with an accent bar on its
-         * leading edge rather than by filling the whole row. */
-        if (selected)
-            ui_fill_round(&s, ui_rect_make(row.x + 1, row.y + row.h / 4, 3,
-                                           row.h / 2),
-                          1, UI_ACCENT_FILL);
-        ui_icon(&s, app_icon_for(apps[i].name), row.x + 14,
-                row.y + (row.h - 18) / 2, 18,
-                selected ? UI_ACCENT_FILL : UI_TEXT_SECONDARY, 255);
-        ui_text_in(&s, ui_rect_make(row.x + 42, row.y, row.w - 50, row.h),
-                   apps[i].name,
-                   ui_style(UI_FONT_BODY,
-                            selected || hovered ? UI_TEXT_PRIMARY
-                                                : UI_TEXT_SECONDARY));
+        struct metro_tile tile = metro_tile_for(apps[i].name, i);
+        struct rect layout_r = launcher_row_paint_rect(i);
+        struct rect r = layout_r;
+        int reveal = home_motion_active
+            ? ui_motion_reveal(motion_frame_ms, home_motion_start,
+                                (uint32_t)min_i(i, 10) * HOME_STAGGER_MS, HOME_MOTION_MS) : 255;
+        int hot = tile_hover_motion[i].value;
+        int press = tile_press_motion[i].value;
+        int inset = press * 3 / 255;
+        r.x += inset;
+        r.y += (255 - reveal) * 24 / 255 - hot * 2 / 255 + inset;
+        r.w -= inset * 2;
+        r.h -= inset * 2;
+        struct ui_rect box = ui_of(r);
+        uint32_t color = ui_lerp(tile.color, 0xFFFFFFu, hot * 18 / 255);
+        color = ui_lerp(0x180052u, color, reveal);
+        ui_fill(&s, box, color);
+        if (i == app_selected || hot)
+            ui_stroke_round(&s, ui_rect_inset(box, 2), 0, i == app_selected ? 3 : 2,
+                            0xFFFFFFu, i == app_selected ? reveal : hot * 120 * reveal / (255 * 255));
+        int icon_side = (layout_r.h >= 250 ? 108 : (layout_r.h >= 200 ? 80 : 64)) * (sw < 1000 ? 100 : scale) / 100;
+        const struct ui_app_identity *identity = ui_app_identity(apps[i].name);
+        if (strcmp(apps[i].name, "taskmanager") == 0 && layout_r.w >= 250) {
+            int active = 0; char number[20] = "";
+            for (int slot = 0; slot < MAX_GUI_APPS; slot++) if (app_sessions[slot].used) active++;
+            append_uint(number, (unsigned int)active, sizeof(number));
+            desktop_display_text(&s, ui_rect_make(r.x + 18, r.y + 12, 90, r.h - 42), number, ui_lerp(color, 0xFFFFFFu, reveal));
+            ui_text_in(&s, ui_rect_make(r.x + 88, r.y + 28, r.w - 100, 28), "apps running",
+                       ui_style(UI_FONT_BODY, ui_lerp(color, 0xFFFFFFu, reveal)));
+        } else {
+            ui_icon_in(&s, identity->icon, ui_rect_make(r.x, r.y + 8, r.w, r.h - 42),
+                       icon_side * (255 - press * 12 / 255) / 255, 0xFFFFFFu, reveal);
+        }
+        ui_text_in(&s, ui_rect_make(r.x + 12, r.y + r.h - 32, r.w - 24, 26),
+                   ui_app_title(apps[i].name), ui_style(layout_r.w < 140 ? UI_FONT_CAPTION : UI_FONT_BODY, ui_lerp(color, 0xFFFFFFu, reveal)));
     }
-    compose_clip_pop(saved_clip);
-    draw_scrollbars(WIN_LAUNCHER);
+    for (int action = 0; action < 2; action++) {
+        struct rect r = metro_action_rect(action);
+        ui_fill(&s, ui_of(r), action ? 0xAA00FFu : 0x5133ABu);
+        ui_icon_in(&s, action ? UI_ICON_SEARCH : UI_ICON_SETTINGS, ui_of(r),
+                   30 * (sw < 1000 ? 100 : scale) / 100, 0xFFFFFFu, 255);
+        if (metro_start_visible() && inside(pointer_x, pointer_y, r))
+            ui_stroke_round(&s, ui_rect_inset(ui_of(r), 2), 0, 2, 0xFFFFFFu, 160);
+    }
+    compose_clip_pop(saved);
+    if (max_scroll_x(WIN_LAUNCHER) > 0 || max_scroll_y(WIN_LAUNCHER) > 0)
+        draw_scrollbars(WIN_LAUNCHER);
 }
 
 /* Themed settings pane: section headings, secondary body text, and the
@@ -2199,7 +2515,7 @@ static void draw_status(void) {
     if (!windows[WIN_STATUS].visible || windows[WIN_STATUS].minimized)
         return;
     draw_window_frame(WIN_STATUS);
-    c = content_rect(WIN_STATUS);
+    c = motion_paint_rect(WIN_STATUS, content_rect(WIN_STATUS));
     fill(c, UI_BG_SOLID);
     /* Restrict paint to the scrollable body.  The button and rounded-fill
      * helpers only honour compose_clip, so without this push the resolution
@@ -2216,7 +2532,13 @@ static void draw_status(void) {
     body = ui_style(UI_FONT_BODY, UI_TEXT_SECONDARY);
     faint = ui_style(UI_FONT_BODY, UI_TEXT_TERTIARY);
 
-#define STATUS_ROW(n) ui_rect_make(ox, oy + (n) * step, c.w, step)
+    int display_rows = 4 + (status_virgl_row ? 1 : 0);
+    ui_fill_round(&s, ui_rect_make(ox, oy, c.w, display_rows * step),
+                  UI_RADIUS_CONTROL, UI_BG_LAYER);
+    ui_fill_round(&s, ui_rect_make(ox, oy + (display_rows + 1) * step,
+                                  c.w, 5 * step),
+                  UI_RADIUS_CONTROL, UI_BG_LAYER);
+#define STATUS_ROW(n) ui_rect_make(ox + 12, oy + (n) * step, max_i(1, c.w - 24), step)
     row = 0;
     ui_text_in(&s, STATUS_ROW(row++), "Display", head);
     copy_text(line, "Resolution ", sizeof(line));
@@ -2243,6 +2565,10 @@ static void draw_status(void) {
     ui_text_in(&s, STATUS_ROW(row++), "Ctrl+Space toggles IME", body);
     ui_text_in(&s, STATUS_ROW(row++), "[ ] cycle resolution", body);
     ui_text_in(&s, STATUS_ROW(row++), "Esc returns to shell", body);
+    ui_text_in(&s, STATUS_ROW(row++),
+               preferences_saved < 0 ? "Settings could not be saved" :
+               preferences_saved > 0 ? "Settings saved to disk" :
+                                       "Settings save automatically", faint);
 #undef STATUS_ROW
 
     mode_error = mode_error_until && tick < mode_error_until;
@@ -2261,11 +2587,11 @@ static void draw_status(void) {
     start = 0;
     count = 0;
     while (display_group_at(group, &start, &count)) {
-        struct rect label_r = status_group_label_rect(group);
+        struct rect label_r = motion_paint_rect(WIN_STATUS, status_group_label_rect(group));
         ui_text_in(&s, ui_of(label_r), display_modes[start].ratio, faint);
         for (int i = 0; i < count; i++) {
             int mode = start + i;
-            struct rect btn = status_mode_rect(mode);
+            struct rect btn = motion_paint_rect(WIN_STATUS, status_mode_rect(mode));
             if (intersect_rect(btn, c).w <= 0)
                 continue;
             button(btn, display_modes[mode].label, mode == active_mode);
@@ -2283,7 +2609,7 @@ static void draw_app_window(int id) {
         !windows[id].visible || windows[id].minimized)
         return;
     draw_window_frame(id);
-    struct rect c = content_rect(id);
+    struct rect c = motion_paint_rect(id, content_rect(id));
     if (compose_skip_app_pixels)
         return;
     struct rect clip = c;
@@ -2302,7 +2628,7 @@ static void draw_app_window(int id) {
     const uint32_t *pixels = (const uint32_t *)((const uint8_t *)shared +
         GUIAPP_SHARED_HEADER_SIZE);
     if (app_sessions[slot].scaled_surface && source_w > 0 && source_h > 0) {
-        struct rect view = scaled_view_rect(id, slot);
+        struct rect view = motion_paint_rect(id, scaled_view_rect(id, slot));
         int vw = view.w;
         int vh = view.h;
         int dx = view.x;
@@ -2449,6 +2775,16 @@ static int taskbar_items(struct tb_item *out) {
     return n;
 }
 
+static struct rect taskbar_panel_rect(int tray) {
+    struct tb_item items[TB_MAX_ITEMS];
+    int count = taskbar_items(items);
+    int first = tray ? count - 2 : 0;
+    int last = tray ? count - 1 : count - 3;
+    return (struct rect){items[first].r.x - 12, sh - TASKBAR_H + 8,
+                         items[last].r.x + items[last].r.w - items[first].r.x + 24,
+                         TASKBAR_H - 16};
+}
+
 static void taskbar_clock_damage(void) {
     struct tb_item items[TB_MAX_ITEMS];
     int count = taskbar_items(items);
@@ -2521,34 +2857,35 @@ static void draw_taskbar_tooltip(void) {
 /* One taskbar button: a subtle fill when hovered, an accent underline when
  * the window is open, and a wider one when it is the active window. */
 static void draw_tb_button(struct ui_surface *s, struct rect r, int icon,
-                           int active, int open, int hovered, int pressed) {
+                           int active, int open, int hovered, int pressed,
+                           int channel) {
+    (void)hovered;
+    (void)pressed;
+    int feedback = dock_hover_motion[channel].value;
+    int down = dock_press_motion[channel].value;
+    int selection = dock_active_motion[channel].value;
     struct ui_rect box = ui_of(r);
     uint32_t tint = UI_TEXT_PRIMARY;
-    if (pressed)
-        ui_fill_round(s, box, UI_RADIUS_CONTROL, UI_SUBTLE_PRESSED);
-    else if (active || hovered)
-        ui_fill_round(s, box, UI_RADIUS_CONTROL,
-                      active ? UI_SUBTLE_HOVER : UI_SUBTLE_PRESSED);
+    ui_fill_round_a(s, box, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER,
+                    max_i(feedback, selection));
+    if (down)
+        ui_fill_round_a(s, box, UI_RADIUS_CONTROL, UI_SUBTLE_PRESSED, down);
     ui_icon_in(s, icon, box, TB_ICON, tint, active ? 255 : 225);
     if (open) {
-        int w = active ? 16 : 6;
+        int w = 6 + selection * 18 / 255;
         ui_fill_round(s, ui_rect_make(r.x + (r.w - w) / 2, r.y + r.h - 2, w, 3),
-                      1, active ? UI_ACCENT_FILL : UI_TEXT_TERTIARY);
+                      1, ui_blend(UI_ACCENT_FILL, UI_TEXT_TERTIARY, selection));
     }
 }
 
 static void draw_taskbar(void) {
+    if (metro_start_visible()) return;
     struct ui_surface s = ui_target();
     struct tb_item items[TB_MAX_ITEMS];
     int count = taskbar_items(items);
-    struct rect bar = taskbar_rect();
     char clock[16];
 
-    /* Acrylic: the wallpaper and any window edge under the bar show through
-     * blurred, which is the single strongest the theme cue. */
-    shell_acrylic(&s, ui_of(bar), 0, UI_BG_ACRYLIC_THIN, 190);
-    ui_fill_a(&s, ui_rect_make(bar.x, bar.y, bar.w, 1), UI_STROKE_SURFACE,
-              150);
+    ui_fill(&s, ui_rect_make(0, sh - TASKBAR_H, sw, TASKBAR_H), UI_BG_LAYER_ALT);
 
     for (int i = 0; i < count; i++) {
         struct tb_item *it = &items[i];
@@ -2556,23 +2893,27 @@ static void draw_taskbar(void) {
         int pressed = hovered && (prev_buttons & 1);
         switch (it->kind) {
         case TB_START:
-            draw_tb_button(&s, it->r, UI_ICON_START, start_open, 0, hovered,
-                           pressed);
+            draw_tb_button(&s, it->r, UI_ICON_SEARCH, start_open, 0, hovered,
+                           pressed, WIN_COUNT);
             break;
         case TB_WINDOW: {
             int id = it->value;
             draw_tb_button(&s, it->r, window_icon(id), windows[id].active,
-                           windows[id].visible, hovered, pressed);
+                           windows[id].visible, hovered, pressed, id);
+            const char *name = id == WIN_LAUNCHER ? "apps"
+                : (id == WIN_STATUS ? "settings" : windows[id].app_name);
+            ui_app_badge(&s, name, it->r.x + (it->r.w - 28) / 2,
+                         it->r.y + (it->r.h - 28) / 2, 28);
             break;
         }
         case TB_OVERFLOW:
             draw_tb_button(&s, it->r, UI_ICON_MORE, taskbar_expanded, 0,
-                           hovered, pressed);
+                           hovered, pressed, WIN_COUNT + 1);
             break;
         case TB_TRAY_IME: {
             struct ui_rect box = ui_of(it->r);
-            if (hovered)
-                ui_fill_round(&s, box, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
+            ui_fill_round_a(&s, box, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER,
+                            dock_hover_motion[WIN_COUNT + 2].value);
             ui_icon_in(&s, UI_ICON_KEYBOARD, box, 20,
                        ime_enabled ? UI_ACCENT_FILL : UI_TEXT_SECONDARY,
                        255);
@@ -2582,8 +2923,8 @@ static void draw_taskbar(void) {
             struct ui_rect box = ui_of(it->r);
             struct ui_text_style st = ui_style(UI_FONT_CAPTION,
                                                UI_TEXT_SECONDARY);
-            if (hovered)
-                ui_fill_round(&s, box, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
+            ui_fill_round_a(&s, box, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER,
+                            dock_hover_motion[WIN_COUNT + 3].value);
             st.align = UI_ALIGN_CENTER;
             format_uptime(clock, sizeof(clock));
             ui_text_in(&s, box, clock, st);
@@ -2628,43 +2969,64 @@ static void draw_taskbar(void) {
 
 /* ---- Start menu -------------------------------------------------------
  *
- * Same discipline as the taskbar: the tile grid is described once and both
+ * Same discipline as the taskbar: result rows are described once and both
  * the painter and the hit tester read it.
  */
 
-static int start_rows(void) {
-    int rows = (app_count + START_COLS - 1) / START_COLS;
-    return rows < 1 ? 1 : rows;
+static int start_matches(int indices[MAX_APPS]) {
+    int count = 0;
+    for (int i = 0; i < app_count; i++) {
+        const struct ui_app_identity *app = ui_app_identity(apps[i].name);
+        if (ui_text_contains_ascii_ci(apps[i].name, start_query) ||
+            ui_text_contains_ascii_ci(ui_app_title(apps[i].name), start_query) ||
+            ui_text_contains_ascii_ci(app->description, start_query))
+            indices[count++] = i;
+    }
+    return count;
 }
 
 static struct rect start_menu_rect(void) {
-    int w = min_i(START_W, sw - 24);
-    int h = START_PAD * 2 + ui_line_height(UI_FONT_BODY) + 8 +
-            start_rows() * (START_TILE + START_TILE_GAP) + START_FOOTER_H;
-    int y = sh - TASKBAR_H - h - 12;
-    if (h > sh - TASKBAR_H - 24) {
-        h = sh - TASKBAR_H - 24;
-        y = 12;
-    }
-    return (struct rect){(sw - w) / 2, y, w, h};
+    int w = sw < 1000 ? sw : min_i(START_W, sw - 24);
+    int shift = (255 - search_motion.value) * w / 255;
+    return (struct rect){sw - w + shift, 0, w, sh};
+}
+
+static struct rect start_results_rect(void) {
+    struct rect panel = start_menu_rect();
+    return (struct rect){panel.x + START_PAD, START_HEADER_H,
+                         panel.w - START_PAD * 2, sh - START_HEADER_H - START_FOOTER_H};
+}
+
+static void start_clamp_scroll(int count) {
+    start_scroll = clamp_i(start_scroll, 0, max_i(0, count * START_ROW_H - start_results_rect().h));
+}
+
+static void start_reveal_selection(int count) {
+    int top = start_selected * START_ROW_H, bottom = top + START_ROW_H;
+    int height = start_results_rect().h;
+    if (top < start_scroll) start_scroll = top;
+    else if (bottom > start_scroll + height) start_scroll = bottom - height;
+    start_clamp_scroll(count);
 }
 
 static struct rect start_tile_rect(int index) {
-    struct rect panel = start_menu_rect();
-    int grid_w = START_COLS * START_TILE + (START_COLS - 1) * START_TILE_GAP;
-    int gx = panel.x + (panel.w - grid_w) / 2;
-    int gy = panel.y + START_PAD + ui_line_height(UI_FONT_BODY) + 8;
-    int col = index % START_COLS;
-    int row = index / START_COLS;
-    return (struct rect){gx + col * (START_TILE + START_TILE_GAP),
-                         gy + row * (START_TILE + START_TILE_GAP),
-                         START_TILE, START_TILE};
+    struct rect body = start_results_rect();
+    return (struct rect){body.x, body.y + index * START_ROW_H - start_scroll,
+                         body.w, START_ROW_H};
 }
 
-static struct rect start_power_rect(void) {
+static struct rect start_close_rect(void) {
     struct rect panel = start_menu_rect();
-    return (struct rect){panel.x + panel.w - START_PAD - 40,
-                         panel.y + panel.h - START_PAD - 36, 40, 36};
+    return (struct rect){panel.x + panel.w - START_PAD - 48,
+                         panel.y + panel.h - 12 - 48, 48, 48};
+}
+
+static struct rect start_app_tile_rect(int app) {
+    int indices[MAX_APPS];
+    int count = start_matches(indices);
+    for (int i = 0; i < count; i++)
+        if (indices[i] == app) return start_tile_rect(i);
+    return (struct rect){0, 0, 0, 0};
 }
 
 static void draw_start_menu(void) {
@@ -2675,45 +3037,70 @@ static void draw_start_menu(void) {
     struct rect power;
     struct ui_rect saved;
 
-    if (!start_open)
+    if (!start_open && !search_motion.value && !search_motion.active)
         return;
     s = ui_target();
     panel = start_menu_rect();
     p = ui_of(panel);
 
-    ui_shadow(&s, p, UI_RADIUS_OVERLAY, UI_ELEV_DIALOG_R, UI_ELEV_DIALOG_A,
-              6);
-    shell_acrylic(&s, p, UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
-    ui_stroke_round(&s, p, UI_RADIUS_OVERLAY, 1, UI_STROKE_SURFACE, 255);
+    ui_fill(&s, p, UI_BG_SOLID);
+    ui_fill(&s, ui_rect_make(p.x, p.y, 1, p.h), UI_STROKE_SURFACE);
 
     head = ui_style(UI_FONT_BODY, UI_TEXT_PRIMARY);
     head.bold = 1;
     ui_text_in(&s, ui_rect_make(panel.x + START_PAD, panel.y + START_PAD,
                                 panel.w - START_PAD * 2,
                                 ui_line_height(UI_FONT_BODY)),
-               "Pinned", head);
+               "Search", head);
 
-    saved = ui_clip_push(&s, ui_rect_make(panel.x, panel.y, panel.w,
-                                          panel.h - START_FOOTER_H));
-    for (int i = 0; i < app_count; i++) {
+    struct ui_rect search = ui_rect_make(panel.x + START_PAD, panel.y + 48,
+                                          panel.w - START_PAD * 2, 48);
+    ui_fill(&s, search, UI_BG_SOLID);
+    ui_stroke_round(&s, search, 0, 1, UI_ACCENT_TEXT, 255);
+    ui_icon_in(&s, UI_ICON_SEARCH, ui_rect_make(search.x + 10, search.y, 24, search.h),
+                16, UI_ACCENT_TEXT, 255);
+    ui_text_in(&s, ui_rect_make(search.x + 40, search.y, search.w - 52, search.h),
+               start_query[0] ? start_query : "Type to find an application...",
+               ui_style(UI_FONT_BODY, start_query[0] ? UI_TEXT_PRIMARY : UI_TEXT_TERTIARY));
+
+    int indices[MAX_APPS];
+    int matches = start_matches(indices);
+    start_clamp_scroll(matches);
+    struct rect body = start_results_rect();
+    saved = ui_clip_push(&s, ui_of(body));
+    for (int i = 0; i < matches; i++) {
+        int app = indices[i];
         struct rect tile = start_tile_rect(i);
         struct ui_rect t = ui_of(tile);
-        struct ui_text_style label = ui_style(UI_FONT_CAPTION,
+        struct ui_text_style label = ui_style(UI_FONT_BODY,
                                               UI_TEXT_PRIMARY);
         int hovered = inside(pointer_x, pointer_y, tile);
         int pressed = hovered && (prev_buttons & 1);
         if (pressed)
             ui_fill_round(&s, t, UI_RADIUS_CONTROL, UI_SUBTLE_PRESSED);
-        else if (hovered)
+        else if (hovered || i == start_selected)
             ui_fill_round(&s, t, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
-        ui_icon(&s, app_icon_for(apps[i].name), tile.x + (tile.w - 32) / 2,
-                tile.y + 16, 32, UI_TEXT_PRIMARY, 255);
-        label.align = UI_ALIGN_CENTER;
-        ui_text_in(&s, ui_rect_make(tile.x + 4, tile.y + tile.h - 26,
-                                    tile.w - 8, 20),
-                   apps[i].name, label);
+        if (i == start_selected)
+            ui_fill(&s, ui_rect_make(tile.x, tile.y + 6, 3, tile.h - 12), UI_ACCENT_TEXT);
+        struct ui_rect badge = ui_rect_make(tile.x + 12, tile.y + 16, 40, 40);
+        ui_fill(&s, badge, metro_tile_for(apps[app].name, app).color);
+        ui_icon_in(&s, ui_app_identity(apps[app].name)->icon, badge, 24, 0xFFFFFFu, 255);
+        ui_text_in(&s, ui_rect_make(tile.x + 66, tile.y + 10, tile.w - 78, 26),
+                   ui_app_title(apps[app].name), label);
+        ui_text_in(&s, ui_rect_make(tile.x + 66, tile.y + 38, tile.w - 78, 24),
+                   ui_app_identity(apps[app].name)->description,
+                   ui_style(UI_FONT_CAPTION, UI_TEXT_SECONDARY));
     }
+    if (!matches)
+        ui_text_in(&s, ui_rect_make(panel.x + START_PAD, panel.y + START_HEADER_H,
+                                    panel.w - START_PAD * 2, START_ROW_H),
+                   "No matching applications", ui_style(UI_FONT_BODY, UI_TEXT_SECONDARY));
     ui_clip_pop(&s, saved);
+    if (matches * START_ROW_H > body.h) {
+        int thumb_h = max_i(24, body.h * body.h / (matches * START_ROW_H));
+        int thumb_y = body.y + start_scroll * (body.h - thumb_h) / (matches * START_ROW_H - body.h);
+        ui_fill(&s, ui_rect_make(panel.x + panel.w - 8, thumb_y, 4, thumb_h), UI_ACCENT_TEXT);
+    }
 
     ui_fill_a(&s, ui_rect_make(panel.x + 1,
                                panel.y + panel.h - START_FOOTER_H, panel.w - 2,
@@ -2721,20 +3108,20 @@ static void draw_start_menu(void) {
               UI_STROKE_DIVIDER, 200);
     ui_text_in(&s, ui_rect_make(panel.x + START_PAD,
                                 panel.y + panel.h - START_FOOTER_H,
-                                panel.w / 2, START_FOOTER_H),
-               "BuzzOS", ui_style(UI_FONT_BODY, UI_TEXT_SECONDARY));
+                                panel.w - START_PAD * 2 - 56, START_FOOTER_H),
+               "Enter opens / Esc closes", ui_style(UI_FONT_CAPTION, UI_TEXT_SECONDARY));
 
-    power = start_power_rect();
+    power = start_close_rect();
     {
         struct ui_rect pw = ui_of(power);
         int hovered = inside(pointer_x, pointer_y, power);
         if (hovered)
             ui_fill_round(&s, pw, UI_RADIUS_CONTROL, UI_SUBTLE_HOVER);
-        ui_icon_in(&s, UI_ICON_POWER, pw, 20, UI_TEXT_SECONDARY, 255);
+        ui_icon_in(&s, UI_ICON_CLOSE, pw, 20, UI_TEXT_SECONDARY, 255);
     }
 }
 
-/* Returns the app index to launch, -2 for the power button, or -1 for a
+/* Returns the app index to launch, -2 for the close button, or -1 for a
  * click that the menu swallows without acting on. */
 static int hit_start_menu(int x, int y) {
     struct rect panel;
@@ -2743,17 +3130,23 @@ static int hit_start_menu(int x, int y) {
     panel = start_menu_rect();
     if (!inside(x, y, panel))
         return -1;
-    if (inside(x, y, start_power_rect()))
+    if (inside(x, y, start_close_rect()))
         return -2;
-    for (int i = 0; i < app_count; i++)
+    if (!inside(x, y, start_results_rect())) return -1;
+    int indices[MAX_APPS];
+    int matches = start_matches(indices);
+    for (int i = 0; i < matches; i++)
         if (inside(x, y, start_tile_rect(i)))
-            return i;
+            return indices[i];
     return -1;
 }
 
 /* Damage the Start menu plus its shadow. */
 static void start_damage(void) {
-    struct rect panel = start_menu_rect();
+    /* Cover the resting extent as well as the moving panel, including the
+     * final closing sample. Otherwise the old left edge leaves a white trail. */
+    struct rect panel = {sw < 1000 ? 0 : sw - START_W, 0,
+                         sw < 1000 ? sw : START_W, sh};
     int pad = UI_ELEV_DIALOG_R + 8;
     queue_damage((struct rect){max_i(0, panel.x - pad),
                                max_i(0, panel.y - pad),
@@ -2773,7 +3166,54 @@ static void start_set_open(int open) {
         return;
     start_damage();
     start_open = open;
+    ui_motion_to(&search_motion, open ? 255 : 0, open ? 220 : 160, monotonic_ms());
+    if (open) {
+        start_query[0] = 0;
+        start_selected = 0;
+        start_scroll = 0;
+    }
+    ui_motion_reset(&result_scroll_motion, start_scroll);
     hover_start_tile = -1;
+    desktop_dirty = 1;
+}
+
+static void start_handle_key(int key) {
+    int indices[MAX_APPS];
+    int matches = start_matches(indices);
+    if (key == KEY_ESC || key == 23) {
+        start_set_open(0);
+        return;
+    }
+    if (key == '\n' || key == '\r') {
+        if (matches > 0) {
+            int app = indices[clamp_i(start_selected, 0, matches - 1)];
+            start_set_open(0);
+            run_app(apps[app].path);
+        }
+        return;
+    }
+    start_damage(); /* Preserve the old extent before filtering changes height. */
+    int length = (int)strlen(start_query);
+    if (key == KEY_BACKSPACE || key == 127) {
+        if (length) start_query[length - 1] = 0;
+        start_selected = 0;
+    } else if (key >= 32 && key < 127) {
+        if (length + 1 < (int)sizeof(start_query)) {
+            start_query[length] = (char)key;
+            start_query[length + 1] = 0;
+        }
+        start_selected = 0;
+    } else if (key == KEY_RIGHT || key == '\t') start_selected++;
+    else if (key == KEY_LEFT) start_selected--;
+    else if (key == KEY_UP) start_selected--;
+    else if (key == KEY_DOWN) start_selected++;
+    else if (key == KEY_HOME) start_selected = 0;
+    else if (key == KEY_END) start_selected = max_i(0, matches - 1);
+    matches = start_matches(indices);
+    start_selected = clamp_i(start_selected, 0, max_i(0, matches - 1));
+    start_reveal_selection(matches);
+    hover_start_tile = -1;
+    start_damage();
     desktop_dirty = 1;
 }
 
@@ -3042,8 +3482,8 @@ static struct rect ime_panel_rect_for(const char *comp, const char *cands) {
         panel_x = 8;
     if (panel_y + panel_h > sh - 8)
         panel_y = caret.y - panel_h - 6;
-    if (panel_y < WORK_TOP + 4)
-        panel_y = WORK_TOP + 4;
+    if (panel_y < work_area().y + 4)
+        panel_y = work_area().y + 4;
     if (panel_y + panel_h > sh - 8)
         panel_y = sh - 8 - panel_h;
     return (struct rect){panel_x, panel_y, panel_w, panel_h};
@@ -3180,6 +3620,14 @@ static void compose_scene(void) {
 
 static int bind_scanout(void) {
     struct gfx_surface_map map;
+    fb = fb_local;
+    fb_stride = MAX_SW;
+    scanout_direct = 0;
+    /* LFB writes are immediately visible: drawing the background and each
+     * window there exposes incomplete frames. Compose in RAM, then blit the
+     * finished damage. VirtIO backing memory has an explicit present step. */
+    if (display_backend == GFX_BACKEND_FRAMEBUFFER)
+        return 0;
     if (gfx_map_surface(&map) == 0 && map.pixels &&
         map.width >= (uint32_t)sw && map.height >= (uint32_t)sh &&
         map.stride_pixels >= (uint32_t)sw) {
@@ -3189,9 +3637,6 @@ static int bind_scanout(void) {
         display_backend = map.backend;
         return 0;
     }
-    fb = fb_local;
-    fb_stride = MAX_SW;
-    scanout_direct = 0;
     return -1;
 }
 
@@ -3610,10 +4055,10 @@ static void gpu_draw_app(int slot, struct rect damage) {
         session->gpu_content_w <= 0 || session->gpu_content_h <= 0 ||
         !windows[id].visible || windows[id].minimized)
         return;
-    content = content_rect(id);
+    content = motion_paint_rect(id, content_rect(id));
     if (session->scaled_surface) {
-        destination = scaled_view_rect_for(id, session->gpu_content_w,
-                                           session->gpu_content_h);
+        destination = motion_paint_rect(id, scaled_view_rect_for(id, session->gpu_content_w,
+                                           session->gpu_content_h));
     } else {
         /* Desktop UI is pixel-sized content, not a video surface.  Keep it
          * 1:1 while resize configures are in flight; stretching each lagging
@@ -3637,7 +4082,7 @@ static void gpu_draw_app(int slot, struct rect damage) {
     for (int zi = zpos + 1; zi < WIN_COUNT && count > 0; zi++) {
         int above = z_order[zi];
         if (windows[above].visible && !windows[above].minimized)
-            count = gpu_visible_cut(visible, count, windows[above].r);
+            count = gpu_visible_cut(visible, count, motion_paint_rect(above, windows[above].r));
     }
 
     /* Taskbar, menus, IME, snap preview and the software-cursor fallback are
@@ -3673,7 +4118,6 @@ static int gpu_acrylic_regions(struct gpu_acrylic_region *out, int capacity) {
             count++; \
         } \
     } while (0)
-    ADD_ACRYLIC(taskbar_rect(), 0, UI_BG_ACRYLIC_THIN, 190);
     if (taskbar_expanded) {
         int ids[MAX_GUI_APPS];
         int hidden = taskbar_hidden_windows(ids);
@@ -3681,9 +4125,6 @@ static int gpu_acrylic_regions(struct gpu_acrylic_region *out, int capacity) {
             ADD_ACRYLIC(taskbar_overflow_panel(hidden), UI_RADIUS_OVERLAY,
                         UI_BG_ACRYLIC, 205);
     }
-    if (start_open)
-        ADD_ACRYLIC(start_menu_rect(), UI_RADIUS_OVERLAY,
-                    UI_BG_ACRYLIC, 215);
     ADD_ACRYLIC(ime_panel_rect(), UI_RADIUS_OVERLAY, UI_BG_ACRYLIC, 215);
     ADD_ACRYLIC(context_menu_rect(), UI_RADIUS_OVERLAY,
                 UI_BG_ACRYLIC, 210);
@@ -3861,7 +4302,7 @@ static struct rect app_damage_to_screen(int slot, struct rect dirty) {
     if (slot < 0 || slot >= MAX_GUI_APPS || !app_sessions[slot].used ||
         !windows[id].visible || windows[id].minimized)
         return (struct rect){0, 0, 0, 0};
-    struct rect content = content_rect(id);
+    struct rect content = motion_paint_rect(id, content_rect(id));
     struct rect screen = (struct rect){0, 0, sw, sh};
     if (!app_sessions[slot].scaled_surface) {
         struct rect area = {
@@ -3876,7 +4317,7 @@ static struct rect app_damage_to_screen(int slot, struct rect dirty) {
     dirty = intersect_rect(dirty, (struct rect){0, 0, source_w, source_h});
     if (dirty.w <= 0 || dirty.h <= 0)
         return (struct rect){0, 0, 0, 0};
-    struct rect view = scaled_view_rect(id, slot);
+    struct rect view = motion_paint_rect(id, scaled_view_rect(id, slot));
     int x1 = view.x + dirty.x * view.w / source_w;
     int y1 = view.y + dirty.y * view.h / source_h;
     int x2 = view.x +
@@ -3890,7 +4331,11 @@ static struct rect app_damage_to_screen(int slot, struct rect dirty) {
 static int top_window_at(int x, int y) {
     for (int zi = WIN_COUNT - 1; zi >= 0; zi--) {
         int i = z_order[zi];
-        if (windows[i].visible && !windows[i].minimized && inside(x, y, windows[i].r))
+        /* Start paints through the bottom band while its taskbar is hidden.
+         * Its last visible tile/scrollbar pixels must remain interactive. */
+        struct rect hit = i == WIN_LAUNCHER && metro_start_visible()
+            ? (struct rect){0, 0, sw, sh} : windows[i].r;
+        if (windows[i].visible && !windows[i].minimized && inside(x, y, hit))
             return i;
     }
     return -1;
@@ -3898,7 +4343,7 @@ static int top_window_at(int x, int y) {
 
 static int hit_window_title(int x, int y) {
     int i = top_window_at(x, y);
-    if (i < 0)
+    if (i < 0 || i == WIN_LAUNCHER)
         return -1;
     struct rect r = windows[i].r;
     struct rect title = {r.x, r.y, r.w, WINDOW_TITLE_H};
@@ -3911,7 +4356,7 @@ static int hit_window(int x, int y) {
 
 static int hit_control(int x, int y, int *control_out) {
     int i = top_window_at(x, y);
-    if (i < 0)
+    if (i < 0 || i == WIN_LAUNCHER)
         return -1;
     if (inside(x, y, control_hit_rect(i, 2))) {
         *control_out = 2;
@@ -3931,6 +4376,8 @@ static int hit_control(int x, int y, int *control_out) {
 static int hit_resize(int x, int y, int *edges_out) {
     for (int zi = WIN_COUNT - 1; zi >= 0; zi--) {
         int i = z_order[zi];
+        if (i == WIN_LAUNCHER)
+            continue;
         if (!windows[i].visible || windows[i].minimized)
             continue;
         struct rect r = windows[i].r;
@@ -3976,6 +4423,8 @@ static int hit_resize(int x, int y, int *edges_out) {
 
 static void apply_resize(int id, int mx, int my) {
     struct rect r = windows[id].r;
+    int min_w = window_min_width(id);
+    int min_h = window_min_height(id);
     int dx = mx - resize_start_x;
     int dy = my - resize_start_y;
     if (dx == 0 && dy == 0)
@@ -3993,32 +4442,32 @@ static void apply_resize(int id, int mx, int my) {
     if (resize_edges & 8)
         r.h += dy;
 
-    if (r.w < WIN_MIN_W) {
+    if (r.w < min_w) {
         if (resize_edges & 1)
-            r.x -= WIN_MIN_W - r.w;
-        r.w = WIN_MIN_W;
+            r.x -= min_w - r.w;
+        r.w = min_w;
     }
-    if (r.h < WIN_MIN_H) {
+    if (r.h < min_h) {
         if (resize_edges & 4)
-            r.y -= WIN_MIN_H - r.h;
-        r.h = WIN_MIN_H;
+            r.y -= min_h - r.h;
+        r.h = min_h;
     }
     if (r.x < 0) {
         r.w += r.x;
         r.x = 0;
     }
-    if (r.y < WORK_TOP) {
-        r.h += r.y - WORK_TOP;
-        r.y = WORK_TOP;
+    if (r.y < work_area().y) {
+        r.h += r.y - work_area().y;
+        r.y = work_area().y;
     }
     if (r.x + r.w > sw)
         r.w = sw - r.x;
-    if (r.y + r.h > sh - 12)
-        r.h = sh - 12 - r.y;
-    if (r.w < WIN_MIN_W)
-        r.w = min_i(WIN_MIN_W, sw - r.x);
-    if (r.h < WIN_MIN_H)
-        r.h = min_i(WIN_MIN_H, sh - 12 - r.y);
+    if (r.y + r.h > sh - TASKBAR_H)
+        r.h = sh - TASKBAR_H - r.y;
+    if (r.w < min_w)
+        r.w = min_i(min_w, sw - r.x);
+    if (r.h < min_h)
+        r.h = min_i(min_h, sh - TASKBAR_H - r.y);
 
     windows[id].r = r;
     windows[id].restore = r;
@@ -4034,8 +4483,9 @@ static void apply_resize(int id, int mx, int my) {
 }
 
 static void minimize_window(int id) {
-    if (id < 0 || id >= WIN_COUNT)
+    if (id < 0 || id >= WIN_COUNT || id == WIN_LAUNCHER)
         return;
+    window_motion_cancel(id);
     windows[id].minimized = 1;
     windows[id].active = 0;
     for (int zi = WIN_COUNT - 1; zi >= 0; zi--) {
@@ -4048,12 +4498,17 @@ static void minimize_window(int id) {
 }
 
 static void close_window(int id) {
-    if (id < 0 || id >= WIN_COUNT)
+    if (id < 0 || id >= WIN_COUNT || id == WIN_LAUNCHER)
         return;
+    window_motion_cancel(id);
+    for (int control = 0; control < 3; control++)
+        ui_motion_reset(&caption_motion[id][control], 0);
     if (hover_app == id)
         hover_app = -1;
     int slot = app_slot_for_win(id);
     if (slot >= 0 && app_sessions[slot].used) {
+        for (int k = 0; k < GUIAPP_KEY_COUNT; k++)
+            if (key_owner[k] == slot + 1) key_owner[k] = 0;
         app_sessions[slot].closing = 1;
         (void)app_send_event(slot, GUIAPP_EVT_CLOSE, 0, 0, 0, 0, 0);
         close(app_sessions[slot].to_fd);
@@ -4102,6 +4557,29 @@ static void close_window(int id) {
     }
 }
 
+/* User exits keep their app pixels alive until the visual deadline. Failure
+ * cleanup, reader reaping and shutdown still use the immediate close path. */
+static void request_window_exit(int id, int action) {
+    if (id <= WIN_LAUNCHER || id >= WIN_COUNT || !windows[id].visible ||
+        windows[id].minimized || window_exit[id]) return;
+    window_motion_cancel(id);
+    window_exit[id] = action;
+    ui_motion_to(&window_motion[id], action == WINDOW_EXIT_CLOSE ? 32 : 48,
+                 action == WINDOW_EXIT_CLOSE ? 150 : 180, monotonic_ms());
+    win_damage(id);
+}
+
+static void finish_window_exits(void) {
+    for (int id = WIN_STATUS; id < WIN_COUNT; id++) {
+        int action = window_exit[id];
+        if (!action) continue;
+        window_motion_cancel(id);
+        if (action == WINDOW_EXIT_CLOSE) close_window(id);
+        else minimize_window(id);
+        desktop_dirty = 1;
+    }
+}
+
 static void reap_dead_apps(void) {
     for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
         if (app_sessions[slot].used && app_sessions[slot].reader_dead) {
@@ -4112,8 +4590,9 @@ static void reap_dead_apps(void) {
 }
 
 static void toggle_maximize(int id) {
-    if (id < 0 || id >= WIN_COUNT)
+    if (id < 0 || id >= WIN_COUNT || id == WIN_LAUNCHER)
         return;
+    window_motion_cancel(id);
     if (windows[id].maximized) {
         windows[id].r = windows[id].restore;
         windows[id].maximized = 0;
@@ -4130,6 +4609,9 @@ static void toggle_maximize(int id) {
         app_sessions[slot].resize_dirty = 1;
         (void)sync_app_size(id, 1);
     }
+    ui_motion_reset(&window_motion[id], windows[id].maximized ? 16 : 24);
+    window_motion_pending[id] = 1;
+    win_damage(id);
 }
 
 static int hit_scrollbar(int x, int y, int *axis_out) {
@@ -4191,10 +4673,9 @@ static struct rect snap_target_rect(int zone) {
 }
 
 /* Commit the snap for a window whose drag just ended. */
-static void apply_snap(int id) {
-    int zone = snap_zone_at(pointer_x, pointer_y);
+static void snap_window(int id, int zone) {
     struct rect target;
-    if (zone == SNAP_NONE || id < 0 || id >= WIN_COUNT)
+    if (zone == SNAP_NONE || id <= WIN_LAUNCHER || id >= WIN_COUNT)
         return;
     target = snap_target_rect(zone);
     /* Preserve the pre-snap bounds so the maximise button and a later drag
@@ -4213,6 +4694,10 @@ static void apply_snap(int id) {
             (void)sync_app_size(id, 1);
         }
     }
+}
+
+static void apply_snap(int id) {
+    snap_window(id, snap_zone_at(pointer_x, pointer_y));
 }
 
 /* Translucent preview of where the window will land, drawn during the drag. */
@@ -4237,6 +4722,7 @@ static void draw_snap_preview(void) {
 static int hit_start_menu(int x, int y);
 
 static int hit_taskbar(int x, int y) {
+    if (metro_start_visible()) return -1;
     struct tb_item items[TB_MAX_ITEMS];
     int count;
 
@@ -4272,7 +4758,7 @@ static int hit_taskbar(int x, int y) {
 
 static void send_mouse_to_app(int id, int buttons, int wheel) {
     int slot = app_slot_for_win(id);
-    if (slot < 0 || !app_sessions[slot].used)
+    if (slot < 0 || !app_sessions[slot].used || window_exit[id])
         return;
     struct rect c = content_rect(id);
     int x = pointer_x - c.x;
@@ -4293,7 +4779,7 @@ static void update_hover_app(int force) {
     int next_hover_app = -1;
     /* The context menu owns the pointer while open; do not light up controls
      * in the application underneath it. */
-    if (!context_open) {
+    if (!context_open && !(start_open && inside(pointer_x, pointer_y, start_menu_rect()))) {
         int hovered_window = hit_window(pointer_x, pointer_y);
         int hovered_slot = app_slot_for_win(hovered_window);
         if (hovered_slot >= 0 && app_sessions[hovered_slot].used &&
@@ -4339,14 +4825,163 @@ static int has_app_tick_clients(void) {
     return 0;
 }
 
+static int shell_motion_active(void) {
+    if (home_scroll_motion[0].active || home_scroll_motion[1].active ||
+        result_scroll_motion.active) return 1;
+    for (int i = 0; i < WIN_COUNT + 4; i++)
+        if (dock_hover_motion[i].active || dock_press_motion[i].active ||
+            dock_active_motion[i].active) return 1;
+    for (int id = WIN_STATUS; id < WIN_COUNT; id++)
+        for (int control = 0; control < 3; control++)
+            if (caption_motion[id][control].active) return 1;
+    if (search_motion.active || home_motion_active) return 1;
+    for (int id = WIN_STATUS; id < WIN_COUNT; id++)
+        if (window_motion[id].active || window_motion_pending[id]) return 1;
+    for (int i = 0; i < app_count; i++)
+        if (tile_hover_motion[i].active || tile_press_motion[i].active) return 1;
+    return 0;
+}
+
+static void refresh_shell_motion(uint32_t now) {
+    for (int id = WIN_STATUS; id < WIN_COUNT; id++) {
+        if (window_exit[id] && !window_motion[id].active) {
+            int action = window_exit[id];
+            window_motion_cancel(id);
+            if (action == WINDOW_EXIT_CLOSE) close_window(id);
+            else minimize_window(id);
+            desktop_dirty = 1;
+        }
+        for (int control = 0; control < 3; control++) {
+            int hovered = windows[id].visible && !windows[id].minimized &&
+                          control_hovered(id, control);
+            ui_motion_to(&caption_motion[id][control], hovered ? 255 : 0, 120, now);
+        }
+    }
+    int dock_hover[WIN_COUNT + 4] = {0}, dock_active[WIN_COUNT + 4] = {0};
+    struct tb_item items[TB_MAX_ITEMS];
+    int count = metro_start_visible() ? 0 : taskbar_items(items);
+    for (int i = 0; i < count; i++) {
+        struct tb_item *it = &items[i];
+        int channel = it->kind == TB_WINDOW ? it->value :
+            it->kind == TB_START ? WIN_COUNT :
+            it->kind == TB_OVERFLOW ? WIN_COUNT + 1 :
+            it->kind == TB_TRAY_IME ? WIN_COUNT + 2 : WIN_COUNT + 3;
+        dock_hover[channel] = inside(pointer_x, pointer_y, it->r);
+        dock_active[channel] = it->kind == TB_WINDOW ? windows[it->value].active :
+            it->kind == TB_START ? start_open :
+            it->kind == TB_OVERFLOW ? taskbar_expanded : 0;
+    }
+    for (int i = 0; i < WIN_COUNT + 4; i++) {
+        ui_motion_to(&dock_hover_motion[i], dock_hover[i] ? 255 : 0, 120, now);
+        ui_motion_to(&dock_press_motion[i], dock_hover[i] && motion_pointer_down ? 255 : 0, 80, now);
+        ui_motion_to(&dock_active_motion[i], dock_active[i] ? 255 : 0, 180, now);
+    }
+    for (int id = WIN_STATUS; id < WIN_COUNT; id++) {
+        if (!window_motion_pending[id]) continue;
+        window_motion_pending[id] = 0;
+        ui_motion_to(&window_motion[id], 0, 240, now);
+    }
+    int home = metro_start_visible();
+    if (home && !motion_home_visible) {
+        home_motion_start = now;
+        home_motion_active = 1;
+        motion_frame_ms = now - MOTION_FRAME_MS;
+    }
+    if (!home && home_motion_active) {
+        home_motion_active = 0;
+        queue_damage(content_rect(WIN_LAUNCHER));
+    }
+    motion_home_visible = home;
+    int hovered = home && !start_open ? hit_launcher_row_at(pointer_x, pointer_y) : -1;
+    for (int i = 0; i < app_count; i++) {
+        ui_motion_to(&tile_hover_motion[i], i == hovered ? 255 : 0, 120, now);
+        ui_motion_to(&tile_press_motion[i], i == launcher_press && i == hovered
+                     && motion_pointer_down ? 255 : 0, 90, now);
+    }
+    if ((uint32_t)(now - motion_frame_ms) < MOTION_FRAME_MS) return;
+    motion_frame_ms = now;
+    for (int axis = 0; axis < 2; axis++) {
+        if (!ui_motion_step(&home_scroll_motion[axis], now)) continue;
+        if (axis) scroll_y[WIN_LAUNCHER] = home_scroll_motion[axis].value;
+        else scroll_x[WIN_LAUNCHER] = home_scroll_motion[axis].value;
+        clamp_scroll(WIN_LAUNCHER);
+        /* Include the group headings above the tile body and scrollbars. */
+        win_damage(WIN_LAUNCHER);
+        hover_launcher_row = -1;
+        refresh_pointer_hover_damage();
+    }
+    if (ui_motion_step(&result_scroll_motion, now)) {
+        start_scroll = result_scroll_motion.value;
+        hover_start_tile = -1;
+        start_damage();
+    }
+    int dock_changed = 0;
+    for (int i = 0; i < WIN_COUNT + 4; i++) {
+        dock_changed |= ui_motion_step(&dock_hover_motion[i], now);
+        dock_changed |= ui_motion_step(&dock_press_motion[i], now);
+        dock_changed |= ui_motion_step(&dock_active_motion[i], now);
+    }
+    if (dock_changed) taskbar_damage();
+    for (int id = WIN_STATUS; id < WIN_COUNT; id++)
+        for (int control = 0; control < 3; control++)
+            if (ui_motion_step(&caption_motion[id][control], now))
+                queue_damage(motion_paint_rect(id, caption_rect(id, control)));
+    if (home_motion_active) {
+        struct rect c = content_rect(WIN_LAUNCHER);
+        queue_damage(c);
+        uint32_t end = HOME_MOTION_MS + (uint32_t)min_i(max_i(0, app_count - 1), 10) * HOME_STAGGER_MS;
+        if ((uint32_t)(now - home_motion_start) >= end) home_motion_active = 0;
+    }
+    if (ui_motion_step(&search_motion, now)) start_damage();
+    for (int id = WIN_STATUS; id < WIN_COUNT; id++) {
+        struct rect old = motion_paint_rect(id, windows[id].r);
+        if (ui_motion_step(&window_motion[id], now))
+            queue_damage(union_rect(shadow_bounds(old),
+                                     shadow_bounds(motion_paint_rect(id, windows[id].r))));
+        if (window_exit[id] && !window_motion[id].active) {
+            int action = window_exit[id];
+            window_motion_cancel(id);
+            if (action == WINDOW_EXIT_CLOSE) close_window(id);
+            else minimize_window(id);
+            desktop_dirty = 1;
+        }
+    }
+    for (int i = 0; i < app_count; i++) {
+        int changed = ui_motion_step(&tile_hover_motion[i], now);
+        changed |= ui_motion_step(&tile_press_motion[i], now);
+        if (changed) {
+            struct rect r = launcher_row_paint_rect(i);
+            r.x -= 4; r.y -= 4; r.w += 8; r.h += 32;
+            queue_damage(intersect_rect(r, content_rect(WIN_LAUNCHER)));
+        }
+    }
+}
+
 static void refresh_timed_shell(uint32_t now) {
+    /* A notification threshold, not an execution deadline. The shell owns
+     * the title and can paint it while the page's main thread is busy. */
+    for (int slot = 0; slot < MAX_GUI_APPS; slot++) {
+        struct app_session *app = &app_sessions[slot];
+        struct guiapp_shared_surface *shared = app->shared;
+        int busy = app->used && shared && shared->script_control_enabled &&
+            __atomic_load_n(&shared->script_running, __ATOMIC_ACQUIRE) &&
+            (uint32_t)(now - shared->script_started_ms) >= 2000;
+        if (busy != app->script_busy_visible) {
+            app->script_busy_visible = busy;
+            win_damage(WIN_APP_BASE + slot);
+        }
+        if (app->used && app->input_overflow && app_event_has_capacity(slot)) {
+            app->input_overflow = 0;
+            app_send_event(slot, GUIAPP_EVT_INPUT_RESET, 0, 0, 0, 0, 0);
+        }
+    }
     /* Keep the old approximately-60-Hz time unit without requiring a 60-Hz
      * polling loop.  Only actual deadlines cause damage. */
     tick = now / 16u;
     uint32_t second = now / 1000u;
     if (second != last_clock_second) {
         last_clock_second = second;
-        taskbar_clock_damage();
+        if (!metro_start_visible()) taskbar_clock_damage();
     }
     if (mode_error_until && tick >= mode_error_until) {
         mode_error_until = 0;
@@ -4356,18 +4991,16 @@ static void refresh_timed_shell(uint32_t now) {
 
 static unsigned int gui_idle_timeout(uint32_t now) {
     unsigned int timeout = 1000u - now % 1000u;
+    if (shell_motion_active()) {
+        uint32_t elapsed = now - motion_frame_ms;
+        unsigned int next = elapsed >= MOTION_FRAME_MS ? 1u : MOTION_FRAME_MS - elapsed;
+        if (next < timeout) timeout = next;
+    }
     if (has_app_tick_clients()) {
         uint32_t elapsed = now - last_app_tick_ms;
         unsigned int app_timeout = elapsed >= 500u ? 1u : 500u - elapsed;
         if (app_timeout < timeout)
             timeout = app_timeout;
-    }
-    if (!gpu_present_ready) {
-        unsigned int elapsed_ticks = tick - last_render_tick;
-        unsigned int redraw_timeout = elapsed_ticks >= 60u
-            ? 1u : (60u - elapsed_ticks) * 16u;
-        if (redraw_timeout < timeout)
-            timeout = redraw_timeout;
     }
     if (mode_error_until && mode_error_until > tick) {
         unsigned int error_timeout = (mode_error_until - tick) * 16u;
@@ -4543,6 +5176,8 @@ static int ime_handle_key(int k) {
 static void activate_next_visible(void) {
     for (int step = 1; step <= WIN_COUNT; step++) {
         int id = (focus + step) % WIN_COUNT;
+        if (id == WIN_LAUNCHER)
+            continue;
         if (!windows[id].visible || windows[id].minimized)
             continue;
         if (id >= WIN_APP_BASE && !app_sessions[id - WIN_APP_BASE].used)
@@ -4552,14 +5187,67 @@ static void activate_next_visible(void) {
     }
 }
 
+static void show_workspace(void) {
+    for (int id = WIN_STATUS; id < WIN_COUNT; id++)
+        if (windows[id].visible) windows[id].minimized = 1;
+    start_set_open(0);
+    activate(WIN_LAUNCHER);
+    desktop_dirty = 1;
+}
+
+static void switch_task(void) {
+    for (int step = 1; step <= WIN_COUNT; step++) {
+        int id = (focus + step) % WIN_COUNT;
+        if (id == WIN_LAUNCHER || !windows[id].visible) continue;
+        if (id >= WIN_APP_BASE && !app_sessions[id - WIN_APP_BASE].used)
+            continue;
+        activate(id);
+        desktop_dirty = 1;
+        return;
+    }
+}
+
 static void handle_key(int k) {
+    if (k == 299) return;
+    finish_window_exits();
+    ui_motion_reset(&home_scroll_motion[0], scroll_x[WIN_LAUNCHER]);
+    ui_motion_reset(&home_scroll_motion[1], scroll_y[WIN_LAUNCHER]);
+    ui_motion_reset(&result_scroll_motion, start_scroll);
+    if (k >= KEY_WINDOW_CLOSE && k <= KEY_SNAP_LEFT) {
+        start_set_open(0);
+        if (k == KEY_WORKSPACE) show_workspace();
+        else if (k == KEY_TASK_SWITCH) switch_task();
+        else if (focus != WIN_LAUNCHER) {
+            if (k == KEY_WINDOW_CLOSE) request_window_exit(focus, WINDOW_EXIT_CLOSE);
+            if (k == KEY_MINIMIZE) request_window_exit(focus, WINDOW_EXIT_MINIMIZE);
+            if (k == KEY_MAXIMIZE) toggle_maximize(focus);
+            if (k == KEY_SNAP_LEFT) snap_window(focus, SNAP_LEFT);
+            if (k == KEY_SNAP_RIGHT) snap_window(focus, SNAP_RIGHT);
+            desktop_dirty = 1;
+        }
+        return;
+    }
+    if (k == 16) { /* Ctrl+P: application palette */
+        start_set_open(!start_open);
+        return;
+    }
+    if (start_open) {
+        start_handle_key(k);
+        return;
+    }
     if (ime_handle_key(k))
         return;
+    if (k == 23 && focus != WIN_LAUNCHER) { /* Ctrl+W */
+        request_window_exit(focus, WINDOW_EXIT_CLOSE);
+        desktop_dirty = 1;
+        return;
+    }
     if (k == KEY_ESC) {
+        if (app_handle_escape(focus)) return;
         running = 0;
         return;
     }
-    if (k == '\t') {
+    if (k == '\t' && focus < WIN_APP_BASE) {
         activate_next_visible();
         desktop_dirty = 1;
         return;
@@ -4585,11 +5273,23 @@ static void handle_key(int k) {
         }
     }
     if (focus == WIN_LAUNCHER) {
+        if (k == KEY_UP || k == KEY_DOWN || k == KEY_LEFT || k == KEY_RIGHT ||
+            k == KEY_HOME || k == KEY_END) {
+            home_motion_active = 0;
+            motion_home_visible = 1;
+            queue_damage(content_rect(WIN_LAUNCHER));
+        }
+        if (k == 's' || k == 'S') {
+            activate(WIN_STATUS);
+            desktop_dirty = 1;
+            return;
+        }
         int old_selected = app_selected;
-        if (k == KEY_UP && app_selected > 0)
-            app_selected--;
-        else if (k == KEY_DOWN && app_selected + 1 < app_count)
-            app_selected++;
+        struct rect body = content_rect(WIN_LAUNCHER);
+        if (k == KEY_UP || k == KEY_DOWN || k == KEY_LEFT || k == KEY_RIGHT)
+            app_selected = launcher_neighbor(k);
+        else if (k == KEY_HOME) app_selected = 0;
+        else if (k == KEY_END) app_selected = max_i(0, app_count - 1);
         else if ((k == '\n' || k == '\r') && app_count > 0) {
             run_app(apps[app_selected].path);
             return;
@@ -4597,15 +5297,30 @@ static void handle_key(int k) {
             scan_apps();
             desktop_dirty = 1;
             return;
+        } else if (k >= 32 && k < 127) {
+            start_set_open(1);
+            start_handle_key(k);
+            return;
         }
-        if (app_selected != old_selected)
+        if (app_selected != old_selected) {
+            struct rect tile = launcher_row_paint_rect(app_selected);
+            if (tile.x < body.x) scroll_x[WIN_LAUNCHER] -= body.x - tile.x;
+            else if (tile.x + tile.w > body.x + body.w)
+                scroll_x[WIN_LAUNCHER] += tile.x + tile.w - body.x - body.w;
+            if (tile.y < body.y) scroll_y[WIN_LAUNCHER] -= body.y - tile.y;
+            else if (tile.y + tile.h > body.y + body.h)
+                scroll_y[WIN_LAUNCHER] += tile.y + tile.h - body.y - body.h;
+            clamp_scroll(WIN_LAUNCHER);
             win_damage(WIN_LAUNCHER);
+        }
         return;
     }
     int slot = app_slot_for_win(focus);
     if (slot >= 0 && app_sessions[slot].used) {
         if (app_send_event(slot, GUIAPP_EVT_KEY, 0, 0, k, 1, 0) < 0)
             app_sessions[slot].reader_dead = 1;
+        else if (k >= 0 && k < GUIAPP_KEY_COUNT)
+            key_owner[k] = (uint8_t)(slot + 1);
     }
 }
 
@@ -4616,10 +5331,13 @@ static void forward_key_releases(void) {
     while (read(keyevent_fd, &event, sizeof(event)) == (int)sizeof(event)) {
         if (event & 0x8000u)
             continue;
-        int slot = app_slot_for_win(focus);
+        int key = event & 0x7FFFu;
+        int slot = key < GUIAPP_KEY_COUNT ? (int)key_owner[key] - 1 : -1;
+        if (key < GUIAPP_KEY_COUNT) key_owner[key] = 0;
+        if (slot < 0) continue;
         if (slot >= 0 && app_sessions[slot].used &&
             app_send_event(slot, GUIAPP_EVT_KEY, 0, 0,
-                           event & 0x7FFFu, 0, 0) < 0)
+                           key, 0, 0) < 0)
             app_sessions[slot].reader_dead = 1;
     }
 }
@@ -4680,21 +5398,13 @@ static int hit_status_mode_at(int x, int y) {
 /* Geometry shared by paint, hit-test, and damage.  Width is capped to the
  * visible content so dirty rects match what fill_round actually painted. */
 static struct rect launcher_row_paint_rect(int index) {
-    struct rect c = content_rect(WIN_LAUNCHER);
-    int ox = c.x - scroll_x[WIN_LAUNCHER];
-    int oy = c.y - scroll_y[WIN_LAUNCHER];
-    int row_w = content_width(WIN_LAUNCHER) - 20;
-    if (row_w > c.w)
-        row_w = c.w;
-    if (row_w < 1)
-        row_w = 1;
-    struct rect row = {
-        ox,
-        oy + LAUNCHER_HEADER_H + index * LAUNCHER_ROW_STEP,
-        row_w,
-        LAUNCHER_ROW_H
-    };
-    return row;
+    if (sw < 1000) {
+        struct rect c = content_rect(WIN_LAUNCHER);
+        int cols = compact_columns(c), w = compact_tile_width(c), h = compact_tile_height(c);
+        return (struct rect){compact_grid_x(c) + (index % cols) * (w + 12),
+                             c.y - scroll_y[WIN_LAUNCHER] + (index / cols) * (h + 12), w, h};
+    }
+    return metro_tile_rect(metro_tile_for(apps[index].name, index));
 }
 
 static struct rect launcher_row_screen_rect(int index) {
@@ -4710,21 +5420,24 @@ static int hit_launcher_row_at(int x, int y) {
     struct rect c = content_rect(WIN_LAUNCHER);
     if (!inside(x, y, c))
         return -1;
-    int rel = y - (c.y + LAUNCHER_HEADER_H) + scroll_y[WIN_LAUNCHER];
-    if (rel < 0)
-        return -1;
-    int idx = rel / LAUNCHER_ROW_STEP;
-    if (idx < 0 || idx >= app_count)
-        return -1;
-    /* Ignore the inter-row gap (STEP - ROW_H); it is not painted as hover. */
-    int row_top = idx * LAUNCHER_ROW_STEP;
-    if (rel < row_top || rel >= row_top + LAUNCHER_ROW_H)
-        return -1;
-    return idx;
+    for (int index = 0; index < app_count; index++)
+        if (inside(x, y, launcher_row_paint_rect(index)))
+            return index;
+    return -1;
 }
 
 /* Recompute pointer-driven hover and damage full widget bounds on change. */
 static void refresh_pointer_hover_damage(void) {
+    static int previous_action = -1;
+    int action = -1;
+    if (metro_start_visible() && !start_open)
+        for (int i = 0; i < 5; i++)
+            if (inside(pointer_x, pointer_y, metro_action_rect(i))) action = i;
+    if (action != previous_action) {
+        if (previous_action >= 0) damage_widget(metro_action_rect(previous_action));
+        if (action >= 0) damage_widget(metro_action_rect(action));
+        previous_action = action;
+    }
     int mode = hit_status_mode_at(pointer_x, pointer_y);
     if (mode != hover_status_mode) {
         if (hover_status_mode >= 0)
@@ -4758,9 +5471,9 @@ static void refresh_pointer_hover_damage(void) {
     int tile = overlay ? hit_start_menu(pointer_x, pointer_y) : -1;
     if (tile != hover_start_tile) {
         if (hover_start_tile >= 0)
-            damage_widget(start_tile_rect(hover_start_tile));
+            damage_widget(start_app_tile_rect(hover_start_tile));
         if (tile >= 0)
-            damage_widget(start_tile_rect(tile));
+            damage_widget(start_app_tile_rect(tile));
         hover_start_tile = tile;
     }
 
@@ -4778,6 +5491,17 @@ static void handle_mouse(void) {
     struct mouse_state ms;
     if (mouse_get(&ms) < 0)
         return;
+    motion_pointer_down = ms.buttons & 1;
+    if (ms.buttons != prev_buttons && (ms.buttons & 1)) {
+        finish_window_exits();
+        ui_motion_reset(&home_scroll_motion[0], scroll_x[WIN_LAUNCHER]);
+        ui_motion_reset(&home_scroll_motion[1], scroll_y[WIN_LAUNCHER]);
+        ui_motion_reset(&result_scroll_motion, start_scroll);
+        /* Input immediately owns final window geometry; arrival motion must
+         * not move a title/button away from a click, resize or drag. */
+        for (int id = WIN_STATUS; id < WIN_COUNT; id++)
+            if (window_motion[id].active || window_motion_pending[id]) window_motion_cancel(id);
+    }
     int old_pointer_x = pointer_x;
     int old_pointer_y = pointer_y;
     int old_dock_hover = taskbar_hover;
@@ -4846,16 +5570,41 @@ static void handle_mouse(void) {
         int wheel_delta = ms.wheel - last_wheel_value;
         /* An open flyout absorbs the wheel; scrolling the window underneath
          * it would move content the pointer is not actually over. */
-        int h = (start_open &&
-                 inside(pointer_x, pointer_y, start_menu_rect()))
-            ? -1 : hit_window(pointer_x, pointer_y);
+        int over_search = start_open && inside(pointer_x, pointer_y, start_menu_rect());
+        /* A captured thumb owns scrolling until release. Consume wheel
+         * reports without starting motion that can overwrite the drag. */
+        int h = scroll_drag_win >= 0 || over_search ? -1 : hit_window(pointer_x, pointer_y);
+        if (scroll_drag_win < 0 && over_search) {
+            int indices[MAX_APPS];
+            int count = start_matches(indices);
+            if (!result_scroll_motion.active)
+                ui_motion_reset(&result_scroll_motion, start_scroll);
+            ui_motion_scroll(&result_scroll_motion, -wheel_delta * START_ROW_H,
+                max_i(0, count * START_ROW_H - start_results_rect().h), 160, monotonic_ms());
+            /* Retarget may sample directly onto the target and become idle;
+             * publish that sample even when no later step will report change. */
+            start_scroll = result_scroll_motion.value;
+            hover_start_tile = -1;
+            start_damage();
+        }
         if (h >= 0) {
             int slot = app_slot_for_win(h);
             if (slot >= 0 && app_sessions[slot].used && inside(pointer_x, pointer_y, content_rect(h)))
                 send_mouse_to_app(h, ms.buttons, wheel_delta);
             else {
-                scroll_y[h] -= wheel_delta * 44;
-                clamp_scroll(h);
+                if (h == WIN_LAUNCHER) {
+                    int axis = sw < 1000;
+                    struct ui_motion *m = &home_scroll_motion[axis];
+                    if (!m->active) ui_motion_reset(m, axis ? scroll_y[h] : scroll_x[h]);
+                    ui_motion_scroll(m, -wheel_delta * (axis ? 44 : 80),
+                                     axis ? max_scroll_y(h) : max_scroll_x(h), 180, monotonic_ms());
+                    if (axis) scroll_y[h] = m->value;
+                    else scroll_x[h] = m->value;
+                    home_motion_active = 0;
+                } else {
+                    scroll_y[h] -= wheel_delta * 44;
+                    clamp_scroll(h);
+                }
                 /* Scroll changes widget geometry under a stationary pointer. */
                 hover_status_mode = -1;
                 hover_launcher_row = -1;
@@ -4868,6 +5617,18 @@ static void handle_mouse(void) {
     }
 
     if (left && !prev_buttons) {
+        if (metro_start_visible() && !start_open) {
+            for (int action = 0; action < 5; action++) {
+                struct rect hit = metro_action_rect(action);
+                if (action < 2) hit = intersect_rect(hit, content_rect(WIN_LAUNCHER));
+                if (!inside(pointer_x, pointer_y, hit)) continue;
+                if (action == 0) { activate(WIN_STATUS); desktop_dirty = 1; }
+                else if (action == 4) running = 0;
+                else start_set_open(1);
+                prev_buttons = ms.buttons;
+                return;
+            }
+        }
         int start_pick = hit_start_menu(pointer_x, pointer_y);
         if (start_open && start_pick >= 0) {
             /* Launching closes the menu, as on any modern desktop. */
@@ -4878,7 +5639,6 @@ static void handle_mouse(void) {
         }
         if (start_open && start_pick == -2) {
             start_set_open(0);
-            running = 0;
             prev_buttons = ms.buttons;
             return;
         }
@@ -4902,7 +5662,8 @@ static void handle_mouse(void) {
             taskbar_expanded = !taskbar_expanded;
             desktop_dirty = 1;
         } else if (taskbar_hover >= 0) {
-            activate(taskbar_hover);
+            if (taskbar_hover == WIN_LAUNCHER) show_workspace();
+            else activate(taskbar_hover);
             taskbar_expanded = 0;
             start_set_open(0);
         } else {
@@ -4912,11 +5673,11 @@ static void handle_mouse(void) {
             if (ctl_win >= 0) {
                 activate(ctl_win);
                 if (control == 0)
-                    minimize_window(ctl_win);
+                    request_window_exit(ctl_win, WINDOW_EXIT_MINIMIZE);
                 else if (control == 1)
                     toggle_maximize(ctl_win);
                 else
-                    close_window(ctl_win);
+                    request_window_exit(ctl_win, WINDOW_EXIT_CLOSE);
                 prev_buttons = ms.buttons;
                 return;
             }
@@ -5000,17 +5761,10 @@ static void handle_mouse(void) {
              * and the row band, so paint and hit agree. */
             int launcher_row = hit_launcher_row_at(pointer_x, pointer_y);
             if (launcher_row >= 0) {
-                if (launcher_row == app_last_click &&
-                    tick - app_last_click_tick <= 25u) {
-                    app_selected = launcher_row;
-                    app_last_click = -1;
-                    run_app(apps[launcher_row].path);
-                    prev_buttons = ms.buttons;
-                    return;
-                }
                 app_selected = launcher_row;
-                app_last_click = launcher_row;
-                app_last_click_tick = tick;
+                launcher_press = launcher_row;
+                prev_buttons = ms.buttons;
+                return;
             } else if (focus != WIN_LAUNCHER) {
                 int slot = app_slot_for_win(focus);
                 if (slot >= 0 && inside(pointer_x, pointer_y, content_rect(focus))) {
@@ -5021,6 +5775,16 @@ static void handle_mouse(void) {
         }
     }
     if (!left) {
+        if (launcher_press >= 0) {
+            int pressed = launcher_press;
+            launcher_press = -1;
+            if (metro_start_visible() && !start_open &&
+                hit_launcher_row_at(pointer_x, pointer_y) == pressed) {
+                run_app(apps[pressed].path);
+                prev_buttons = ms.buttons;
+                return;
+            }
+        }
         if (app_mouse_capture >= 0)
             send_mouse_to_app(app_mouse_capture, ms.buttons, 0);
         int finished_resize = resize_win;
@@ -5033,7 +5797,7 @@ static void handle_mouse(void) {
             apply_snap(finished_drag);
         if (finished_resize >= WIN_APP_BASE)
             (void)sync_app_size(finished_resize, 1);
-        update_hover_app(1);
+        update_hover_app(0);
     }
     if (left && resize_win >= 0) {
         struct rect old = windows[resize_win].r;
@@ -5059,7 +5823,13 @@ static void handle_mouse(void) {
             scroll_x[id] = scroll_drag_value + delta * max_scroll_x(id) / span;
         }
         clamp_scroll(id);
-        queue_damage(windows[id].r);
+        if (id == WIN_LAUNCHER) {
+            ui_motion_reset(&home_scroll_motion[0], scroll_x[id]);
+            ui_motion_reset(&home_scroll_motion[1], scroll_y[id]);
+        }
+        /* Compact Start content extends 16px below the app work area. */
+        if (id == WIN_LAUNCHER) queue_damage((struct rect){0, 0, sw, sh});
+        else win_damage(id);
         prev_buttons = ms.buttons;
         return;
     }
@@ -5067,15 +5837,21 @@ static void handle_mouse(void) {
         struct rect *r = &windows[drag_win].r;
         struct rect old = *r;
         if (windows[drag_win].maximized) {
+            struct rect restored = windows[drag_win].restore;
+            drag_dx = old.w > 0 ? drag_dx * restored.w / old.w : 0;
+            drag_dy = clamp_i(drag_dy, 0, WINDOW_TITLE_H - 1);
+            *r = restored;
             windows[drag_win].maximized = 0;
-            windows[drag_win].restore = *r;
+            int slot = app_slot_for_win(drag_win);
+            if (slot >= 0 && app_sessions[slot].used)
+                app_sessions[slot].resize_dirty = 1;
         }
         r->x = pointer_x - drag_dx;
         r->y = pointer_y - drag_dy;
         if (r->x < 0) r->x = 0;
-        if (r->y < WORK_TOP) r->y = WORK_TOP;
+        if (r->y < work_area().y) r->y = work_area().y;
         if (r->x + r->w > sw) r->x = sw - r->w;
-        if (r->y + r->h > sh - 12) r->y = sh - 12 - r->h;
+        if (r->y + r->h > sh - TASKBAR_H) r->y = sh - TASKBAR_H - r->h;
         queue_damage(union_rect(shadow_bounds(old), shadow_bounds(*r)));
         /* The snap preview is drawn outside the window, so it needs its own
          * damage or it leaves an outline behind when the zone changes. */
@@ -5118,9 +5894,9 @@ static void init_desktop(void) {
         sh = MAX_SH;
     compose_clip = (struct rect){0, 0, sw, sh};
     if (bind_scanout() == 0)
-        gui_log(display_backend == GFX_BACKEND_VIRTIO_GPU_2D
+        gui_log(scanout_direct
                     ? "[gui] zero-copy virtio-gpu scanout"
-                    : "[gui] zero-copy linear framebuffer");
+                    : "[gui] buffered linear framebuffer");
     else
         gui_log("[gui] software backbuffer (scanout map failed)");
     gfx_set_origin(0, 0);
@@ -5134,9 +5910,34 @@ static void init_desktop(void) {
     scan_apps();
     keyevent_fd = open("/dev/keyevent", O_RDONLY);
     layout();
+    uint32_t data[4];
+    int fd = open("/fs/desktop.settings", O_RDONLY);
+    if (fd >= 0) {
+        int valid = read_full(fd, data, sizeof(data)) == 0;
+        char extra;
+        int trailing = read(fd, &extra, 1);
+        close(fd);
+        if (valid && trailing == 0 &&
+            data[0] == 0x425A5531u) {
+            for (int i = 0; i < DISPLAY_MODE_COUNT; i++) {
+                if (data[1] == (uint32_t)display_modes[i].width &&
+                    data[2] == (uint32_t)display_modes[i].height) {
+                    if (data[3] < (uint32_t)app_count)
+                        app_selected = (int)data[3];
+                    if (switch_display_mode(i) == 0) {
+                        preferences_saved = 1;
+                        gui_log("[gui] restored desktop settings");
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    motion_home_visible = 0;
 }
 
 static void shutdown_desktop(void) {
+    save_preferences();
     /* Point the compose buffer away from the GPU texture before freeing it;
      * anything that paints during teardown would otherwise write into a
      * destroyed resource. */
@@ -5196,6 +5997,7 @@ int main(int argc, char **argv) {
             handle_key(key);
         forward_key_releases();
         handle_mouse();
+        refresh_shell_motion(monotonic_ms());
         flush_pending_app_resizes();
         send_app_ticks();
         uint32_t app_dirty = __sync_lock_test_and_set(&app_frame_dirty_mask, 0);
@@ -5236,10 +6038,8 @@ int main(int argc, char **argv) {
             have_damage = 1;
         }
         int full_dirty = __sync_lock_test_and_set(&desktop_dirty, 0);
-        if (full_dirty || (!gpu_present_ready &&
-                           tick - last_render_tick >= 60u)) {
+        if (full_dirty) {
             render();
-            last_render_tick = tick;
             note_pointer_drawn();
         } else if (have_damage) {
             /* App-list hover dirties whole rows frequently.  Those rects can
@@ -5253,7 +6053,6 @@ int main(int argc, char **argv) {
                         gpu_fallback_to_software(
                             "[gui] virgl shell upload failed; software fallback");
                         render();
-                        last_render_tick = tick;
                         note_pointer_drawn();
                         goto frame_done;
                     }
@@ -5262,7 +6061,6 @@ int main(int argc, char **argv) {
                     gpu_fallback_to_software(
                         "[gui] virgl scene/present failed; software fallback");
                     render();
-                    last_render_tick = tick;
                 }
             } else {
                 damage = damage_with_pointer(damage);

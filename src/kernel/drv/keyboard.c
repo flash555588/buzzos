@@ -9,9 +9,13 @@ static volatile uint8_t buf[BUF_SIZE];
 static volatile int     head, tail;
 static volatile int     shift_down;
 static volatile int     ctrl_down;
+static volatile int     alt_down;
 static volatile int     extended_prefix;
 static volatile uint16_t event_buf[BUF_SIZE];
 static volatile int event_head, event_tail;
+/* Key-up uses the logical key published on key-down, independently of later
+ * Shift/Ctrl/Alt changes. Ordinary and E0 scan codes have separate slots. */
+static uint16_t pressed_key[256];
 
 static void enqueue_char(char c) {
     int next = (tail + 1) % BUF_SIZE;
@@ -59,8 +63,10 @@ void keyboard_init(void) {
     head = tail = 0;
     shift_down = 0;
     ctrl_down = 0;
+    alt_down = 0;
     extended_prefix = 0;
     event_head = event_tail = 0;
+    for (int i = 0; i < 256; i++) pressed_key[i] = 0;
 }
 
 void keyboard_handler(uint8_t scancode) {
@@ -82,6 +88,36 @@ void keyboard_handler(uint8_t scancode) {
         ctrl_down = !released;
         return;
     }
+    if (code == 0x38) {
+        alt_down = !released;
+        return;
+    }
+    int physical = code + (extended ? 128 : 0);
+    if (released) {
+        enqueue_event(pressed_key[physical], 0);
+        pressed_key[physical] = 0;
+        return;
+    }
+    /* Desktop commands have their own sequences and never leak ordinary
+     * key presses/releases into the newly focused application. */
+    if (alt_down) {
+        const char *command = 0;
+        if (extended) {
+            if (code == 0x48) command = "\x1B[a";
+            if (code == 0x50) command = "\x1B[b";
+            if (code == 0x4D) command = "\x1B[c";
+            if (code == 0x4B) command = "\x1B[d";
+        } else {
+            if (code == 0x0F) command = "\x1B[T";
+            if (code == 0x20) command = "\x1B[W";
+            if (code == 0x3E) command = "\x1B[Q";
+        }
+        if (command) {
+            if (!released) enqueue_seq(command);
+            gui_event_notify_display();
+            return;
+        }
+    }
     if (extended) {
         uint16_t key = 0;
         switch (code) {
@@ -94,8 +130,8 @@ void keyboard_handler(uint8_t scancode) {
         case 0x53: key = 262; break; /* Delete */
         default: return;
         }
-        enqueue_event(key, !released);
-        if (released) return;
+        pressed_key[physical] = key;
+        enqueue_event(key, 1);
         switch (code) {
         case 0x48: enqueue_seq("\x1B[A"); return;
         case 0x50: enqueue_seq("\x1B[B"); return;
@@ -107,18 +143,31 @@ void keyboard_handler(uint8_t scancode) {
         default: return;
         }
     }
-    uint16_t logical = (uint8_t)scancode_ascii[code];
-    enqueue_event(logical, !released);
-    if (released) return;
     char c = shift_down ? scancode_ascii_shift[scancode] : scancode_ascii[scancode];
     if (c == 0) return;
     if (ctrl_down) {
         char base = scancode_ascii[scancode];
-        if (base == ' ') {
-            enqueue_char(0x1F); /* desktop input-method toggle */
+        uint16_t zoom_key = 0;
+        const char *zoom_sequence = 0;
+        if (base == '=' || base == '+') {
+            zoom_key = KEYBOARD_ZOOM_IN;
+            zoom_sequence = "\x1B[+";
+        } else if (base == '-') {
+            zoom_key = KEYBOARD_ZOOM_OUT;
+            zoom_sequence = "\x1B[-";
+        } else if (base == '0') {
+            zoom_key = KEYBOARD_ZOOM_RESET;
+            zoom_sequence = "\x1B[0";
+        }
+        if (zoom_key) {
+            pressed_key[physical] = zoom_key;
+            enqueue_event(zoom_key, 1);
+            enqueue_seq(zoom_sequence);
             return;
         }
-        if (base >= 'a' && base <= 'z')
+        if (base == ' ') {
+            c = 0x1F; /* desktop input-method toggle */
+        } else if (base >= 'a' && base <= 'z')
             c = (char)(base - 'a' + 1);
         else if (base == '[')
             c = 0x1B;
@@ -130,6 +179,8 @@ void keyboard_handler(uint8_t scancode) {
             return;
     }
 
+    pressed_key[physical] = (uint8_t)c;
+    enqueue_event((uint8_t)c, 1);
     enqueue_char(c);
 }
 

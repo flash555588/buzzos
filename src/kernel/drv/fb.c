@@ -357,6 +357,14 @@ int fb_set_mode(uint32_t width, uint32_t height) {
     uint32_t virtual_width = bochs_vbe_read(VBE_DISPI_INDEX_VIRT_WIDTH);
     if (virtual_width < width)
         virtual_width = width;
+    uint64_t mapped_bytes = (uint64_t)virtual_width * height * 4u +
+                            fb_page_offset;
+    if (mapped_bytes > KERNEL_FB_SIZE ||
+        paging_ensure_framebuffer_size((size_t)mapped_bytes) < 0) {
+        (void)bochs_vbe_program(previous.width, previous.height);
+        irq_restore(flags);
+        return -1;
+    }
     fb_info.width = width;
     fb_info.height = height;
     fb_info.pitch = virtual_width * 4u;

@@ -2,9 +2,11 @@
 #include "guiapp.h"
 #include "libc.h"
 
-enum { W = 360, H = 360, EXPR_CAP = 96 };
+enum { EXPR_CAP = 96, SHORT_CANVAS_H = 520 };
 
-static uint32_t pixels[W * H];
+static int W = 360, H = 360;
+static uint32_t *pixels;
+static size_t pixel_capacity;
 static char expr[EXPR_CAP];
 static char display[EXPR_CAP];
 static int expr_len;
@@ -206,10 +208,28 @@ static const char *labels[] = {
     "sqrt", "=",
 };
 
+static int layout_pad(void) {
+    return H < SHORT_CANVAS_H ? 12 : appui_max(8, appui_min(20, W / 24));
+}
+
+static int layout_readout(void) {
+    return H < SHORT_CANVAS_H ? appui_max(48, appui_min(72, H / 6))
+                   : appui_max(32, appui_min(120, H / 4));
+}
+
 static struct appui_rect button_rect(int i) {
-    if (i < 20)
-        return (struct appui_rect){18 + (i % 4) * 82, 96 + (i / 4) * 42, 72, 34};
-    return (struct appui_rect){18 + (i - 20) * 164, 316, 154, 34};
+    int pad = layout_pad();
+    int readout = layout_readout();
+    int top = pad + readout + 8;
+    int step_y = appui_max(2, (H - top - pad - (H < SHORT_CANVAS_H ? 0 : 22)) / 6);
+    int gap = appui_min(8, step_y / 6);
+    int columns = i < 20 ? 4 : 2;
+    int step_x = (W - pad * 2 + gap) / columns;
+    int column = i < 20 ? i % 4 : i - 20;
+    int row = i < 20 ? i / 4 : 5;
+    return (struct appui_rect){pad + column * step_x, top + row * step_y,
+                               appui_max(1, step_x - gap),
+                               appui_max(1, step_y - gap)};
 }
 
 static void press_label(const char *s) {
@@ -230,16 +250,30 @@ static void press_label(const char *s) {
 
 static void render(void) {
     appui_fill(pixels, W, H, (struct appui_rect){0, 0, W, H}, THEME_APP_BG);
-    struct appui_rect display_rect = {16, 18, W - 32, 72};
-    appui_field_frame(pixels, W, H, display_rect, 0);
+    int pad = layout_pad();
+    struct appui_rect display_rect = {pad, pad, W - pad * 2,
+                                       layout_readout()};
+    appui_card(pixels, W, H, display_rect);
+    int label_h = display_rect.h >= 64 ? 20 : 0;
+    if (label_h) {
+        appui_label(pixels, W, H,
+                    (struct appui_rect){pad + 12, pad + 4, display_rect.w - 24, 20},
+                    "Standard", UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
+    }
     const char *value = display[0] ? display : "0";
+    struct appui_rect value_rect = {display_rect.x + 12,
+        display_rect.y + label_h + 4, display_rect.w - 24,
+        display_rect.h - label_h - 8};
+    int value_font = UI_FONT_DISPLAY;
+    while (value_font > UI_FONT_CAPTION &&
+           (ui_font_height(value_font) > value_rect.h ||
+            ui_text_width(value, value_font) > value_rect.w))
+        value_font--;
     /* The result is the one piece of type that should dominate the window,
      * so it gets the title size and hugs the right edge like a calculator
      * readout rather than sitting on the native glyph grid. */
     appui_label(pixels, W, H,
-                (struct appui_rect){display_rect.x + 12, display_rect.y,
-                                    display_rect.w - 24, display_rect.h},
-                value, UI_FONT_TITLE, THEME_FIELD_TEXT, UI_ALIGN_RIGHT);
+                value_rect, value, value_font, THEME_FIELD_TEXT, UI_ALIGN_RIGHT);
     for (int i = 0; i < (int)(sizeof(labels) / sizeof(labels[0])); i++) {
         struct appui_rect r = button_rect(i);
         int variant = APPUI_BTN_DEFAULT;
@@ -251,6 +285,10 @@ static void render(void) {
                         appui_pointer_state(r, pointer_x, pointer_y,
                                             pointer_buttons));
     }
+    if (H >= SHORT_CANVAS_H)
+        appui_label(pixels, W, H, (struct appui_rect){pad, H - 22, W - pad * 2, 20},
+                "Enter to calculate  /  Backspace to undo", UI_FONT_CAPTION,
+                UI_TEXT_TERTIARY, UI_ALIGN_CENTER);
 }
 
 static void mouse(int x, int y, int buttons) {
@@ -308,6 +346,13 @@ int main(int argc, char **argv) {
     for (;;) {
         if (guiapp_read_event(&ctx, &ev) < 0 || ev.type == GUIAPP_EVT_CLOSE)
             break;
+        if (ev.type == GUIAPP_EVT_INIT || ev.type == GUIAPP_EVT_RESIZE) {
+            W = appui_max(1, appui_min(ev.width, GUIAPP_MAX_W));
+            H = appui_max(1, appui_min(ev.height, GUIAPP_MAX_H));
+        }
+        if (appui_pixels_ensure(&pixels, &pixel_capacity, W, H,
+                                GUIAPP_MAX_W, GUIAPP_MAX_H) < 0)
+            break;
         if (ev.type == GUIAPP_EVT_MOUSE)
             mouse(ev.x, ev.y, ev.buttons);
         else if (ev.type == GUIAPP_EVT_KEY && ev.buttons)
@@ -320,5 +365,6 @@ int main(int argc, char **argv) {
         if (guiapp_send_frame(&ctx, "Calculator", W, H, pixels) < 0)
             break;
     }
+    free(pixels);
     return 0;
 }

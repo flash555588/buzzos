@@ -11,9 +11,10 @@ C_TEMPLATE = Template(r'''#include "appui.h"
 #include "guiapp.h"
 #include "libc.h"
 
-enum { W = 420, H = 260 };
+static int W = 420, H = 260;
 
-static uint8_t pixels[W * H];
+static uint32_t *pixels;
+static size_t pixel_capacity;
 static int click_count;
 static int prev_buttons;
 
@@ -41,23 +42,20 @@ static void save_state(void) {
 }
 
 static struct appui_rect action_button(void) {
-    return (struct appui_rect){24, 126, 150, 38};
+    return (struct appui_rect){24, H / 2, appui_min(180, W - 48), 38};
 }
 
 static void render(void) {
     char count[48] = "Actions: ";
     appui_append_int(count, click_count, sizeof(count));
-    appui_fill(pixels, W, H, (struct appui_rect){0, 0, W, H}, appui_gray(3));
-    appui_fill(pixels, W, H, (struct appui_rect){16, 16, W - 32, H - 32}, appui_gray(5));
-    appui_border(pixels, W, H, (struct appui_rect){16, 16, W - 32, H - 32},
-                 appui_gray(9), appui_gray(1));
-    appui_text(pixels, W, H, 30, 36, "$upper", 15, -1,
-               (struct appui_rect){24, 24, W - 48, 28});
-    appui_text(pixels, W, H, 30, 78, "Generated BuzzOS desktop app", 15, -1,
-               (struct appui_rect){24, 66, W - 48, 32});
+    appui_fill(pixels, W, H, (struct appui_rect){0, 0, W, H}, UI_BG_SOLID);
+    appui_label(pixels, W, H, (struct appui_rect){24, 24, W - 48, 32},
+                "$upper", UI_FONT_SUBTITLE, UI_TEXT_PRIMARY, UI_ALIGN_LEFT);
+    appui_label(pixels, W, H, (struct appui_rect){24, 64, W - 48, 26},
+                "Your new BuzzOS application", UI_FONT_BODY,
+                UI_TEXT_SECONDARY, UI_ALIGN_LEFT);
     appui_button(pixels, W, H, action_button(), "Action", 1);
-    appui_text(pixels, W, H, 30, 190, count, 15, -1,
-               (struct appui_rect){24, 180, W - 48, 32});
+    appui_statusbar(pixels, W, H, (struct appui_rect){0, H - 30, W, 30}, count);
 }
 
 static void activate(void) {
@@ -86,14 +84,22 @@ int main(int argc, char **argv) {
     for (;;) {
         if (guiapp_read_event(&ctx, &ev) < 0 || ev.type == GUIAPP_EVT_CLOSE)
             break;
+        if (ev.type == GUIAPP_EVT_INIT || ev.type == GUIAPP_EVT_RESIZE) {
+            W = appui_max(1, appui_min(ev.width, GUIAPP_MAX_W));
+            H = appui_max(1, appui_min(ev.height, GUIAPP_MAX_H));
+        }
+        if (appui_pixels_ensure(&pixels, &pixel_capacity, W, H,
+                                GUIAPP_MAX_W, GUIAPP_MAX_H) < 0)
+            break;
         if (ev.type == GUIAPP_EVT_MOUSE)
             handle_mouse(ev.x, ev.y, ev.buttons);
-        else if (ev.type == GUIAPP_EVT_KEY)
+        else if (ev.type == GUIAPP_EVT_KEY && ev.buttons)
             handle_key(ev.key);
         render();
         if (guiapp_send_frame(&ctx, "$upper", W, H, pixels) < 0)
             break;
     }
+    free(pixels);
     return 0;
 }
 ''')

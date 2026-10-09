@@ -49,14 +49,14 @@ function Resolve-BuzzosQemu {
     $accel = "tcg,tb-size=512"
     # Prefer a conservative model: "-cpu max" under WHPX on recent Intel
     # (APX/MPX) often aborts with "Unexpected VP exit code 4".
-    $cpu = "qemu64"
+    $cpu = "qemu64,+rdrand"
     $name = [IO.Path]::GetFileNameWithoutExtension($path)
     if ($name -match "x86_64") {
         try {
             $help = & $path -accel help 2>&1 | Out-String
             if ($help -match "(?m)^whpx\s*$" -or $help -match "(?m)^whpx\b") {
                 $accel = "whpx"
-                $cpu = "qemu64"
+                $cpu = "qemu64,+rdrand"
             }
         } catch {
             # Keep TCG fallback.

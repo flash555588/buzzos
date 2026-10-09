@@ -1,0 +1,14 @@
+* text=auto eol=lf
+*.py text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.patch text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+Makefile text eol=lf
+*.png binary
+*.mp3 binary
+*.exe binary
+*.sys binary
+*.patch -whitespace
+src/user/third_party/** -whitespace

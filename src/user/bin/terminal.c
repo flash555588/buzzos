@@ -7,6 +7,7 @@ enum {
     TERM_LINE_BYTES = 512,
     TERM_MARGIN_X = 10,
     TERM_MARGIN_Y = 8,
+    TERM_HEADER_H = 32,
     TERM_LINE_HEIGHT = KFONT_HEIGHT,
     TERM_SCROLLBAR_SIZE = 14,
     TERM_AXIS_NONE = 0,
@@ -94,9 +95,9 @@ static void reset_terminal_locked(void) {
 
 static struct appui_rect viewport_locked(void) {
     return (struct appui_rect){
-        0, 0,
+        0, TERM_HEADER_H,
         view_width - TERM_SCROLLBAR_SIZE,
-        view_height - TERM_SCROLLBAR_SIZE
+        view_height - TERM_SCROLLBAR_SIZE - TERM_HEADER_H
     };
 }
 
@@ -192,11 +193,11 @@ static struct appui_rect scrollbar_track_locked(int axis) {
     struct appui_rect viewport = viewport_locked();
     if (axis == TERM_AXIS_V) {
         return (struct appui_rect){
-            viewport.w, 0, TERM_SCROLLBAR_SIZE, viewport.h
+            viewport.x + viewport.w, viewport.y, TERM_SCROLLBAR_SIZE, viewport.h
         };
     }
     return (struct appui_rect){
-        0, viewport.h, viewport.w, TERM_SCROLLBAR_SIZE
+        viewport.x, viewport.y + viewport.h, viewport.w, TERM_SCROLLBAR_SIZE
     };
 }
 
@@ -495,6 +496,12 @@ static void render_locked(void) {
     int selected_foreground = UI_TEXT_ON_ACCENT;
     int selection_background = UI_ACCENT_FILL;
     appui_fill(pixels, view_width, view_height, full, background);
+    appui_toolbar(pixels, view_width, view_height,
+                   (struct appui_rect){0, 0, view_width, TERM_HEADER_H});
+    appui_label(pixels, view_width, view_height,
+                (struct appui_rect){12, 0, view_width - 24, TERM_HEADER_H},
+                "Command session", UI_FONT_CAPTION, UI_TEXT_SECONDARY,
+                UI_ALIGN_LEFT);
 
     int first_visible = (scroll_y - TERM_MARGIN_Y) / TERM_LINE_HEIGHT;
     if (first_visible < 0)
@@ -506,14 +513,14 @@ static void render_locked(void) {
         last_visible = line_count - 1;
     int text_x = TERM_MARGIN_X - scroll_x;
     for (int row = first_visible; row <= last_visible; row++) {
-        int y = TERM_MARGIN_Y + row * TERM_LINE_HEIGHT - scroll_y;
+        int y = clip.y + TERM_MARGIN_Y + row * TERM_LINE_HEIGHT - scroll_y;
         draw_line_locked(row, text_x, y, clip, foreground,
                          selected_foreground, selection_background);
     }
 
     int cursor_x = TERM_MARGIN_X - scroll_x +
         line_width_to_pos_locked(cursor_line, cursor_col);
-    int cursor_y = TERM_MARGIN_Y + cursor_line * TERM_LINE_HEIGHT -
+    int cursor_y = clip.y + TERM_MARGIN_Y + cursor_line * TERM_LINE_HEIGHT -
         scroll_y + 3;
     if (cursor_x < clip.x + clip.w && cursor_x + 8 > clip.x &&
         cursor_y < clip.y + clip.h && cursor_y + 16 > clip.y) {
@@ -527,7 +534,7 @@ static void render_locked(void) {
 
 static struct term_position position_from_mouse_locked(int x, int y) {
     struct term_position result = {0, 0};
-    int content_y = y + scroll_y - TERM_MARGIN_Y;
+    int content_y = y - viewport_locked().y + scroll_y - TERM_MARGIN_Y;
     if (content_y > 0)
         result.line = content_y / TERM_LINE_HEIGHT;
     result.line = clamp_int(result.line, 0, line_count - 1);

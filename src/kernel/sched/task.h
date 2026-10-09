@@ -29,6 +29,7 @@ struct task {
 #define TASK_DEAD    2
 #define TASK_SLEEPING 3
 #define TASK_BLOCKED 4
+#define TASK_CREATING 5
 #define MAX_TASKS    32
 
 /* Initialise the scheduler. Creates an idle task from the current
@@ -36,7 +37,7 @@ struct task {
 void sched_init(void);
 
 /* Create a new kernel thread starting at `entry`. Returns task id.
- * The task is created BLOCKED; callers must task_make_ready(id) after any
+ * The task is created CREATING; callers must task_make_ready(id) after any
  * per-task setup so the trampoline never races with metadata init. */
 int task_create(void (*entry)(void), const char *name);
 int task_create_ex(void (*entry)(void), const char *name, int console_silent);
