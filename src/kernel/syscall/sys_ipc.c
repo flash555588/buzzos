@@ -13,7 +13,7 @@ enum {
 struct futex_waiter {
     int used;
     int task_id;
-    uint32_t addr;
+    uintptr_t addr;
     int woken;
 };
 
@@ -48,10 +48,10 @@ static void append_u32_dec(char *buf, int *pos, int cap, uint32_t value) {
         append_char(buf, pos, cap, tmp[--n]);
 }
 
-static void append_u32_hex(char *buf, int *pos, int cap, uint32_t value) {
+static void append_addr_hex(char *buf, int *pos, int cap, uintptr_t value) {
     static const char digits[] = "0123456789ABCDEF";
     append_text(buf, pos, cap, "0x");
-    for (int shift = 28; shift >= 0; shift -= 4)
+    for (int shift = (int)(sizeof(value) * 8) - 4; shift >= 0; shift -= 4)
         append_char(buf, pos, cap, digits[(value >> shift) & 0xFu]);
 }
 
@@ -80,7 +80,7 @@ int futex_status_text(char *buf, int cap) {
     append_char(buf, &pos, cap, '/');
     append_u32_dec(buf, &pos, cap, (uint32_t)MAX_FUTEX_WAITERS);
     append_char(buf, &pos, cap, '\n');
-    append_text(buf, &pos, cap, "SLOT TID ADDR       WOKEN\n");
+    append_text(buf, &pos, cap, "SLOT TID ADDR               WOKEN\n");
     for (int i = 0; i < MAX_FUTEX_WAITERS; i++) {
         if (!futex_waiters[i].used)
             continue;
@@ -88,7 +88,7 @@ int futex_status_text(char *buf, int cap) {
         append_char(buf, &pos, cap, ' ');
         append_u32_dec(buf, &pos, cap, (uint32_t)futex_waiters[i].task_id);
         append_char(buf, &pos, cap, ' ');
-        append_u32_hex(buf, &pos, cap, futex_waiters[i].addr);
+        append_addr_hex(buf, &pos, cap, futex_waiters[i].addr);
         append_char(buf, &pos, cap, ' ');
         append_u32_dec(buf, &pos, cap, (uint32_t)futex_waiters[i].woken);
         append_char(buf, &pos, cap, '\n');
@@ -103,7 +103,7 @@ int futex_status_text(char *buf, int cap) {
 
 /* BuzzOS is single-core today; disabling IRQs makes waiter table updates
  * atomic against scheduler preemption without spinning in the wait path. */
-static uint32_t futex_irq_flags;
+static uint64_t futex_irq_flags;
 
 static void futex_enter(void) {
     futex_irq_flags = irq_save();

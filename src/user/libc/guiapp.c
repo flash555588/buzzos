@@ -67,6 +67,8 @@ int guiapp_read_event(struct guiapp_ctx *ctx, struct guiapp_event *ev) {
         return -1;
     if (ev->magic != GUIAPP_MAGIC)
         return -1;
+    if (ctx->shared)
+        __atomic_add_fetch(&ctx->shared->events_consumed, 1, __ATOMIC_RELEASE);
     /* Live-resize coalesce: always layout to the desktop's latest content
      * size, not a stale intermediate RESIZE still sitting in the pipe. */
     if (ctx->shared &&

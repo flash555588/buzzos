@@ -165,21 +165,11 @@ static int missing_wad_loop(void) {
          * user what to do about it. */
         appui_fill(pixels, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
         {
-            int cx = w / 2;
-            int top = h / 2 - 96;
-            appui_icon(pixels, w, h, UI_ICON_GAMEPAD,
-                       (struct appui_rect){cx - 24, top, 48, 48}, 48,
-                       UI_TEXT_TERTIARY);
+            appui_empty_state(pixels, w, h,
+                               (struct appui_rect){0, 0, w, h - 48},
+                               "doom", "Game data required", DEFAULT_WAD);
             appui_label(pixels, w, h,
-                        (struct appui_rect){20, top + 64, w - 40, 30},
-                        "Game data required", UI_FONT_TITLE,
-                        UI_TEXT_PRIMARY, UI_ALIGN_CENTER);
-            appui_label(pixels, w, h,
-                        (struct appui_rect){20, top + 100, w - 40, 24},
-                        DEFAULT_WAD, UI_FONT_BODY, UI_SYS_CAUTION,
-                        UI_ALIGN_CENTER);
-            appui_label(pixels, w, h,
-                        (struct appui_rect){20, top + 128, w - 40, 24},
+                        (struct appui_rect){20, h - 44, w - 40, 30},
                         "Install the shareware doom1.wad, then reopen DOOM.",
                         UI_FONT_BODY, UI_TEXT_SECONDARY, UI_ALIGN_CENTER);
         }

@@ -12,7 +12,7 @@ enum {
     SOCK_RAW_K     = 3,
     IPPROTO_ICMP_K = 1,
     IPPROTO_UDP_K  = 17,
-    MAX_SOCKETS    = 8,
+    MAX_SOCKETS    = 32,
 };
 
 struct k_sockaddr_in {
@@ -137,7 +137,8 @@ intptr_t sys_connect(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen,
         socket_unlock();
         return 0;
     }
-    if (s->type != SOCK_STREAM_K || s->connected) {
+    if (s->type != SOCK_STREAM_K || s->connected ||
+        __atomic_load_n(&s->tcp.cancelled, __ATOMIC_ACQUIRE)) {
         serial_puts("[net] connect: invalid state\n");
         socket_unlock();
         return -1;
@@ -149,10 +150,11 @@ intptr_t sys_connect(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen,
     int ret = net_tcp_connect_pcb(tcp, peer_ip, peer_port);
     socket_lock();
     s = socket_get((int)sd_arg);
-    if (ret < 0) {
+    if (ret < 0 || __atomic_load_n(&tcp->cancelled, __ATOMIC_ACQUIRE)) {
         if (s && s->type == SOCK_STREAM_K) {
             s->connected = 0;
-            net_tcp_pcb_init(&s->tcp);
+            if (!__atomic_load_n(&tcp->cancelled, __ATOMIC_ACQUIRE))
+                net_tcp_pcb_init(&s->tcp);
         }
         socket_unlock();
         return -1;
@@ -303,6 +305,20 @@ intptr_t sys_recvfrom(uintptr_t sd_arg, uintptr_t buf, uintptr_t len,
         addr->sin_addr = src_ip;
     }
     return ret;
+}
+
+intptr_t sys_shutdown(uintptr_t sd_arg, uintptr_t how, uintptr_t c, uintptr_t d, uintptr_t e) {
+    (void)c; (void)d; (void)e;
+    if (how != 2) return -1; /* SHUT_RDWR only; half-close is not implemented. */
+    socket_lock();
+    struct socket_entry *s = socket_get((int)sd_arg);
+    if (!s || s->type != SOCK_STREAM_K) {
+        socket_unlock();
+        return -1;
+    }
+    __atomic_store_n(&s->tcp.cancelled, 1, __ATOMIC_RELEASE);
+    socket_unlock();
+    return 0;
 }
 
 intptr_t sys_closesocket(uintptr_t sd_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e) {

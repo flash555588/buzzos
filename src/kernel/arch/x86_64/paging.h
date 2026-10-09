@@ -6,6 +6,7 @@
 
 void paging_init(void);
 void paging_set_framebuffer(uintptr_t phys_addr, size_t size);
+int paging_ensure_framebuffer_size(size_t size);
 void *paging_map_mmio(uintptr_t phys_addr, size_t size);
 uintptr_t paging_current_cr3(void);
 uintptr_t paging_kernel_cr3(void);

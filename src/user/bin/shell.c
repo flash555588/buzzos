@@ -1345,8 +1345,19 @@ static void put32le(uint8_t *buf, int off, uint32_t value) {
     buf[off + 3] = (uint8_t)((value >> 24) & 0xFFu);
 }
 
+static void put64le(uint8_t *buf, int off, uint64_t value) {
+    put32le(buf, off, (uint32_t)value);
+    put32le(buf, off + 4, (uint32_t)(value >> 32));
+}
+
 static int make_bad_elf(uint8_t *buf, int cap, int kind) {
-    if (!buf || cap < 85)
+    /* A valid native exit(0) program is the baseline for every mutation. */
+    static const uint8_t code[] = {
+        0xB8, 1, 0, 0, 0, 0x31, 0xFF, 0xCD, 0x80, 0x0F, 0x0B
+    };
+    const uint64_t entry = UINT64_C(0x0000000100000000);
+    const int size = 120 + (int)sizeof(code);
+    if (!buf || cap < size)
         return -1;
     for (int i = 0; i < cap; i++)
         buf[i] = 0;
@@ -1355,45 +1366,45 @@ static int make_bad_elf(uint8_t *buf, int cap, int kind) {
     buf[1] = 'E';
     buf[2] = 'L';
     buf[3] = 'F';
-    buf[4] = 1;  /* ELFCLASS32 */
+    buf[4] = 2;  /* ELFCLASS64 */
     buf[5] = 1;  /* little-endian */
     buf[6] = 1;  /* EV_CURRENT */
     put16le(buf, 16, 2);              /* ET_EXEC */
-    put16le(buf, 18, 3);              /* EM_386 */
+    put16le(buf, 18, 62);             /* EM_X86_64 */
     put32le(buf, 20, 1);              /* e_version */
-    put32le(buf, 24, 0x001C0000u);    /* e_entry */
-    put32le(buf, 28, 52);             /* e_phoff */
-    put16le(buf, 40, 52);             /* e_ehsize */
-    put16le(buf, 42, 32);             /* e_phentsize */
-    put16le(buf, 44, 1);              /* e_phnum */
+    put64le(buf, 24, entry);          /* e_entry */
+    put64le(buf, 32, 64);             /* e_phoff */
+    put16le(buf, 52, 64);             /* e_ehsize */
+    put16le(buf, 54, 56);             /* e_phentsize */
+    put16le(buf, 56, 1);              /* e_phnum */
 
-    put32le(buf, 52, 1);              /* PT_LOAD */
-    put32le(buf, 56, 84);             /* p_offset */
-    put32le(buf, 60, 0x001C0000u);    /* p_vaddr */
-    put32le(buf, 68, 1);              /* p_filesz */
-    put32le(buf, 72, 1);              /* p_memsz */
-    put32le(buf, 76, 5);              /* PF_R | PF_X */
-    put32le(buf, 80, 1);              /* p_align */
-    buf[84] = 0xC3;                   /* ret, never reached by these tests */
+    put32le(buf, 64, 1);              /* PT_LOAD */
+    put32le(buf, 68, 5);              /* PF_R | PF_X */
+    put64le(buf, 72, 120);            /* p_offset */
+    put64le(buf, 80, entry);          /* p_vaddr */
+    put64le(buf, 96, sizeof(code));   /* p_filesz */
+    put64le(buf, 104, sizeof(code));  /* p_memsz */
+    put64le(buf, 112, 1);             /* p_align */
+    for (size_t i = 0; i < sizeof(code); i++)
+        buf[120 + i] = code[i];
 
     if (kind == 0) {
-        put32le(buf, 24, 0x00001000u);
-        put32le(buf, 60, 0x00001000u);
+        put64le(buf, 24, 0x1000u);
+        put64le(buf, 80, 0x1000u);
     } else if (kind == 1) {
-        put32le(buf, 68, 64);
-        return 85;
+        put64le(buf, 96, 64);
+        put64le(buf, 104, 64);
     } else if (kind == 2) {
-        put32le(buf, 68, 2);
-        put32le(buf, 72, 1);
+        put64le(buf, 96, sizeof(code) + 1);
     } else if (kind == 3) {
-        put32le(buf, 24, 0x001D0000u);
+        put64le(buf, 24, entry + 0x10000u);
     }
-    return 85;
+    return size;
 }
 
 static int run_bad_elf_case(const char *label, int kind) {
     const char *path = "/fs/badelf.bin";
-    uint8_t image[128];
+    uint8_t image[160];
     int size = make_bad_elf(image, sizeof(image), kind);
     if (size < 0) {
         printf("elfbad: %s build failed\n", label);
@@ -1417,12 +1428,28 @@ static int run_bad_elf_case(const char *label, int kind) {
     argv[0] = (char *)path;
     int pid = spawn_process_args(path, argv, 1, SPAWN_FLAG_SILENT);
     unlink(path);
+    if (kind < 0) {
+        int status = -1;
+        int waited = pid < 0 ? -1 : waitpid(pid, &status, 0);
+        int result = waited == pid && pid >= 0 ? status : -1;
+        printf("elfbad: valid %d\n", result);
+        return result == 0 ? 0 : -1;
+    }
+    if (pid >= 0) {
+        kill(pid);
+        waitpid(pid, 0, 0);
+    }
     printf("elfbad: %s %d\n", label, pid);
     return pid < 0 ? 0 : -1;
 }
 
+static int run_valid_elf_case(void) {
+    return run_bad_elf_case("valid", -1);
+}
+
 static void cmd_elfbadtest(void) {
     int ok = 1;
+    if (run_valid_elf_case() < 0) ok = 0;
     if (run_bad_elf_case("vaddr", 0) < 0) ok = 0;
     if (run_bad_elf_case("filesz", 1) < 0) ok = 0;
     if (run_bad_elf_case("memsz", 2) < 0) ok = 0;
@@ -1431,7 +1458,7 @@ static void cmd_elfbadtest(void) {
 }
 
 static void cmd_badptrtest(void) {
-    const char *unmapped = (const char *)0x02700000u;
+    const char *unmapped = (const char *)(uintptr_t)UINT64_C(0x0000000180000000);
     int rc = write(1, unmapped, 16);
     printf("badptr: rejected %d\n", rc);
 }

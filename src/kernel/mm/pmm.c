@@ -1,4 +1,5 @@
 #include "pmm.h"
+#include "paging.h"
 #include "serial.h"
 #include "task.h"
 
@@ -138,6 +139,9 @@ void pmm_init(void) {
     uintptr_t kernel_end   = (uintptr_t)&__kernel_end;
     mark_range(kernel_start, kernel_end - kernel_start, 1);
 
+    mark_range(KERNEL_FB_VIRT, KERNEL_FB_SIZE, 1);
+    mark_range(KERNEL_MMIO_VIRT, KERNEL_MMIO_SIZE, 1);
+
     /* Reserve first 4 KiB (IVT / BDA) */
     mark_range(0, 0x1000, 1);
 
@@ -158,11 +162,11 @@ void pmm_init(void) {
 /*  Allocate `n` contiguous pages                                      */
 /* ------------------------------------------------------------------ */
 
-uintptr_t pmm_alloc_pages(size_t n) {
+static uintptr_t pmm_allocate(size_t n, size_t reserve) {
     if (n == 0 || n > PMM_MANAGED_PAGES)
         return 0;
     pmm_lock();
-    if (n > free_pages) {
+    if (n > free_pages || reserve > free_pages - n) {
         pmm_unlock();
         return 0;
     }
@@ -200,6 +204,14 @@ uintptr_t pmm_alloc_pages(size_t n) {
     return 0;  /* no contiguous block found */
 }
 
+uintptr_t pmm_alloc_pages(size_t n) {
+    return pmm_allocate(n, 0);
+}
+
+uintptr_t pmm_alloc_user_pages(size_t n) {
+    return pmm_allocate(n, PMM_KERNEL_RESERVE_PAGES);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Free                                                               */
 /* ------------------------------------------------------------------ */
@@ -215,8 +227,11 @@ void pmm_free_pages(uintptr_t addr, size_t n) {
     pmm_unlock();
 }
 
-void pmm_info(struct pmm_info *out) {
-    if (!out)
+size_t pmm_free_pages_snapshot(void) {
+    return __atomic_load_n(&free_pages, __ATOMIC_RELAXED);
+}
+
+void pmm_info(struct pmm_info *out) {    if (!out)
         return;
     pmm_lock();
     out->page_size = PAGE_SIZE;

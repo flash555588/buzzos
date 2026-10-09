@@ -253,14 +253,10 @@ void mouse_handler(uint8_t byte) {
     packet_index = 0;
 
     int buttons = packet[0] & 0x07;
-    int dx = (int)(int8_t)packet[1];
-    int dy = (int)(int8_t)packet[2];
+    int dx = mouse_ps2_axis(packet[1], packet[0], 0x10, 0x40);
+    int dy = mouse_ps2_axis(packet[2], packet[0], 0x20, 0x80);
     int wheel = 0;
 
-    if (packet[0] & 0xC0) {
-        dx = 0;
-        dy = 0;
-    }
     if (packet_size == 4) {
         wheel = packet[3] & 0x0F;
         if (wheel & 0x08)
@@ -326,6 +322,9 @@ void mouse_absolute_event(int x, int y, int buttons, int wheel) {
 void mouse_get_state(struct mouse_state *out) {
     if (!out)
         return;
+    /* Publish one report: an IRQ between wheel and wheel_seq would otherwise
+     * let the GUI consume a new sequence with the previous wheel total. */
+    uint64_t flags = irq_save();
     out->x = mouse_x;
     out->y = mouse_y;
     out->buttons = mouse_buttons;
@@ -334,6 +333,7 @@ void mouse_get_state(struct mouse_state *out) {
     out->seq = mouse_seq;
     out->wheel = mouse_wheel_total;
     out->wheel_seq = mouse_wheel_seq;
+    irq_restore(flags);
 }
 
 void mouse_clamp_to_screen(void) {

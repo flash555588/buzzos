@@ -595,7 +595,7 @@ static void draw_sidebar(struct appui_rect content) {
                UI_BG_LAYER);
     appui_separator(pixels, w, h, side - 1, content.y, content.h, 1);
     appui_label(pixels, w, h,
-                (struct appui_rect){12, content.y + 6, side - 20, 26}, "Places",
+                (struct appui_rect){12, content.y + 6, side - 20, 26}, "Quick access",
                 UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
     for (int i = 0; i < SIDEBAR_COUNT; i++) {
         struct appui_rect r = sidebar_row_rect(content, i);

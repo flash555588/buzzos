@@ -130,15 +130,14 @@ static int launch_prepared_space(uintptr_t proc_cr3, uintptr_t entry,
     }
     if (serial_stdio && vfs_setup_serial_stdio(id) < 0)
         serial_puts("[exec] serial stdio setup failed\n");
-    /* Arm only after entry/stack/CR3/fds are fully installed. */
-    task_make_ready(id);
-    irq_restore(irq_flags);
-
     serial_puts("[exec] entry=");
     serial_puthex64(entry);
     serial_puts(" task=");
     serial_puthex((uint32_t)id);
     serial_puts("\n");
+    /* Arm only after entry/stack/CR3/fds are fully installed. */
+    task_make_ready(id);
+    irq_restore(irq_flags);
     return id;
 }
 
@@ -149,6 +148,9 @@ int exec_start_args_with_fds(const uint8_t *elf_data, size_t elf_size, const cha
     uintptr_t proc_cr3 = create_user_address_space();
     if (!proc_cr3) {
         serial_puts("[exec] out of user bootstrap pages\n");
+        serial_puts("[mem] exec-fail free=");
+        serial_puthex((uint32_t)pmm_free_pages_snapshot());
+        serial_puts("\n");
         return -1;
     }
     uintptr_t image_end = 0;
@@ -175,6 +177,9 @@ int exec_start_file_args_with_fds(int fd, size_t elf_size, const char *name,
     if (!proc_cr3) {
         vfs_close(fd);
         serial_puts("[exec] out of user bootstrap pages\n");
+        serial_puts("[mem] exec-fail free=");
+        serial_puthex((uint32_t)pmm_free_pages_snapshot());
+        serial_puts("\n");
         return -1;
     }
     uintptr_t image_end = 0;

@@ -11,6 +11,27 @@
 #include <string.h>
 #include "uikit.h"
 #include "appui.h"
+#include "gpucomp.h"
+
+/* Emulate atlas storage; metrics must agree even without a host GL context. */
+int gpu3d_resource_create(uint32_t target, uint32_t format, uint32_t bind,
+                          uint32_t width, uint32_t height,
+                          struct gpu3d_resource *out) {
+    (void)target; (void)format; (void)bind;
+    out->bytes = (size_t)width * height * sizeof(uint32_t);
+    out->pixels = calloc(1, out->bytes);
+    out->id = 1;
+    out->width = width;
+    out->height = height;
+    return out->pixels ? 0 : -1;
+}
+int gpu3d_upload(uint32_t id, int x, int y, int w, int h) {
+    (void)id; (void)x; (void)y; (void)w; (void)h; return 0;
+}
+int gpu3d_resource_destroy(uint32_t id) { (void)id; return 0; }
+int gpu3d_submit(const uint32_t *words, uint32_t count) {
+    (void)words; (void)count; return 0;
+}
 
 static int failures;
 static void ck(int cond, const char *what) {
@@ -52,6 +73,39 @@ static uint32_t at(int x, int y) { return buf[y * W + x] & 0x00FFFFFFu; }
 
 int main(void) {
     struct ui_surface s = ui_surface_make(buf, W, H);
+    /* Enlarged tile icons must have continuous strokes, in both directions. */
+    for (int reverse = 0; reverse < 2; reverse++) {
+        memset(buf, 0, sizeof(buf));
+        ui_line(&s, reverse ? 110 : 10, 30, reverse ? 10 : 110, 30,
+                3, 0xFFFFFFu, 255);
+        for (int x = 12; x < 108; x++)
+            ck(at(x, 30) == 0xFFFFFFu, "long horizontal line stays continuous");
+        memset(buf, 0, sizeof(buf));
+        ui_line(&s, reverse ? 110 : 10, reverse ? 110 : 10,
+                reverse ? 10 : 110, reverse ? 10 : 110, 3, 0xFFFFFFu, 255);
+        for (int n = 12; n < 108; n++)
+            ck(at(n, n) == 0xFFFFFFu, "long diagonal line stays continuous");
+    }
+    memset(buf, 0, sizeof(buf));
+    ck(ui_text_contains_ascii_ci("Text Editor", "EDITOR"), "search ignores case");
+    ck(ui_text_contains_ascii_ci("Commands and system tools", "system"), "search matches descriptions");
+    ck(ui_text_contains_ascii_ci("Terminal", ""), "empty search matches all");
+    ck(!ui_text_contains_ascii_ci("Terminal", "terminalX"), "search rejects long mismatch");
+
+    gpucomp_state.ready = 1;
+    ck_eq(gpucomp_font_ensure(), 0, "GPU atlas builds with UI face");
+    if (gpucomp_state.font_texture) {
+        const char *samples[] = {"iii WWW 0123456789", "Settings / Display",
+                                 "\xE4\xB8\x80 Mixed text"};
+        for (int size = 0; size < UI_FONT_COUNT; size++) {
+            for (int i = 0; i < 3; i++)
+                ck_eq(gpucomp_canvas_text_width(samples[i], (int)strlen(samples[i]),
+                                                ui_font_height(size)),
+                      ui_text_width(samples[i], size), "CPU/GPU text metrics agree");
+        }
+        free(gpucomp_state.font_pixels);
+        gpucomp_state.font_pixels = NULL;
+    }
 
     /* --- blend --- */
     ck_eq((int)ui_blend(0xAABBCC, 0x112233, 255), 0xAABBCC, "blend full");
@@ -128,6 +182,10 @@ int main(void) {
     ck(at(60, 60) == 0xFFFFFF, "shadow skips interior");
     ck(at(60, 84) < 0xFFFFFF, "shadow darkens below");
     ck(at(60, 20) == 0xFFFFFF, "shadow does not reach far above");
+    for (int i = 0; i < W * H; i++) buf[i] = 0xFFFFFF;
+    ui_shadow(&s, ui_rect_make(40, 40, 40, 40), 20, 6, 200, 0);
+    ck(at(40, 40) == 0xFFFFFF, "rounded shadow leaves remote corner clear");
+    ck(at(60, 82) < 0xFFFFFF, "rounded shadow retains edge falloff");
 
     /* --- acrylic blurs toward the mean and honours the tint --- */
     for (int y = 0; y < H; y++)
@@ -148,8 +206,12 @@ int main(void) {
     ck(ui_font_height(UI_FONT_BODY) > 0, "body font has height");
     ck(ui_font_height(UI_FONT_CAPTION) < ui_font_height(UI_FONT_TITLE),
        "caption smaller than title");
-    ck(ui_text_width("iii", UI_FONT_BODY) ==
-       3 * ui_font_advance(UI_FONT_BODY), "monospace advance");
+    ck(ui_text_width("iii", UI_FONT_BODY) <
+       ui_text_width("WWW", UI_FONT_BODY), "proportional UI advance");
+    ck(ui_text_width("000", UI_FONT_BODY) ==
+       3 * ui_font_advance(UI_FONT_BODY), "tabular number advance");
+    ck(ui_text_width("Test", -1) == ui_text_width("Test", UI_FONT_BODY),
+       "invalid UI size uses body metrics");
     ck(ui_text_width("", UI_FONT_BODY) == 0, "empty width");
 
     memset(buf, 0, sizeof(buf));
@@ -286,13 +348,36 @@ int main(void) {
             memset(buf, 0, sizeof(buf));
             appui_progress(buf, W, H, r, 1, 10);
             for (int x = r.x; x < r.x + r.w; x++)
-                if ((at(x, r.y + r.h / 2) & 0xFF) > 0x80) lit_lo++;
+                if (at(x, r.y + r.h / 2) == UI_ACCENT_FILL) lit_lo++;
             memset(buf, 0, sizeof(buf));
             appui_progress(buf, W, H, r, 9, 10);
             for (int x = r.x; x < r.x + r.w; x++)
-                if ((at(x, r.y + r.h / 2) & 0xFF) > 0x80) lit_hi++;
+                if (at(x, r.y + r.h / 2) == UI_ACCENT_FILL) lit_hi++;
             ck(lit_hi > lit_lo * 3, "progress: fill tracks value");
         }
+    }
+
+    /* Compact controls must retain the complete glyph, including top and
+     * bottom strokes. Compare their ink with an unrestricted centered label. */
+    {
+        uint32_t button[W * H];
+        struct appui_rect r = appui_rect_make(20, 20, 60, 21);
+        memset(buf, 0, sizeof(buf));
+        appui_button_ex(buf, W, H, r, "8", APPUI_BTN_DEFAULT, 0);
+        memcpy(button, buf, sizeof(buf));
+        for (int i = 0; i < W * H; i++) buf[i] = UI_CTRL_REST;
+        appui_label(buf, W, H, r, "8", UI_FONT_BODY,
+                    UI_TEXT_PRIMARY, UI_ALIGN_CENTER);
+        int ink = 0, missing = 0;
+        for (int y = r.y; y < r.y + r.h; y++) {
+            for (int x = r.x + 20; x < r.x + 40; x++) {
+                if (at(x, y) != UI_CTRL_REST) {
+                    ink++;
+                    if (button[y * W + x] != at(x, y)) missing++;
+                }
+            }
+        }
+        ck(ink > 20 && missing == 0, "compact button preserves all label strokes");
     }
 
     printf(failures ? "\n%d FAILURES\n" : "\nall uikit checks passed\n", failures);

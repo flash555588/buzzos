@@ -1094,11 +1094,9 @@ static void render_frame(int *out_w, int *out_h) {
  * the GPU atlas scales the whole cell to the requested size.  A CPU font token
  * therefore maps to 28 * pct / 100 pixels, which is what keeps GPU text the
  * same size as the CPU surface it can be swapped for at any frame. */
-enum {
-    GPU_FONT_CAPTION = 16,  /* UI_FONT_CAPTION,  58% */
-    GPU_FONT_BODY = 19,     /* UI_FONT_BODY,     68% */
-    GPU_FONT_BODY_LG = 22,  /* UI_FONT_BODY_LG,  79% */
-};
+#define GPU_FONT_CAPTION ui_font_height(UI_FONT_CAPTION)
+#define GPU_FONT_BODY ui_font_height(UI_FONT_BODY)
+#define GPU_FONT_BODY_LG ui_font_height(UI_FONT_BODY_LG)
 
 static void canvas_box(struct guiapp_canvas *canvas, struct appui_rect r,
                        int radius, uint32_t color) {

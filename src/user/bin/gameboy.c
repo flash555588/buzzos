@@ -107,19 +107,11 @@ static int message(const char *title, const char *a, const char *b) {
          * secondary text. */
         appui_fill(p, w, h, (struct appui_rect){0, 0, w, h}, THEME_APP_BG);
         {
-            int cx = w / 2;
-            int top = h / 2 - 110;
-            appui_icon(p, w, h, UI_ICON_GAMEPAD,
-                       (struct appui_rect){cx - 24, top, 48, 48}, 48,
-                       UI_TEXT_TERTIARY);
-            appui_label(p, w, h, (struct appui_rect){20, top + 64, w - 40, 32},
-                        title, UI_FONT_TITLE, UI_TEXT_PRIMARY,
-                        UI_ALIGN_CENTER);
-            appui_label(p, w, h, (struct appui_rect){20, top + 102, w - 40, 24},
-                        a, UI_FONT_BODY, UI_SYS_CAUTION, UI_ALIGN_CENTER);
-            appui_label(p, w, h, (struct appui_rect){20, top + 130, w - 40, 24},
+            appui_empty_state(p, w, h, (struct appui_rect){0, 0, w, h - 90},
+                               "gameboy", title, a);
+            appui_label(p, w, h, (struct appui_rect){20, h - 78, w - 40, 32},
                         b, UI_FONT_BODY, UI_TEXT_SECONDARY, UI_ALIGN_CENTER);
-            appui_label(p, w, h, (struct appui_rect){20, top + 170, w - 40, 24},
+            appui_label(p, w, h, (struct appui_rect){20, h - 40, w - 40, 24},
                         "Controls: arrows, Z=B, X=A, Enter=Start, "
                         "Backspace=Select",
                         UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_CENTER);

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import ast
 import re
 import struct
 import sys
 from pathlib import Path
+import elf64
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,10 +45,7 @@ def parse_make_words(text, name):
 
 
 def parse_define_number(text, name):
-    m = re.search(rf"^\s*#define\s+{re.escape(name)}\s+(0x[0-9A-Fa-f]+|\d+)u?\b", text, re.M)
-    if not m:
-        fail(f"missing #define {name}")
-    return int(m.group(1), 0)
+    return parse_c_constant(text, name)
 
 
 def parse_c_int(text, name):
@@ -57,10 +56,38 @@ def parse_c_int(text, name):
 
 
 def parse_hex_constant(text, name):
-    m = re.search(rf"\b{re.escape(name)}\s*=\s*(0x[0-9A-Fa-f]+)", text)
+    return parse_c_constant(text, name)
+
+
+def parse_c_constant(text, name, seen=()):
+    if name in seen:
+        fail(f"cyclic constant definition: {name}")
+    m = re.search(rf"^\s*#define\s+{re.escape(name)}\s+([^\n]+)", text, re.M)
     if not m:
-        fail(f"missing {name}")
-    return int(m.group(1), 16)
+        fail(f"missing #define {name}")
+    expression = re.sub(r"/\*.*?\*/|//.*", "", m.group(1)).strip()
+    expression = re.sub(r"UINT(?:32|64)_C\(([^()]+)\)", r"\1", expression)
+    expression = re.sub(r"\b(0x[0-9A-Fa-f]+|[0-9]+)[uUlL]+\b", r"\1", expression)
+
+    def number(node):
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            return node.value
+        if isinstance(node, ast.Name):
+            return parse_c_constant(text, node.id, (*seen, name))
+        if isinstance(node, ast.BinOp):
+            left, right = number(node.left), number(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+        fail(f"unsupported constant expression for {name}: {expression}")
+
+    try:
+        return number(ast.parse(expression, mode="eval").body)
+    except SyntaxError:
+        fail(f"invalid constant expression for {name}: {expression}")
 
 
 def parse_boot_stack_top(text):
@@ -71,35 +98,10 @@ def parse_boot_stack_top(text):
 
 
 def elf_section_range(path, wanted):
-    data = path.read_bytes()
-    if len(data) < 52 or data[:4] != b"\x7fELF" or data[4] != 1 or data[5] != 1:
-        fail(f"{path.name}: unsupported ELF32 file")
-    (_ident, _etype, _emachine, _version, _entry, _phoff, shoff, _flags,
-     _ehsize, _phentsize, _phnum, shentsize, shnum, shstrndx) = struct.unpack_from(
-        "<16sHHIIIIIHHHHHH", data, 0
-    )
-    if shentsize != 40 or shoff + shnum * shentsize > len(data) or shstrndx >= shnum:
-        fail(f"{path.name}: invalid section headers")
-    shstr_off = shoff + shstrndx * shentsize
-    _name, _type, _flags, _addr, shstrtab_off, shstrtab_size, *_rest = struct.unpack_from("<IIIIIIIIII", data, shstr_off)
-    if shstrtab_off + shstrtab_size > len(data):
-        fail(f"{path.name}: invalid section-name table")
-    names = data[shstrtab_off:shstrtab_off + shstrtab_size]
-
-    def section_name(offset):
-        if offset >= len(names):
-            return ""
-        end = names.find(b"\x00", offset)
-        if end < 0:
-            end = len(names)
-        return names[offset:end].decode("ascii", errors="ignore")
-
-    for i in range(shnum):
-        off = shoff + i * shentsize
-        name_off, _type, _flags, addr, _offset, size, *_rest = struct.unpack_from("<IIIIIIIIII", data, off)
-        if section_name(name_off) == wanted:
-            return addr, addr + size
-    fail(f"{path.name}: missing section {wanted}")
+    try:
+        return elf64.section_range(path.read_bytes(), wanted)
+    except ValueError as exc:
+        fail(f"{path.name}: {exc}")
 
 
 def check_image_layout():
@@ -139,7 +141,7 @@ def check_image_layout():
 
 
 def check_kernel_memory_layout():
-    boot = read_text("src/kernel/arch/i386/mb2_entry.asm")
+    boot = read_text("src/kernel/arch/x86_64/mb2_entry.asm")
     pmm_c = read_text("src/kernel/mm/pmm.c")
     kernel_elf = ROOT / "build/obj/kernel/kernel.elf"
     if not kernel_elf.exists():
@@ -147,6 +149,7 @@ def check_kernel_memory_layout():
     text_start, _text_end = elf_section_range(kernel_elf, ".text")
     _bss_start, bss_end = elf_section_range(kernel_elf, ".bss")
     stack_start, stack_top = elf_section_range(kernel_elf, ".boot_stack")
+    tables_start, tables_end = elf_section_range(kernel_elf, ".boot_paging")
     managed_limit = parse_define_number(pmm_c, "PMM_MANAGED_LIMIT")
     stack_reserve = 0x10000
     vga_hole_start = 0xA0000
@@ -159,6 +162,13 @@ def check_kernel_memory_layout():
         fail(f"boot stack is only {stack_top - stack_start} bytes")
     if bss_end > stack_start:
         fail(f"kernel .bss ends at 0x{bss_end:X}, overlapping boot stack at 0x{stack_start:X}")
+    if (tables_start < stack_top or tables_start % 4096 or
+            tables_end - tables_start < 6 * 4096 or tables_end > managed_limit):
+        fail("bootstrap paging tables overlap the stack, are misaligned, or exceed reserved memory")
+    for snippet in ["bits 32", "bits 64", "mov cr4, eax", "wrmsr",
+                    "jmp 0x08:long_mode_start", "mov rsp, __boot_stack_top"]:
+        if snippet not in boot:
+            fail(f"Multiboot2 long-mode transition is missing: {snippet}")
     for snippet in ["__kernel_end", "kernel_end - kernel_start"]:
         if snippet not in pmm_c:
             fail(f"PMM does not reserve linker-placed boot stack: missing {snippet}")
@@ -166,17 +176,17 @@ def check_kernel_memory_layout():
 
 
 def check_user_bounds():
-    bounds_h = read_text("src/kernel/arch/i386/user_bounds.h")
+    bounds_h = read_text("src/kernel/arch/x86_64/user_bounds.h")
     elf_c = read_text("src/kernel/core/elf.c")
     syscall_h = read_text("src/kernel/syscall/syscall_internal.h")
-    paging_c = read_text("src/kernel/arch/i386/paging.c")
-    user_h = read_text("src/kernel/arch/i386/user.h")
+    paging_c = read_text("src/kernel/arch/x86_64/paging.c")
+    user_h = read_text("src/kernel/arch/x86_64/user.h")
 
     for path, text in [
         ("src/kernel/core/elf.c", elf_c),
         ("src/kernel/syscall/syscall_internal.h", syscall_h),
-        ("src/kernel/arch/i386/paging.c", paging_c),
-        ("src/kernel/arch/i386/user.h", user_h),
+        ("src/kernel/arch/x86_64/paging.c", paging_c),
+        ("src/kernel/arch/x86_64/user.h", user_h),
     ]:
         if '#include "user_bounds.h"' not in text:
             fail(f"{path} should include shared user_bounds.h")
@@ -195,18 +205,34 @@ def check_user_bounds():
         fail("user load/stack/pointer bounds are inconsistent")
     if stack_top - load_end < 0x10000:
         fail("user stack is too close to the ELF load window")
+    display_start = parse_c_constant(bounds_h, "USER_DISPLAY_START")
+    display_end = display_start + parse_c_constant(bounds_h, "USER_DISPLAY_SIZE")
+    shm_start = parse_c_constant(bounds_h, "USER_SHM_START")
+    shm_end = parse_c_constant(bounds_h, "USER_SHM_END")
+    gpu_start = parse_c_constant(bounds_h, "USER_GPU_START")
+    gpu_end = parse_c_constant(bounds_h, "USER_GPU_END")
+    main_stack_start = stack_top - parse_c_constant(bounds_h, "USER_MAIN_STACK_SIZE")
+    thread_stack_start = main_stack_start - (
+        parse_c_constant(bounds_h, "USER_THREAD_STACK_SIZE") *
+        parse_c_constant(bounds_h, "USER_THREAD_STACK_SLOTS"))
+    trampoline = parse_c_constant(bounds_h, "USER_TRAMPOLINE_BASE")
+    if not (0x100000000 <= load_start < load_end <= display_start < display_end <=
+            shm_start < shm_end <= gpu_start < gpu_end <= thread_stack_start <
+            main_stack_start < stack_top <= trampoline < trampoline + 4096 <=
+            space_end <= 0x800000000000):
+        fail("ELF64 load, display, SHM, GPU, stacks or trampoline windows overlap")
 
     ok(f"user bounds: load 0x{load_start:06X}..0x{load_end:06X}, stack 0x{stack_top:06X}, mapped to 0x{ptr_end:06X}")
     return load_start, load_end, stack_top
 
 
 def check_user_fault_isolation():
-    bounds_h = read_text("src/kernel/arch/i386/user_bounds.h")
-    paging_c = read_text("src/kernel/arch/i386/paging.c")
+    bounds_h = read_text("src/kernel/arch/x86_64/user_bounds.h")
+    paging_c = read_text("src/kernel/arch/x86_64/paging.c")
     pmm_c = read_text("src/kernel/mm/pmm.c")
-    user_c = read_text("src/kernel/arch/i386/user.c")
+    user_c = read_text("src/kernel/arch/x86_64/user.c")
     exec_c = read_text("src/kernel/core/exec.c")
-    idt_c = read_text("src/kernel/arch/i386/idt.c")
+    idt_c = read_text("src/kernel/arch/x86_64/idt.c")
     syscall_c = read_text("src/kernel/syscall/syscall.c")
     makefile = read_text("Makefile")
     kernel_c = read_text("src/kernel/core/kernel.c")
@@ -215,9 +241,10 @@ def check_user_fault_isolation():
 
     for snippet in [
         "paging_user_range_accessible",
-        "!(pde & PAGE_USER)",
-        "write && !(pte & PAGE_RW)",
+        "!(*pte & PAGE_USER)",
+        "write && !(*pte & PAGE_RW)",
         "paging_set_user_range_writable",
+        "PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_NX",
     ]:
         if snippet not in paging_c:
             fail(f"page-aware user access checks are missing: {snippet}")
@@ -231,7 +258,7 @@ def check_user_fault_isolation():
 
     for snippet in [
         "USER_TRAMPOLINE_BASE",
-        "jmp edx",
+        "jmp rdx",
     ]:
         if snippet not in bounds_h + "\n" + user_c:
             fail(f"private user trampoline support is missing: {snippet}")
@@ -239,6 +266,7 @@ def check_user_fault_isolation():
         "paging_map_user_range_in_space(",
         "user_install_trampoline_in_space(cr3)",
         "paging_set_user_range_writable_in_space(",
+        "paging_set_user_range_executable_in_space(",
     ]:
         if snippet not in exec_c:
             fail(f"exec trampoline setup is missing: {snippet}")
@@ -246,7 +274,7 @@ def check_user_fault_isolation():
         fail("the legacy shared writable trampoline at 0x1FF000 is still present")
 
     for snippet in [
-        "(frame[11] & 3u) == 3u",
+        "(frame->cs & 3u) == 3u",
         "task_exit_process_code(vector ? -(int)vector : -1)",
         "Terminating faulting user task",
     ]:
@@ -269,8 +297,8 @@ def check_user_fault_isolation():
 
 
 def check_runtime_lifecycle():
-    idt_c = read_text("src/kernel/arch/i386/idt.c")
-    irq_h = read_text("src/kernel/arch/i386/irq.h")
+    idt_c = read_text("src/kernel/arch/x86_64/idt.c")
+    irq_h = read_text("src/kernel/arch/x86_64/irq.h")
     task_c = read_text("src/kernel/sched/task.c")
     sys_proc = read_text("src/kernel/syscall/sys_proc.c")
     sys_net = read_text("src/kernel/syscall/sys_net.c")
@@ -278,7 +306,7 @@ def check_runtime_lifecycle():
     gui_smoke = read_text("scripts/gui-smoke.ps1")
     smoke = read_text("scripts/smoke.ps1")
 
-    for snippet in ["irq_save", "irq_restore", "pushf; pop %0; cli"]:
+    for snippet in ["irq_save", "irq_restore", "pushfq; popq %0; cli"]:
         if snippet not in irq_h:
             fail(f"shared IRQ-state helper is missing: {snippet}")
     for snippet in [
@@ -323,7 +351,10 @@ def check_runtime_lifecycle():
         "join(app_sessions[slot].reader_tid)",
         "waitpid(app_sessions[slot].pid",
         "desktop_dirty",
-        "tick - last_render_tick >= 60u",
+        "if (full_dirty)",
+        "if (display_backend == GFX_BACKEND_FRAMEBUFFER)",
+        "fb = fb_local;",
+        "fb_blit_stride(area.x, area.y",
         "sync_app_size(finished_resize",
     ]:
         if snippet not in gui_c:
@@ -338,7 +369,11 @@ def check_runtime_lifecycle():
         if snippet not in gui_smoke:
             fail(f"live TextEdit resize coverage is missing: {snippet}")
 
-    ok("runtime lifecycle: IRQ state, process exit, thread/socket reuse, GUI shutdown/live resize, and idle redraw are covered")
+    if "last_render_tick" in gui_c:
+        fail("desktop must not periodically repaint an unchanged full frame")
+    if "paging_ensure_framebuffer_size" not in read_text("src/kernel/drv/fb.c"):
+        fail("larger linear framebuffer modes must extend the kernel mapping")
+    ok("runtime lifecycle: IRQ state, process exit, thread/socket reuse, GUI shutdown/live resize, buffered LFB, and damage-driven redraw are covered")
 
 
 def check_elf_loader_hardening():
@@ -349,65 +384,48 @@ def check_elf_loader_hardening():
     smoke_ps1 = read_text("scripts/smoke.ps1")
 
     for snippet in [
-        "uint32_t elf_load_into_space(uint32_t cr3",
-        "static int add_overflows_u32",
-        "static int file_range_ok",
-        "static int user_range_ok",
-        "static int entry_in_segment",
-        "ehdr->e_ehsize != sizeof(struct elf32_ehdr)",
-        "ehdr->e_phentsize != sizeof(struct elf32_phdr)",
-        "file_range_ok(ehdr->e_phoff, phdr_bytes, size)",
-        "phdr->p_filesz > phdr->p_memsz",
-        "file_range_ok(phdr->p_offset, phdr->p_filesz, size)",
-        "user_range_ok(phdr->p_vaddr, phdr->p_memsz)",
-        "entry_ok",
-        "Validate all loadable segments before writing anything",
+        "uintptr_t elf_load_into_space(uintptr_t cr3",
+        "static int valid_header", "static int validate_segment",
+        "length <= (uint64_t)size - offset", "length > UINT64_MAX - address",
+        "eh->e_ident[4] != ELF_CLASS64", "eh->e_machine != ELF_EM_X86_64",
+        "eh->e_ehsize != sizeof(*eh)",
+        "eh->e_phentsize != sizeof(struct elf64_phdr)",
+        "range_in_file(eh->e_phoff, bytes, size)",
+        "ph->p_filesz <= ph->p_memsz",
+        "range_in_file(ph->p_offset, ph->p_filesz, size)",
+        "range_in_load_window(ph->p_vaddr, ph->p_memsz)",
+        "entry_in_segment(eh->e_entry, ph)",
+        "paging_set_user_range_writable_in_space(",
+        "paging_set_user_range_executable_in_space(",
     ]:
         if snippet not in elf_c:
-            fail(f"ELF loader hardening is missing: {snippet}")
-
-    for snippet in [
-        "uint32_t elf_load_into_space(uint32_t cr3",
-        "uint32_t elf_load_file_into_space(uint32_t cr3",
-    ]:
-        if snippet not in elf_h:
-            fail(f"elf.h does not expose the address-space ELF loader: {snippet}")
-
-    for snippet in [
-        "elf_load_into_space(",
-        "elf_load_file_into_space(",
-        "paging_destroy_user_space(proc_cr3)",
-        'serial_puts("[exec] bad ELF\\n")',
-    ]:
+            fail(f"ELF64 loader validation is missing: {snippet}")
+    for loader in ["elf_load_into_space", "elf_load_file_into_space"]:
+        if f"uintptr_t {loader}(uintptr_t cr3" not in elf_h:
+            fail(f"elf.h is missing full-width {loader}")
+        start = elf_c.index(f"uintptr_t {loader}(")
+        body = elf_c[start:].split("\n}", 1)[0]
+        guard = body.find("if (!saw_load || !entry_ok)")
+        copy = body.find("paging_copy_to_user_space(")
+        if guard < 0 or copy < guard:
+            fail(f"{loader} must validate all segments and entry before copying payload")
+    for snippet in ["elf_load_into_space(", "elf_load_file_into_space(",
+                    "paging_destroy_user_space(proc_cr3)", '[exec] bad ELF']:
         if snippet not in exec_c:
-            fail(f"exec bad-ELF path is missing: {snippet}")
-
-    for snippet in [
-        "cmd_elfbadtest",
-        "make_bad_elf",
-        "run_bad_elf_case",
-        'run_bad_elf_case("vaddr"',
-        'run_bad_elf_case("filesz"',
-        'run_bad_elf_case("memsz"',
-        'run_bad_elf_case("entry"',
-        "spawn_process_args(path, argv, 1, SPAWN_FLAG_SILENT)",
-    ]:
+            fail(f"exec bad-ELF cleanup is missing: {snippet}")
+    for snippet in ["cmd_elfbadtest", "make_bad_elf", "put64le",
+                    "ELFCLASS64", "EM_X86_64", "run_valid_elf_case",
+                    'run_bad_elf_case("vaddr"', 'run_bad_elf_case("filesz"',
+                    'run_bad_elf_case("memsz"', 'run_bad_elf_case("entry"',
+                    "spawn_process_args(path, argv, 1, SPAWN_FLAG_SILENT)"]:
         if snippet not in shell_c:
-            fail(f"shell is missing bad ELF runtime coverage: {snippet}")
-
-    for snippet in [
-        "elfbadtest",
-        "elfbad: vaddr -1",
-        "elfbad: filesz -1",
-        "elfbad: memsz -1",
-        "elfbad: entry -1",
-        "elfbad: ok",
-    ]:
+            fail(f"shell is missing ELF64 regression coverage: {snippet}")
+    for snippet in ["elfbadtest", "elfbad: valid 0", "elfbad: vaddr -1",
+                    "elfbad: filesz -1", "elfbad: memsz -1",
+                    "elfbad: entry -1", "elfbad: ok"]:
         if snippet not in smoke_ps1:
-            fail(f"smoke.ps1 is missing bad ELF coverage: {snippet}")
-
-    ok("ELF loader: size-aware validation rejects malformed runtime exec fixtures")
-
+            fail(f"smoke.ps1 is missing ELF64 coverage: {snippet}")
+    ok("ELF64 loader: valid baseline and malformed segments have runtime coverage")
 
 def check_dynamic_heap():
     syscall_h = read_text("src/kernel/syscall/syscall.h")
@@ -436,6 +454,7 @@ def check_dynamic_heap():
         "void  *calloc(size_t count, size_t size)",
         "void  *realloc(void *ptr, size_t size)",
         "struct heap_block",
+        "#define HEAP_ALIGN 16u",
         "heap_merge_next",
         "syscall1(SYS_SBRK",
     ]:
@@ -456,43 +475,10 @@ def check_dynamic_heap():
 
 
 def check_elf(path, load_start, load_end):
-    data = path.read_bytes()
-    if len(data) < 52 or data[:4] != b"\x7fELF":
-        fail(f"{path.name}: not an ELF32 file")
-    (ident, etype, emachine, version, entry, phoff, _shoff, _flags,
-     ehsize, phentsize, phnum, _shentsize, _shnum, _shstrndx) = struct.unpack_from(
-        "<16sHHIIIIIHHHHHH", data, 0
-    )
-    if ident[4] != 1 or ident[5] != 1 or etype != 2 or emachine != 3 or version != 1:
-        fail(f"{path.name}: unsupported ELF header")
-    if ehsize != 52 or phentsize != 32:
-        fail(f"{path.name}: unexpected ELF/program-header size")
-    if phoff + phnum * phentsize > len(data):
-        fail(f"{path.name}: program headers outside file")
-
-    saw_load = False
-    entry_ok = False
-    max_end = 0
-    for i in range(phnum):
-        off = phoff + i * phentsize
-        ptype, poff, vaddr, _paddr, filesz, memsz, flags, _align = struct.unpack_from("<IIIIIIII", data, off)
-        if ptype != 1:
-            continue
-        saw_load = True
-        end = vaddr + memsz
-        max_end = max(max_end, end)
-        if filesz > memsz:
-            fail(f"{path.name}: PT_LOAD filesz exceeds memsz")
-        if poff + filesz > len(data):
-            fail(f"{path.name}: PT_LOAD file range outside file")
-        if vaddr < load_start or end > load_end:
-            fail(f"{path.name}: PT_LOAD 0x{vaddr:X}..0x{end:X} outside load window")
-        if flags & 1 and vaddr <= entry < end:
-            entry_ok = True
-    if not saw_load or not entry_ok:
-        fail(f"{path.name}: missing valid loadable entry segment")
-    return max_end
-
+    try:
+        return elf64.load_end(path.read_bytes(), load_start, load_end)
+    except ValueError as exc:
+        fail(f"{path.name}: {exc}")
 
 def check_user_elves(load_start, load_end, stack_top):
     user_dir = ROOT / "build/user"
@@ -535,6 +521,16 @@ def check_initrd_reachability():
     app_registry = read_text_if_exists("build/generated/app_registry.h")
     refs = kernel_c + "\n" + app_registry
     blobs = parse_initrd_blobs(initrd)
+    for data, target in re.findall(
+        r"#define\s+(initrd_[A-Za-z0-9_]+_data)\s+(initrd_[A-Za-z0-9_]+_data)",
+        initrd,
+    ):
+        if target not in blobs:
+            fail(f"initrd alias {data} refers to unknown blob {target}")
+        macro = data.upper().removesuffix("_DATA") + "_SIZE"
+        if not re.search(rf"#define\s+{macro}\s+{blobs[target]}\b", initrd):
+            fail(f"initrd alias {data} has an inconsistent size macro")
+        blobs[data] = macro
 
     missing_data = []
     missing_size = []
@@ -581,11 +577,11 @@ def check_initrd_hygiene():
     noisy = []
     for elf in sorted(user_dir.glob("*.elf")):
         data = elf.read_bytes()
-        if len(data) < 52 or data[:4] != b"\x7fELF":
-            continue
-        shoff = struct.unpack_from("<I", data, 32)[0]
-        shentsize = struct.unpack_from("<H", data, 46)[0]
-        shnum = struct.unpack_from("<H", data, 48)[0]
+        try:
+            fields = elf64.header(data)
+        except ValueError as exc:
+            fail(f"{elf.name}: {exc}")
+        shoff, shentsize, shnum = fields[6], fields[11], fields[12]
         if shoff != 0 or shentsize != 0 or shnum != 0:
             noisy.append(f"{elf.name}: shoff={shoff} shentsize={shentsize} shnum={shnum}")
         for marker in [b".comment", b"clang version", b"LLVM", b".symtab", b".strtab"]:
@@ -776,7 +772,7 @@ def check_procfs_diagnostics():
         "proc_interfaces_text",
         "proc_limits_text",
         "proc_fs_text",
-        "lightweight-i386-posix-like-os",
+        "native-x86_64-posix-os",
         "interfaces proc shell gui report",
         "NAME STATUS ENTRYPOINTS",
         "about stable /proc/about,about,gui:about,make:report",
@@ -845,7 +841,7 @@ def check_procfs_diagnostics():
         "limits",
         "fsinfo",
         "name\\s+BuzzOS",
-        "lightweight-i386-posix-like-os",
+        "native-x86_64-posix-os",
         "status\\s+ok",
         "interfaces\\s+proc\\s+shell\\s+gui\\s+report",
         "proc_entries\\s+12",
@@ -858,8 +854,8 @@ def check_procfs_diagnostics():
         "minifs_max_file_size\\s+32441856",
         "mount\\s+/fs",
         "driver\\s+minifs",
-        "inodes_total\\s+128",
-        "blocks_total\\s+3959",
+        "inodes_total\\s+2048",
+        "blocks_total\\s+63363",
         "host_repair\\s+make fs-repair",
         "gui:interfaces,make:report",
         "fs_status\\s+ok",
@@ -909,7 +905,7 @@ def check_host_doctor():
         "def check_workspace",
         "--soft",
         "--no-version",
-        "qemu-system-i386",
+        "qemu-system-x86_64",
         "llvm-objcopy",
         "scripts/run-local.ps1",
     ]:
@@ -921,8 +917,8 @@ def check_host_doctor():
         "make doctor",
         "make run-local",
         "make run-gui",
-        "make smoke",
-        "make gui-smoke",
+        "make core-smoke",
+        "make gui-startup-smoke",
         "make verify",
         "make report",
         "make fs-repair",
@@ -993,13 +989,14 @@ def check_futex_blocking():
 
     for snippet in [
         "struct futex_waiter",
+        "uintptr_t addr;",
         "futex_waiters[MAX_FUTEX_WAITERS]",
         "task_block_current();",
         "task_block_current_until(deadline);",
         "task_wake(futex_waiters[i].task_id)",
         "futex_cancel_task_locked",
         "futex_status_text",
-        "SLOT TID ADDR       WOKEN",
+        "SLOT TID ADDR               WOKEN",
     ]:
         if snippet not in sys_ipc:
             fail(f"futex scheduler-backed wait support is missing: {snippet}")
@@ -1388,6 +1385,7 @@ def check_gui_style():
     files_c = read_text("src/user/bin/filemanager.c")
     pinyin_h = read_text("src/user/bin/pinyin_data.h")
     shell_c = read_text("src/user/bin/shell.c")
+    terminal_c = read_text("src/user/bin/terminal.c")
     for snippet in ["GUIAPP_EVT_TEXT", "GUIAPP_TEXT_MAX"]:
         if snippet not in guiapp_h:
             fail(f"GUI app protocol is missing system text input: {snippet}")
@@ -1400,11 +1398,11 @@ def check_gui_style():
     for snippet in ["draw_context_menu", "clipboard_command", "GUIAPP_CMD_COPY", "GUIAPP_CMD_CUT"]:
         if snippet not in gui_c:
             fail(f"desktop is missing context clipboard feature: {snippet}")
-    for snippet in ["term_input", "terminal_input_append", 'terminal_send("\\x15"']:
-        if snippet not in gui_c:
+    for snippet in ["input_line", "track_input_text", 'send_shell("\\x15"']:
+        if snippet not in terminal_c:
             fail(f"desktop Terminal is missing UTF-8 clipboard input tracking: {snippet}")
-    for snippet in ["terminal_position_at", "terminal_has_selection", "terminal_copy_selection", "term_selecting"]:
-        if snippet not in gui_c:
+    for snippet in ["position_from_mouse_locked", "selection_exists_locked", "copy_selection_locked", "selection_dragging"]:
+        if snippet not in terminal_c:
             fail(f"desktop Terminal is missing visible mouse selection: {snippet}")
     for snippet in ["utf8_prev", "utf8_next", "c <= 255", "c == 0x15"]:
         if snippet not in shell_c:
@@ -1415,8 +1413,8 @@ def check_gui_style():
     for snippet in ["app_target_allowed", "run_app_with_arg", "GUIAPP_FRAME_LAUNCH"]:
         if snippet not in gui_c:
             fail(f"desktop is missing cross-app launch handling: {snippet}")
-    for snippet in ["MAX_GUI_APPS = 10", "dock_expanded", "collect_open_apps",
-                    "draw_dock_tooltip", "activate_next_visible"]:
+    for snippet in ["MAX_GUI_APPS = 10", "taskbar_expanded", "collect_open_apps",
+                    "draw_taskbar_tooltip", "activate_next_visible"]:
         if snippet not in gui_c:
             fail(f"desktop is missing scalable task switcher feature: {snippet}")
     for snippet in ["set_document_path", "argc > 4", "file_path"]:
@@ -1433,7 +1431,7 @@ def check_gui_style():
     for snippet in ["is_elf_file", "has_gui_manifest", "guiapp_request_exec"]:
         if snippet not in files_c:
             fail(f"filemanager is missing CLI/GUI executable dispatch: {snippet}")
-    for snippet in ["GUIAPP_FRAME_EXEC", "terminal_execute_path", "exec_target_allowed"]:
+    for snippet in ["GUIAPP_FRAME_EXEC", 'run_app_with_arg("/fs/apps/terminal", frame.target)', "exec_target_allowed"]:
         if snippet not in guiapp_h + gui_c:
             fail(f"desktop is missing non-GUI ELF terminal dispatch: {snippet}")
     for snippet in ["app_reader_loop", "app_reader_functions", "reader_dead", "reap_dead_apps"]:
@@ -1441,7 +1439,8 @@ def check_gui_style():
             fail(f"desktop is missing asynchronous app frame handling: {snippet}")
 
     for app in parse_make_words(makefile, "GUI_APP_NAMES"):
-        source = read_text(f"src/user/bin/{app}.c")
+        manifest = parse_manifest_text(read_text(f"src/user/bin/{app}.app"))
+        source = read_text(manifest["source"])
         for snippet in ['#include "appui.h"', '#include "guiapp.h"', "guiapp_read_event", "guiapp_send_frame"]:
             if snippet not in source:
                 fail(f"{app}.c is missing current desktop app feature: {snippet}")

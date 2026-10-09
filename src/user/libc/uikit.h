@@ -543,8 +543,9 @@ static inline void ui_circle(struct ui_surface *s, int cx, int cy, int rad,
                              uint32_t color, int alpha) {
     if (rad <= 0 || alpha <= 0)
         return;
-    for (int y = cy - rad; y < cy + rad; y++) {
-        for (int x = cx - rad; x < cx + rad; x++) {
+    struct ui_rect bounds = ui_clipped(s, ui_rect_make(cx - rad, cy - rad, rad * 2, rad * 2));
+    for (int y = bounds.y; y < bounds.y + bounds.h; y++) {
+        for (int x = bounds.x; x < bounds.x + bounds.w; x++) {
             int cov = ui_arc_coverage(x, y, cx, cy, rad);
             if (cov > 0)
                 ui_pixel_a(s, x, y, color, cov * alpha / 255);
@@ -583,19 +584,22 @@ static inline void ui_line(struct ui_surface *s, int x0, int y0, int x1,
     int by0 = ui_min(y0, y1) - pad, by1 = ui_max(y0, y1) + pad;
     /* Work in 1/16 pixel so the half-thickness of an odd stroke stays exact. */
     int dx = (x1 - x0) * 16, dy = (y1 - y0) * 16;
-    int len2 = dx * dx + dy * dy;
+    int64_t len2 = (int64_t)dx * dx + (int64_t)dy * dy;
     int half = thick * 8; /* thick/2 in 1/16 units */
     for (int y = by0; y <= by1; y++) {
         for (int x = bx0; x <= bx1; x++) {
             int px = (x - x0) * 16 + 8;
             int py = (y - y0) * 16 + 8;
-            int t = 0, ox, oy, d2, d, cov;
+            int ox = px, oy = py, d2, d, cov;
             if (len2 > 0) {
-                t = (px * dx + py * dy) / (len2 / 16 ? len2 / 16 : 1);
-                t = ui_clamp(t, 0, 16);
+                int64_t dot = (int64_t)px * dx + (int64_t)py * dy;
+                if (dot < 0) dot = 0;
+                if (dot > len2) dot = len2;
+                /* Project at subpixel precision. Quantizing t to 0..16
+                 * reduced every long stroke to seventeen isolated dots. */
+                ox -= (int)((int64_t)dx * dot / len2);
+                oy -= (int)((int64_t)dy * dot / len2);
             }
-            ox = px - dx * t / 16;
-            oy = py - dy * t / 16;
             d2 = ox * ox + oy * oy;
             d = ui_isqrt(d2);
             /* One pixel (16 units) of linear falloff at the stroke edge. */
@@ -648,19 +652,27 @@ static inline void ui_shadow(struct ui_surface *s, struct ui_rect caster,
     struct ui_rect c = ui_clipped(s, band);
     if (ui_rect_empty(c) || blur <= 0 || alpha <= 0)
         return;
+    rad = ui_radius_fit(caster, rad);
     for (int y = c.y; y < c.y + c.h; y++) {
         for (int x = c.x; x < c.x + c.w; x++) {
             /* Overshoot beyond the shadow box on each axis, 0 when inside. */
             int ox = ui_max(ui_max(box.x - x, x - (box.x + box.w - 1)), 0);
             int oy = ui_max(ui_max(box.y - y, y - (box.y + box.h - 1)), 0);
             int d, a, hole;
-            if (ox || oy) {
+            if (rad > 0) {
+                int closest_x = ui_clamp(x, box.x + rad, box.x + box.w - rad);
+                int closest_y = ui_clamp(y, box.y + rad, box.y + box.h - rad);
+                int dx = x - closest_x, dy_corner = y - closest_y;
+                d = ui_isqrt(dx * dx + dy_corner * dy_corner) - rad;
+            } else {
                 d = (ox && oy) ? ui_isqrt(ox * ox + oy * oy) : ox + oy;
+            }
+            if (d > 0) {
                 if (d >= blur)
                     continue;
                 a = profile[d * UI_SHADOW_STEPS / blur] * alpha / 255;
             } else {
-                a = alpha; /* under the box: full strength before the hole */
+                a = alpha; /* under the rounded box, before removing caster */
             }
             /* Remove what the caster will cover, including the partial
              * coverage of its own antialiased corners. */

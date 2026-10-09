@@ -249,6 +249,25 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     serial_puts("[boot] vfs init ok\n");
     vfs_mkdir("/bin");
     vfs_mkdir("/share");
+    vfs_mkdir("/share/licenses");
+    ramfs_register("/share/licenses/DejaVu.txt", initrd_share_licenses_DejaVu_txt_data,
+                   INITRD_SHARE_LICENSES_DEJAVU_TXT_SIZE);
+    ramfs_register("/share/licenses/Noto-CJK.txt", initrd_share_licenses_Noto_CJK_txt_data,
+                   INITRD_SHARE_LICENSES_NOTO_CJK_TXT_SIZE);
+    ramfs_register("/share/licenses/WHATWG-Encoding.txt", initrd_share_licenses_WHATWG_Encoding_txt_data,
+                   INITRD_SHARE_LICENSES_WHATWG_ENCODING_TXT_SIZE);
+    ramfs_register("/share/licenses/FreeType.txt", initrd_share_licenses_FreeType_txt_data,
+                   INITRD_SHARE_LICENSES_FREETYPE_TXT_SIZE);
+    ramfs_register("/share/licenses/Expat.txt", initrd_share_licenses_Expat_txt_data,
+                   INITRD_SHARE_LICENSES_EXPAT_TXT_SIZE);
+    ramfs_register("/share/licenses/QuickJS.txt", initrd_share_licenses_QuickJS_txt_data,
+                   INITRD_SHARE_LICENSES_QUICKJS_TXT_SIZE);
+    ramfs_register("/share/licenses/NetSurf.txt", initrd_share_licenses_NetSurf_txt_data,
+                   INITRD_SHARE_LICENSES_NETSURF_TXT_SIZE);
+    ramfs_register("/share/licenses/MbedTLS.txt", initrd_share_licenses_MbedTLS_txt_data,
+                   INITRD_SHARE_LICENSES_MBEDTLS_TXT_SIZE);
+    ramfs_register("/share/licenses/WebP.txt", initrd_share_licenses_WebP_txt_data,
+                   INITRD_SHARE_LICENSES_WEBP_TXT_SIZE);
     ramfs_register("/hello", initrd_hello_data, INITRD_HELLO_SIZE);
     ramfs_register("/bin/sh", initrd_bin_sh_data, INITRD_BIN_SH_SIZE);
     ramfs_register("/bin/nano", initrd_bin_nano_data, INITRD_BIN_NANO_SIZE);
@@ -270,6 +289,9 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info_addr) {
     ramfs_register("/bin/netsurf", initrd_bin_netsurf_data, INITRD_BIN_NETSURF_SIZE);
     ramfs_register("/share/buzzos-demo.wav", initrd_share_buzzos_demo_wav_data,
                    INITRD_SHARE_BUZZOS_DEMO_WAV_SIZE);
+    ramfs_register("/bin/browser", initrd_bin_browser_data, INITRD_BIN_BROWSER_SIZE);
+    ramfs_register("/share/buzzos-demo.mp3", initrd_share_buzzos_demo_mp3_data,
+                   INITRD_SHARE_BUZZOS_DEMO_MP3_SIZE);
     serial_puts("[boot] initrd files registered\n");
     seed_user_apps();
     serial_puts("[boot] user apps seeded\n");

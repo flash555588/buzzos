@@ -7,6 +7,7 @@ enum {
     MAX_H = GUIAPP_MAX_H,
     TEXT_CAP = 4096,
     TOOLBAR_H = 50,
+    STATUS_H = 28,
     TOOL_BUTTON_W = 92,
     TOOL_BUTTON_H = 34,
     TOOL_BUTTON_GAP = 8,
@@ -32,7 +33,7 @@ static int drag_mouse_start;
 static int drag_scroll_start;
 static char status[64] = "Ready";
 static char file_path[GUIAPP_PATH_MAX] = "/fs/textedit.txt";
-static char window_title[GUIAPP_TITLE_MAX] = "TextEdit";
+static char window_title[GUIAPP_TITLE_MAX] = "Text Editor";
 
 static int clamp_int(int v, int lo, int hi) {
     if (v < lo) return lo;
@@ -57,13 +58,13 @@ static void set_document_path(const char *path) {
     for (int i = 0; file_path[i]; i++)
         if (file_path[i] == '/' && file_path[i + 1])
             name = file_path + i + 1;
-    appui_copy_text(window_title, "TextEdit - ", sizeof(window_title));
+    appui_copy_text(window_title, "Text Editor - ", sizeof(window_title));
     appui_append_text(window_title, name, sizeof(window_title));
 }
 
 static struct appui_rect editor_rect(void) {
     return (struct appui_rect){4, TOOLBAR_H + 4, w - 8,
-                               h - TOOLBAR_H - 8};
+                               h - TOOLBAR_H - STATUS_H - 8};
 }
 
 static struct appui_rect toolbar_button_rect(int index) {
@@ -385,28 +386,33 @@ static struct appui_rect hthumb(void) {
 static void draw_status_tail(int x, int y, const char *text, int color,
                              struct appui_rect clip) {
     int available = clip.x + clip.w - x;
-    int width = appui_text_width(text);
+    int width = appui_label_width(text, UI_FONT_CAPTION);
     if (available <= 0)
         return;
     if (width <= available) {
-        appui_text(pixels, w, h, x, y, text, color, -1, clip);
+        appui_label(pixels, w, h, clip, text, UI_FONT_CAPTION, color, UI_ALIGN_LEFT);
         return;
     }
     const char *ellipsis = "...";
-    int ellipsis_width = appui_text_width(ellipsis);
+    int ellipsis_width = appui_label_width(ellipsis, UI_FONT_CAPTION);
     const char *tail = text;
     while (*tail && width + ellipsis_width > available) {
         const char *next = tail;
         uint32_t codepoint = appui_utf8_next(&next);
-        width -= appui_codepoint_width(codepoint);
+        width -= ui_cp_advance(codepoint, UI_FONT_CAPTION);
         tail = next;
     }
     if (ellipsis_width >= available) {
-        appui_text(pixels, w, h, x, y, ellipsis, color, -1, clip);
+        appui_label(pixels, w, h, clip, ellipsis, UI_FONT_CAPTION, color, UI_ALIGN_LEFT);
         return;
     }
-    appui_text(pixels, w, h, x, y, ellipsis, color, -1, clip);
-    appui_text(pixels, w, h, x + ellipsis_width, y, tail, color, -1, clip);
+    appui_label(pixels, w, h, (struct appui_rect){x, clip.y, ellipsis_width, clip.h},
+                ellipsis, UI_FONT_CAPTION, color, UI_ALIGN_LEFT);
+    appui_label(pixels, w, h,
+                (struct appui_rect){x + ellipsis_width, clip.y,
+                                    available - ellipsis_width, clip.h},
+                tail, UI_FONT_CAPTION, color, UI_ALIGN_LEFT);
+    (void)y;
 }
 
 static void draw_scrollbars(void) {
@@ -488,6 +494,18 @@ static void render(void) {
                                    2, KFONT_HEIGHT + 2},
                THEME_FOCUS);
     draw_scrollbars();
+    int line = 1, column = 1;
+    const char *position = textbuf;
+    while ((int)(position - textbuf) < cursor) {
+        uint32_t cp = appui_utf8_next(&position);
+        if (cp == '\n') { line++; column = 1; }
+        else column++;
+    }
+    char location[64];
+    snprintf(location, sizeof(location), "Ln %d   Col %d   |   UTF-8",
+             line, column);
+    appui_statusbar(pixels, w, h, (struct appui_rect){0, h - STATUS_H, w, STATUS_H},
+                    location);
 }
 
 static void click(int x, int y) {

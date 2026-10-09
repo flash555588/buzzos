@@ -1004,7 +1004,7 @@ static void render(void) {
     for (int i = 0; i < TB_COUNT; i++) {
         struct appui_rect r = toolbar_button_rect(i);
         int variant = APPUI_BTN_DEFAULT;
-        if (i == TB_SAVE || i == TB_RUN)
+        if (i == TB_RUN)
             variant = APPUI_BTN_PRIMARY;
         if (i == TB_CLEAR)
             variant = APPUI_BTN_DANGER;

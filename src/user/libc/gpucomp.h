@@ -35,6 +35,7 @@
 #include "libc.h"
 #include "virgl.h"
 #include "palette.h"
+#include "uikit.h"
 #include "../../kernel/drv/font_builtin.h"
 
 enum {
@@ -85,6 +86,9 @@ struct gpucomp {
     int font_slot_count;
     uint32_t glyph_codepoint[GPUCOMP_FONT_SLOTS];
     uint8_t glyph_width[GPUCOMP_FONT_SLOTS];
+    uint8_t glyph_height[GPUCOMP_FONT_SLOTS];
+    uint8_t glyph_advance[GPUCOMP_FONT_SLOTS];
+    uint8_t glyph_top[GPUCOMP_FONT_SLOTS];
     struct virgl_cmdbuf cmds;
 };
 
@@ -658,6 +662,10 @@ static inline int gpucomp_font_ensure(void) {
            TEX_H = GPUCOMP_FONT_CELL * GPUCOMP_FONT_ROWS };
     struct gpucomp *g = &gpucomp_state;
     struct gpu3d_resource atlas;
+    struct ui_font_ink *ink = ui_font_ink();
+    int source_height = ink->bottom - ink->top + 1;
+    if (source_height > GPUCOMP_FONT_CELL || UIFONT_WIDTH > GPUCOMP_FONT_CELL)
+        return -1;
     if (g->font_texture)
         return 0;
     if (!g->ready || gpu3d_resource_create(
@@ -667,21 +675,24 @@ static inline int gpucomp_font_ensure(void) {
     memset(atlas.pixels, 0, (size_t)atlas.bytes);
     for (int i = 0; i < 96; i++) {
         uint32_t codepoint = (uint32_t)(i + 32);
-        int source = codepoint >= KFONT_FIRST &&
-                     codepoint < KFONT_FIRST + KFONT_COUNT
-                         ? (int)codepoint - KFONT_FIRST
-                         : '?' - KFONT_FIRST;
-        int glyph_w = KFONT_WIDTH;
+        int source = codepoint >= UIFONT_FIRST &&
+                     codepoint < UIFONT_FIRST + UIFONT_COUNT
+                         ? (int)codepoint - UIFONT_FIRST
+                         : '?' - UIFONT_FIRST;
+        int glyph_w = UIFONT_WIDTH;
         g->glyph_width[i] = (uint8_t)glyph_w;
+        g->glyph_height[i] = (uint8_t)source_height;
+        g->glyph_advance[i] = uifont_advance[source];
+        g->glyph_top[i] = (uint8_t)ink->top;
         g->glyph_codepoint[i] = codepoint;
         int ox = (i % GPUCOMP_FONT_COLS) * GPUCOMP_FONT_CELL;
         int oy = (i / GPUCOMP_FONT_COLS) * GPUCOMP_FONT_CELL;
         /* ASCII is not present in font_unicode_lookup(): normal UI text gets
          * it from the built-in antialiased face.  Populate the GPU atlas from
          * that same face instead of accepting a width with an empty bitmap. */
-        for (int y = 0; y < KFONT_HEIGHT; y++) {
+        for (int y = 0; y < source_height; y++) {
             for (int x = 0; x < glyph_w; x++) {
-                uint32_t alpha = kfont_alpha[source][y][x];
+                uint32_t alpha = uifont_alpha[source][ink->top + y][x];
                 if (alpha)
                     atlas.pixels[(oy + y) * TEX_W + ox + x] =
                         (alpha << 24) | 0x00FFFFFFu;
@@ -774,15 +785,24 @@ static inline int gpucomp_font_slot(uint32_t codepoint) {
     int glyph_w = font_glyph(codepoint, bits, sizeof(bits));
     if (glyph_w <= 0 || glyph_w > FONT_GLYPH_MAX_WIDTH)
         return '?' - 32;
+    int top = FONT_GLYPH_HEIGHT, bottom = -1;
+    for (int y = 0; y < FONT_GLYPH_HEIGHT; y++)
+        for (int x = 0; x < glyph_w; x++)
+            if (bits[y * FONT_GLYPH_STRIDE + x / 8] & (0x80u >> (x & 7))) {
+                if (y < top) top = y;
+                if (y > bottom) bottom = y;
+            }
+    if (bottom < top) { top = 0; bottom = FONT_GLYPH_HEIGHT - 1; }
+    int glyph_h = bottom - top + 1;
     int slot = g->font_slot_count++;
     int ox = (slot % GPUCOMP_FONT_COLS) * GPUCOMP_FONT_CELL;
     int oy = (slot / GPUCOMP_FONT_COLS) * GPUCOMP_FONT_CELL;
     for (int y = 0; y < GPUCOMP_FONT_CELL; y++)
         for (int x = 0; x < GPUCOMP_FONT_CELL; x++)
             g->font_pixels[(oy + y) * g->font_tex_w + ox + x] = 0;
-    for (int y = 0; y < FONT_GLYPH_HEIGHT; y++)
+    for (int y = 0; y < glyph_h; y++)
         for (int x = 0; x < glyph_w; x++)
-            if (bits[y * FONT_GLYPH_STRIDE + x / 8] &
+            if (bits[(top + y) * FONT_GLYPH_STRIDE + x / 8] &
                 (uint8_t)(0x80u >> (x & 7)))
                 g->font_pixels[(oy + y) * g->font_tex_w + ox + x] =
                     0xFFFFFFFFu;
@@ -793,6 +813,9 @@ static inline int gpucomp_font_slot(uint32_t codepoint) {
     }
     g->glyph_codepoint[slot] = codepoint;
     g->glyph_width[slot] = (uint8_t)glyph_w;
+    g->glyph_height[slot] = (uint8_t)glyph_h;
+    g->glyph_advance[slot] = (uint8_t)glyph_w;
+    g->glyph_top[slot] = (uint8_t)top;
     return slot;
 }
 
@@ -941,22 +964,34 @@ static inline int gpucomp_canvas_line(int index, int x0, int y0, int x1,
     return 0;
 }
 
+static inline int gpucomp_font_scale(int size) {
+    for (int i = 0; i < UI_FONT_COUNT; i++)
+        if (ui_font_height(i) == size)
+            return ui_font_scale_pct[i];
+    int native_h = ui_font_ink()->bottom - ui_font_ink()->top + 1;
+    return (size * 100 + native_h / 2) / native_h;
+}
+
+static inline int gpucomp_glyph_advance(int slot, int pct) {
+    struct gpucomp *g = &gpucomp_state;
+    return ui_max(1, (g->glyph_advance[slot] * pct + (slot < 96 ? 50 : 0)) / 100);
+}
+
 static inline int gpucomp_canvas_text_width(const char *text, int length,
                                              int size) {
-    struct gpucomp *g = &gpucomp_state;
     int width = 0;
     int offset = 0;
-    if (size < 1) size = 1;
+    if (size < 6) size = 6;
+    if (size > 64) size = 64;
+    int pct = gpucomp_font_scale(size);
     while (offset < length) {
         uint32_t cp = gpucomp_utf8_next(text, length, &offset);
         int slot = gpucomp_font_slot(cp);
         if (slot < 0)
             return -1;
-        int gw = g->glyph_width[slot];
-        width += (gw * size + FONT_GLYPH_HEIGHT - 1) /
-                 FONT_GLYPH_HEIGHT + 1;
+        width += gpucomp_glyph_advance(slot, pct);
     }
-    return width > 0 ? width - 1 : 0;
+    return width;
 }
 
 static inline int gpucomp_canvas_text(int index, int x, int y, int w, int h,
@@ -983,6 +1018,7 @@ static inline int gpucomp_canvas_text(int index, int x, int y, int w, int h,
     cursor = align == 2 ? x + w - total :
              align == 1 ? x + (w - total) / 2 : x;
     top = y + (h - size) / 2;
+    int pct = gpucomp_font_scale(size);
     gpucomp_canvas_scissor(l, x, y, w, h);
     virgl_bind_shader(&g->cmds, GPUCOMP_H_FS_GLYPH,
                       VIRGL_SHADER_FRAGMENT);
@@ -993,26 +1029,28 @@ static inline int gpucomp_canvas_text(int index, int x, int y, int w, int h,
         if (glyph < 0)
             return -1;
         int gw = g->glyph_width[glyph];
-        int dw = (gw * size + FONT_GLYPH_HEIGHT - 1) /
-                 FONT_GLYPH_HEIGHT;
-        int advance = dw + 1;
+        int gh = g->glyph_height[glyph];
+        int dw = ui_max(1, (gw * pct + (glyph < 96 ? 50 : 0)) / 100);
+        int dh = ui_max(1, (gh * pct + (glyph < 96 ? 50 : 0)) / 100);
+        int baseline = ui_max(0, ((int)g->glyph_top[glyph] - ui_font_ink()->top) * pct / 100);
+        int advance = gpucomp_glyph_advance(glyph, pct);
         if (cp != ' ' && cursor + dw > x && cursor < x + w) {
             for (int pass = 0; pass < (bold ? 2 : 1); pass++) {
                 if (gpucomp_canvas_room(g, 44) < 0)
                     return -1;
-                gpucomp_rect_consts_target(vs, cursor + pass, top, dw, size,
+                gpucomp_rect_consts_target(vs, cursor + pass, top + baseline, dw, dh,
                                             l->tex_w, l->tex_h);
                 virgl_set_constants(&g->cmds, VIRGL_SHADER_VERTEX, vs, 4);
                 gpucomp_color_constants(fs, color);
                 fs[4] = gpucomp_f32((float)gw / (float)g->font_tex_w);
-                fs[5] = gpucomp_f32((float)FONT_GLYPH_HEIGHT /
+                fs[5] = gpucomp_f32((float)gh /
                                     (float)g->font_tex_h);
                 fs[6] = gpucomp_f32((float)((glyph % GPUCOMP_FONT_COLS) *
                                             GPUCOMP_FONT_CELL) /
                                     (float)g->font_tex_w);
                 fs[7] = gpucomp_f32(1.0f -
                     (float)((glyph / GPUCOMP_FONT_COLS) * GPUCOMP_FONT_CELL +
-                            FONT_GLYPH_HEIGHT) /
+                            gh) /
                     (float)g->font_tex_h);
                 virgl_set_constants(&g->cmds, VIRGL_SHADER_FRAGMENT, fs, 8);
                 virgl_draw(&g->cmds, 0, 4, VIRGL_PRIM_TRIANGLE_STRIP);
@@ -1314,6 +1352,9 @@ static inline void gpucomp_shutdown(void) {
         g->font_slot_count = 0;
         memset(g->glyph_codepoint, 0, sizeof(g->glyph_codepoint));
         memset(g->glyph_width, 0, sizeof(g->glyph_width));
+        memset(g->glyph_height, 0, sizeof(g->glyph_height));
+        memset(g->glyph_advance, 0, sizeof(g->glyph_advance));
+        memset(g->glyph_top, 0, sizeof(g->glyph_top));
     }
     if (g->ready) {
         virgl_reset(&g->cmds);

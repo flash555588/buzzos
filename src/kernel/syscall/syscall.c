@@ -77,6 +77,7 @@ void syscall_init(void) {
     syscall_table[SYS_SEND] = sys_send;
     syscall_table[SYS_RECV] = sys_recv;
     syscall_table[SYS_CLOSESOCKET] = sys_closesocket;
+    syscall_table[SYS_SHUTDOWN] = sys_shutdown;
     syscall_table[SYS_DNS_RESOLVE] = sys_dns_resolve;
     syscall_table[SYS_BIND] = sys_bind;
     syscall_table[SYS_SENDTO] = sys_sendto;
@@ -106,6 +107,7 @@ void syscall_init(void) {
     syscall_table[SYS_GETCWD] = sys_getcwd;
     syscall_table[SYS_WAITPID] = sys_waitpid;
     syscall_table[SYS_SBRK] = sys_sbrk;
+    syscall_table[SYS_HEAP_PAGES] = sys_heap_pages;
     syscall_table[SYS_MONOTONIC_MS] = sys_monotonic_ms;
     syscall_table[SYS_REALTIME] = sys_realtime;
     syscall_table[SYS_SHM_CREATE] = sys_shm_create;

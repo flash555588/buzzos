@@ -478,7 +478,7 @@ static void draw_summary_card(struct appui_rect area, const char *label,
                 (struct appui_rect){area.x + 12, area.y + 6, area.w - 24, 20},
                 label, UI_FONT_CAPTION, UI_TEXT_TERTIARY, UI_ALIGN_LEFT);
     appui_label(pixels, w, h,
-                (struct appui_rect){area.x + 12, area.y + 26, area.w - 24, 24},
+                (struct appui_rect){area.x + 12, area.y + 24, area.w - 24, 32},
                 value, UI_FONT_TITLE, UI_TEXT_PRIMARY, UI_ALIGN_LEFT);
     if (tenths >= 0) {
         struct appui_rect track = {area.x + 12, area.y + area.h - 12,
@@ -846,10 +846,6 @@ enum {
      * ink; the GPU atlas scales the whole cell to the requested size.  A CPU
      * font token therefore maps to 28 * pct / 100 pixels, which lands the
      * same ink height on both paths. */
-    GPU_FONT_CAPTION = 16,  /* UI_FONT_CAPTION,  58% */
-    GPU_FONT_BODY = 19,     /* UI_FONT_BODY,     68% */
-    GPU_FONT_BODY_LG = 22,  /* UI_FONT_BODY_LG,  79% */
-    GPU_FONT_TITLE = 35,    /* UI_FONT_TITLE,   125% */
     /* Budget accounting for the process table.  A row is five labels plus the
      * two rects of its CPU bar; selection and hover add a fill and an accent
      * bar to at most two rows.  The tail covers everything canvas_row_budget()
@@ -863,6 +859,11 @@ enum {
     GPU_DIALOG_BYTES = 192,
     GPU_CARET_H = 6,
 };
+
+#define GPU_FONT_CAPTION ui_font_height(UI_FONT_CAPTION)
+#define GPU_FONT_BODY ui_font_height(UI_FONT_BODY)
+#define GPU_FONT_BODY_LG ui_font_height(UI_FONT_BODY_LG)
+#define GPU_FONT_TITLE ui_font_height(UI_FONT_TITLE)
 
 static void canvas_box(struct guiapp_canvas *canvas, struct appui_rect r,
                        int radius, uint32_t color) {
@@ -997,8 +998,8 @@ static void canvas_summary_card(struct guiapp_canvas *canvas,
                  label, GPU_FONT_CAPTION, UI_TEXT_TERTIARY,
                  GUIAPP_CANVAS_ALIGN_LEFT);
     canvas_label(canvas,
-                 (struct appui_rect){area.x + 12, area.y + 26, area.w - 24,
-                                     24},
+                 (struct appui_rect){area.x + 12, area.y + 24, area.w - 24,
+                                     32},
                  value, GPU_FONT_TITLE, UI_TEXT_PRIMARY,
                  GUIAPP_CANVAS_ALIGN_LEFT);
     if (tenths >= 0) {

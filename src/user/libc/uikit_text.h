@@ -3,11 +3,9 @@
 
 /* Scaled text rendering for the BuzzOS user-space GUI.
  *
- * The built-in font is a single 15x28 anti-aliased face.  At native size it
- * reads as roughly 20pt, which is why the pre-theme UI felt oversized: every
- * label, menu row and button was sized around a display-weight glyph.  This
- * layer resamples that one face into a small set of UI sizes, cached per size,
- * so the shell can use 10px captions and 12px body text at modern UI density.
+ * ASCII chrome uses a proportional anti-aliased face, cached at five semantic
+ * sizes. Unicode uses the existing system glyphs at the same scale. Terminal
+ * and document grids continue to use appui_text and the fixed-width font.
  *
  * The native cell carries blank rows above the cap height -- the reason older
  * code offsets every draw by PLT_FONT_Y_SHIFT.  Here the cell is cropped to
@@ -22,6 +20,7 @@
 #include "libc.h"
 #include "palette.h"
 #include "../../kernel/drv/font_builtin.h"
+#include "font_ui.h"
 
 enum {
     UI_FONT_CAPTION,   /* 58% -- tray clock, tooltips, secondary labels */
@@ -29,6 +28,7 @@ enum {
     UI_FONT_BODY_LG,   /* 79% -- list rows, buttons wanting emphasis    */
     UI_FONT_SUBTITLE,  /* 100% native                                   */
     UI_FONT_TITLE,     /* 125% -- headings                              */
+    UI_FONT_DISPLAY,   /* 200% -- desktop hero                          */
     UI_FONT_COUNT,
 };
 
@@ -38,13 +38,14 @@ enum {
     UI_ALIGN_RIGHT = 2,
 };
 
-static const uint8_t ui_font_scale_pct[UI_FONT_COUNT] = {58, 68, 79, 100, 125};
+static const uint8_t ui_font_scale_pct[UI_FONT_COUNT] = {58, 68, 79, 100, 125, 200};
 
 struct ui_font {
     int built;
-    int gw;            /* scaled cell width (the face is monospace) */
+    int gw;            /* cached glyph bitmap stride */
     int gh;            /* scaled cell height, ink-cropped           */
     uint8_t *cov;      /* KFONT_COUNT * gw * gh coverage bytes      */
+    uint8_t advance[UIFONT_COUNT]; /* proportional chrome metrics */
 };
 
 /* Ink bounds of the whole face, so every size crops identically. */
@@ -57,11 +58,11 @@ struct ui_font_ink {
 static inline struct ui_font_ink *ui_font_ink(void) {
     static struct ui_font_ink ink;
     if (!ink.built) {
-        int top = KFONT_HEIGHT, bottom = -1;
-        for (int g = 0; g < KFONT_COUNT; g++) {
-            for (int y = 0; y < KFONT_HEIGHT; y++) {
-                for (int x = 0; x < KFONT_WIDTH; x++) {
-                    if (!kfont_alpha[g][y][x])
+        int top = UIFONT_HEIGHT, bottom = -1;
+        for (int g = 0; g < UIFONT_COUNT; g++) {
+            for (int y = 0; y < UIFONT_HEIGHT; y++) {
+                for (int x = 0; x < UIFONT_WIDTH; x++) {
+                    if (!uifont_alpha[g][y][x])
                         continue;
                     if (y < top) top = y;
                     if (y > bottom) bottom = y;
@@ -69,7 +70,7 @@ static inline struct ui_font_ink *ui_font_ink(void) {
                 }
             }
         }
-        if (bottom < top) { top = 0; bottom = KFONT_HEIGHT - 1; }
+        if (bottom < top) { top = 0; bottom = UIFONT_HEIGHT - 1; }
         ink.top = top;
         ink.bottom = bottom;
         ink.built = 1;
@@ -112,49 +113,55 @@ static inline int ui_sample_bilinear(const uint8_t *src, int sw, int sh,
     return top + (bot - top) * ty / 256;
 }
 
+static inline int ui_font_size(int size) {
+    return size >= 0 && size < UI_FONT_COUNT ? size : UI_FONT_BODY;
+}
+
 static inline struct ui_font *ui_font_get(int size) {
     static struct ui_font fonts[UI_FONT_COUNT];
     struct ui_font_ink *ink = ui_font_ink();
     struct ui_font *f;
     int pct, src_h;
 
-    if (size < 0 || size >= UI_FONT_COUNT)
-        size = UI_FONT_BODY;
+    size = ui_font_size(size);
     f = &fonts[size];
     if (f->built)
         return f;
 
     pct = ui_font_scale_pct[size];
     src_h = ink->bottom - ink->top + 1;
-    f->gw = (KFONT_WIDTH * pct + 50) / 100;
+    f->gw = (UIFONT_WIDTH * pct + 50) / 100;
     f->gh = (src_h * pct + 50) / 100;
     if (f->gw < 1) f->gw = 1;
     if (f->gh < 1) f->gh = 1;
 
-    f->cov = (uint8_t *)malloc((size_t)KFONT_COUNT * f->gw * f->gh);
+    f->cov = (uint8_t *)malloc((size_t)UIFONT_COUNT * f->gw * f->gh);
     if (!f->cov) {
         /* Fall back to the native cell rather than failing to draw. */
-        f->gw = KFONT_WIDTH;
+        f->gw = UIFONT_WIDTH;
         f->gh = src_h;
+        for (int g = 0; g < UIFONT_COUNT; g++)
+            f->advance[g] = uifont_advance[g];
         f->built = -1;
         return f;
     }
 
-    for (int g = 0; g < KFONT_COUNT; g++) {
-        const uint8_t *src = &kfont_alpha[g][ink->top][0];
+    for (int g = 0; g < UIFONT_COUNT; g++) {
+        f->advance[g] = (uint8_t)ui_max(1, (uifont_advance[g] * pct + 50) / 100);
+        const uint8_t *src = &uifont_alpha[g][ink->top][0];
         uint8_t *dst = f->cov + (size_t)g * f->gw * f->gh;
         for (int y = 0; y < f->gh; y++) {
             for (int x = 0; x < f->gw; x++) {
                 int v;
                 if (pct < 100) {
-                    v = ui_sample_box(src, KFONT_WIDTH, src_h,
-                                      x * KFONT_WIDTH / f->gw,
-                                      (x + 1) * KFONT_WIDTH / f->gw,
+                    v = ui_sample_box(src, UIFONT_WIDTH, src_h,
+                                      x * UIFONT_WIDTH / f->gw,
+                                      (x + 1) * UIFONT_WIDTH / f->gw,
                                       y * src_h / f->gh,
                                       (y + 1) * src_h / f->gh);
                 } else {
-                    v = ui_sample_bilinear(src, KFONT_WIDTH, src_h,
-                                           x * (KFONT_WIDTH - 1) * 256 /
+                    v = ui_sample_bilinear(src, UIFONT_WIDTH, src_h,
+                                           x * (UIFONT_WIDTH - 1) * 256 /
                                                (f->gw > 1 ? f->gw - 1 : 1),
                                            y * (src_h - 1) * 256 /
                                                (f->gh > 1 ? f->gh - 1 : 1));
@@ -168,7 +175,9 @@ static inline struct ui_font *ui_font_get(int size) {
 }
 
 static inline int ui_font_height(int size) { return ui_font_get(size)->gh; }
-static inline int ui_font_advance(int size) { return ui_font_get(size)->gw; }
+static inline int ui_font_advance(int size) {
+    return ui_font_get(size)->advance['0' - UIFONT_FIRST];
+}
 
 /* Line box used for vertical centring; a little taller than the ink so
  * stacked rows do not touch. */
@@ -223,16 +232,17 @@ static inline uint32_t ui_utf8_next(const char **text) {
  * table, which is 1-bit and natively KFONT_WIDTH-based; scale its advance the
  * same way so mixed text stays on the grid. */
 static inline int ui_cp_advance(uint32_t cp, int size) {
+    size = ui_font_size(size);
     struct ui_font *f = ui_font_get(size);
-    if (cp >= KFONT_FIRST && cp < KFONT_FIRST + KFONT_COUNT)
-        return f->gw;
+    if (cp >= UIFONT_FIRST && cp < UIFONT_FIRST + UIFONT_COUNT)
+        return f->advance[cp - UIFONT_FIRST];
     if (cp >= 0x80u) {
         uint8_t bits[FONT_GLYPH_BYTES];
         int native = font_glyph(cp, bits, sizeof(bits));
         if (native > 0)
             return ui_max(1, native * ui_font_scale_pct[size] / 100);
     }
-    return f->gw;
+    return f->advance['?' - UIFONT_FIRST];
 }
 
 static inline int ui_text_width(const char *s, int size) {
@@ -293,7 +303,7 @@ static inline void ui_blit_unicode(struct ui_surface *s, int x, int y,
     uint8_t bits[FONT_GLYPH_BYTES];
     struct ui_font_ink *ink = ui_font_ink();
     int native_w = font_glyph(cp, bits, sizeof(bits));
-    int pct = ui_font_scale_pct[size];
+    int pct = ui_font_scale_pct[ui_font_size(size)];
     int top, bottom, src_h, gw, gh, baseline;
     if (native_w <= 0)
         return;
@@ -360,17 +370,19 @@ static inline int ui_text_at(struct ui_surface *s, int x, int y,
             break;
         if (x >= s->clip.x + s->clip.w)
             break;
-        if (cp >= KFONT_FIRST && cp < KFONT_FIRST + KFONT_COUNT &&
-            f->built > 0) {
+        if (cp >= UIFONT_FIRST && cp < UIFONT_FIRST + UIFONT_COUNT) {
+            const uint8_t *glyph = f->built > 0
+                ? f->cov + (size_t)(cp - UIFONT_FIRST) * f->gw * f->gh
+                : &uifont_alpha[cp - UIFONT_FIRST][ui_font_ink()->top][0];
             ui_blit_glyph(s, x, y,
-                          f->cov + (size_t)(cp - KFONT_FIRST) * f->gw * f->gh,
+                          glyph,
                           f->gw, f->gh, color, bold, alpha);
-            x += f->gw;
+            x += f->advance[cp - UIFONT_FIRST];
         } else if (cp >= 0x80u) {
             ui_blit_unicode(s, x, y, cp, size, color, bold, alpha);
             x += ui_cp_advance(cp, size);
         } else {
-            x += f->gw;
+            x += ui_cp_advance('?', size);
         }
     }
     return x - start;

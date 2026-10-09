@@ -45,6 +45,7 @@ intptr_t sys_chdir(uintptr_t path, uintptr_t b, uintptr_t c, uintptr_t d, uintpt
 intptr_t sys_getcwd(uintptr_t buf, uintptr_t size, uintptr_t c, uintptr_t d, uintptr_t e);
 intptr_t sys_waitpid(uintptr_t pid, uintptr_t status, uintptr_t options, uintptr_t d, uintptr_t e);
 intptr_t sys_sbrk(uintptr_t increment, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_heap_pages(uintptr_t address, uintptr_t length, uintptr_t commit, uintptr_t unused, uintptr_t unused_more);
 intptr_t sys_monotonic_ms(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
 intptr_t sys_realtime(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
 intptr_t sys_shm_create(uintptr_t size, uintptr_t out_arg, uintptr_t c, uintptr_t d, uintptr_t e);
@@ -63,6 +64,7 @@ intptr_t sys_bind(uintptr_t sd_arg, uintptr_t addr_arg, uintptr_t addrlen, uintp
 intptr_t sys_sendto(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t addr_arg, uintptr_t addrlen);
 intptr_t sys_recvfrom(uintptr_t sd_arg, uintptr_t buf, uintptr_t len, uintptr_t addr_arg, uintptr_t addrlen);
 intptr_t sys_closesocket(uintptr_t sd_arg, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+intptr_t sys_shutdown(uintptr_t sd_arg, uintptr_t how, uintptr_t c, uintptr_t d, uintptr_t e);
 intptr_t sys_dns_resolve(uintptr_t host_arg, uintptr_t ip_out_arg, uintptr_t c, uintptr_t d, uintptr_t e);
 intptr_t sys_netinfo(uintptr_t mac_arg, uintptr_t ip_arg, uintptr_t c, uintptr_t d, uintptr_t e);
 void sys_net_cleanup_owner(int owner);

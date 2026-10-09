@@ -8,13 +8,8 @@
  * Limine linear FB and virtio-gpu both consume RGB32, matching modern OS
  * compositor working formats.  There is no 8-bit indexed UI path.
  *
- * The token layer is a dark theme in the modern desktop idiom: surfaces are
- * defined as translucent white overlaid on a near-black base rather than as
- * flat colors, which is why the constants below cluster so
- * tightly: the visible difference between a resting control and a hovered one
- * is a few percent of white, not a different hue.  Each token records the
- * overlay it was resolved from, so a value can be rederived if the base tone
- * ever moves.
+ * Flat neutral surfaces and saturated Start tiles share one control system.
+ * Violet identifies primary actions and focus; white labels sit on accents.
  *
  * Three layers, in dependency order:
  *   1. UI_*   design tokens.  New code uses these.
@@ -96,67 +91,65 @@ static __attribute__((unused)) int plt_luma(uint32_t color) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 1. design tokens (dark theme)                                */
+/* 1. design tokens (light workspace)                           */
 /* ------------------------------------------------------------------ */
 
-/* Accent ramp around the default accent blue (#0078D4).  Dark theme fills
- * use the light end with black text, which is what keeps accent buttons
- * reading as bright cyan-blue rather than navy. */
-#define UI_ACCENT_DARK2       0x003E92u
-#define UI_ACCENT_DARK1       0x005FB8u
-#define UI_ACCENT_BASE        0x0078D4u
-#define UI_ACCENT_LIGHT1      0x4CC2FFu
-#define UI_ACCENT_LIGHT2      0x60CDFFu
-#define UI_ACCENT_LIGHT3      0x99EBFFu
+/* Action fills carry white labels. */
+#define UI_ACCENT_DARK2       0x32156Bu
+#define UI_ACCENT_DARK1       0x43218Cu
+#define UI_ACCENT_BASE        0x5B2CA9u
+#define UI_ACCENT_LIGHT1      0x683AB5u
+#define UI_ACCENT_LIGHT2      0x7547C2u
+#define UI_ACCENT_LIGHT3      0x895ACBu
 
-/* Dark theme maps accent fills to the light end and text on them to black. */
+/* Focus text has its own high-contrast color on the light surface. */
 #define UI_ACCENT_FILL        UI_ACCENT_LIGHT2
 #define UI_ACCENT_FILL_HOVER  UI_ACCENT_LIGHT3
 #define UI_ACCENT_FILL_PRESS  UI_ACCENT_LIGHT1
-#define UI_ACCENT_TEXT        UI_ACCENT_LIGHT2
+#define UI_ACCENT_TEXT        0x5844B8u
 
 /* Backdrops.  Mica is the desktop-tinted window backdrop; solid is the opaque
  * fallback used when a window is not composited against the wallpaper. */
-#define UI_BG_MICA            0x202020u
-#define UI_BG_MICA_ALT        0x1C1C1Cu
-#define UI_BG_SOLID           0x272727u
-#define UI_BG_LAYER           0x2B2B2Bu  /* white 5.12% over mica  */
-#define UI_BG_LAYER_ALT       0x2D2D2Du
-#define UI_BG_ACRYLIC         0x2C2C2Cu  /* flyout / Start acrylic tint */
-#define UI_BG_ACRYLIC_THIN    0x1F1F1Fu  /* taskbar acrylic tint        */
+#define UI_BG_MICA            0xF0F0F0u
+#define UI_BG_MICA_ALT        0xFFFFFFu
+#define UI_BG_SOLID           0xFFFFFFu
+#define UI_BG_LAYER           0xEDEDEDu
+#define UI_BG_LAYER_ALT       0xE5E5E5u
+#define UI_BG_ACRYLIC         0xF4F4F4u
+#define UI_BG_ACRYLIC_THIN    0xF4F4F4u
 #define UI_BG_SMOKE           0x000000u  /* modal scrim, used with alpha */
 
-/* Controls.  All are white-over-mica overlays; see plt_overlay_tenths. */
-#define UI_CTRL_REST          0x2D2D2Du  /* white  6.05% */
-#define UI_CTRL_HOVER         0x333333u  /* white  8.37% */
-#define UI_CTRL_PRESSED       0x272727u  /* white  3.26% */
-#define UI_CTRL_DISABLED      0x292929u  /* white  4.19% */
+/* Neutral control states shared across applications. */
+#define UI_CTRL_REST          0xF0F0F0u
+#define UI_CTRL_HOVER         0xE1E1E1u
+#define UI_CTRL_PRESSED       0xD0D0D0u
+#define UI_CTRL_DISABLED      0xECECECu
 
 /* Subtle fills sit on transparent backgrounds (taskbar buttons, menu rows). */
-#define UI_SUBTLE_HOVER       0x353535u
-#define UI_SUBTLE_PRESSED     0x2A2A2Au
+#define UI_SUBTLE_HOVER       0xE5DDF3u
+#define UI_SUBTLE_PRESSED     0xD8CDEBu
 
 /* Strokes.  Surface stroke is the window outline that separates a window from
  * the wallpaper; control strokes are the hairlines inside chrome. */
-#define UI_STROKE_SURFACE     0x424242u
-#define UI_STROKE_CONTROL     0x3F3F3Fu
-#define UI_STROKE_SECONDARY   0x353535u
-#define UI_STROKE_DIVIDER     0x333333u
-#define UI_STROKE_FOCUS       0xFFFFFFu
+#define UI_STROKE_SURFACE     0x999999u
+#define UI_STROKE_CONTROL     0xB0B0B0u
+#define UI_STROKE_SECONDARY   0xD6D6D6u
+#define UI_STROKE_DIVIDER     0xD6D6D6u
+#define UI_STROKE_FOCUS       UI_ACCENT_TEXT
 
 /* Text. */
-#define UI_TEXT_PRIMARY       0xFFFFFFu
-#define UI_TEXT_SECONDARY     0xCFCFCFu  /* white 78.60% */
-#define UI_TEXT_TERTIARY      0x999999u  /* white 54.42% */
-#define UI_TEXT_DISABLED      0x717171u  /* white 36.28% */
-#define UI_TEXT_ON_ACCENT     0x000000u
+#define UI_TEXT_PRIMARY       0x20212Bu
+#define UI_TEXT_SECONDARY     0x555361u
+#define UI_TEXT_TERTIARY      0x6D6773u
+#define UI_TEXT_DISABLED      0x918A94u
+#define UI_TEXT_ON_ACCENT     0xFFFFFFu
 #define UI_TEXT_ON_LIGHT      0x000000u
 
-/* System status colors (dark-theme status palette). */
-#define UI_SYS_CRITICAL       0xFF99A4u
-#define UI_SYS_SUCCESS        0x6CCB5Fu
-#define UI_SYS_CAUTION        0xFCE100u
-#define UI_SYS_ATTENTION      0x60CDFFu
+/* Status ink on light surfaces. */
+#define UI_SYS_CRITICAL       0xAF3738u
+#define UI_SYS_SUCCESS        0x28764Cu
+#define UI_SYS_CAUTION        0x926A13u
+#define UI_SYS_ATTENTION      0x385B9Fu
 #define UI_SYS_NEUTRAL        0x999999u
 
 /* Caption button hover states.  Close goes red; the others take a subtle fill,
@@ -166,29 +159,29 @@ static __attribute__((unused)) int plt_luma(uint32_t color) {
 
 /* Desktop wallpaper: a blue bloom over near-black, a calm desktop backdrop.  The shell renders a vertical gradient between these with a radial
  * highlight; a solid fill of UI_WALL_BASE is the degenerate fallback. */
-#define UI_WALL_BASE          0x0A1020u
-#define UI_WALL_MID           0x123058u
-#define UI_WALL_GLOW          0x1E5C9Eu
+#define UI_WALL_BASE          0xF4EFE5u
+#define UI_WALL_MID           0xF4EFE5u
+#define UI_WALL_GLOW          0xEBE3D5u
 
 /* ------------------------------------------------------------------ */
 /* 2. Geometry and elevation                                           */
 /* ------------------------------------------------------------------ */
 
-/* 8px on overlays and windows, 4px on controls. */
-#define UI_RADIUS_CONTROL     4
-#define UI_RADIUS_OVERLAY     8
-#define UI_RADIUS_WINDOW      8
+/* Shared corner radii for controls, overlays and windows. */
+#define UI_RADIUS_CONTROL     0
+#define UI_RADIUS_OVERLAY     0
+#define UI_RADIUS_WINDOW      0
 
 /* Taskbar metrics at 100% scale. */
-#define UI_TASKBAR_H          48
+#define UI_TASKBAR_H          80
 #define UI_TASKBAR_ICON       24
-#define UI_TASKBAR_BTN_W      44
-#define UI_TASKBAR_BTN_H      40
+#define UI_TASKBAR_BTN_W      48
+#define UI_TASKBAR_BTN_H      48
 
-/* Caption buttons are 46x32 and deliberately not square. */
+/* Caption buttons fill the titlebar height. */
 #define UI_CAPTION_BTN_W      46
-#define UI_CAPTION_BTN_H      32
-#define UI_TITLEBAR_H         32
+#define UI_CAPTION_BTN_H      48
+#define UI_TITLEBAR_H         48
 
 /* Elevation: shadow radius and peak opacity (0-255) per level.  Level 0 is
  * flat, 1 is a resting card, 2 a flyout, 3 a dialog. */
@@ -226,10 +219,10 @@ static __attribute__((unused)) int plt_luma(uint32_t color) {
 #define THEME_TOPBAR           UI_BG_ACRYLIC_THIN
 #define THEME_TOPBAR_BORDER    UI_STROKE_SURFACE
 
-#define THEME_ACCENT           UI_ACCENT_LIGHT2
+#define THEME_ACCENT           UI_ACCENT_TEXT
 #define THEME_ACCENT_DIM       UI_ACCENT_BASE
 #define THEME_ACCENT_SOFT      UI_ACCENT_DARK1
-#define THEME_FOCUS            UI_ACCENT_LIGHT2
+#define THEME_FOCUS            UI_ACCENT_TEXT
 
 #define THEME_WIN_BODY         UI_BG_SOLID
 #define THEME_WIN_PANEL        UI_BG_LAYER
@@ -275,7 +268,7 @@ static __attribute__((unused)) int plt_luma(uint32_t color) {
 #define THEME_LIST_TEXT        UI_TEXT_PRIMARY
 #define THEME_SELECTION_BG     UI_ACCENT_BASE
 #define THEME_SELECTION_SOFT   UI_ACCENT_DARK1
-#define THEME_SELECTION_TEXT   UI_TEXT_PRIMARY
+#define THEME_SELECTION_TEXT   UI_TEXT_ON_ACCENT
 
 /* Built-in 15x28 font has empty rows above cap height; user-space draw
  * glyphs this many pixels higher so descenders stay in tight clips. */

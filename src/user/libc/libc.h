@@ -37,6 +37,7 @@
 
 #define AF_INET 2
 #define SOCK_STREAM 1
+#define SHUT_RDWR 2
 #define SOCK_DGRAM 2
 #define SOCK_RAW 3
 #define IPPROTO_ICMP 1
@@ -161,6 +162,7 @@ int  sendto(int sd, const void *buf, size_t len, int flags,
 int  recvfrom(int sd, void *buf, size_t len, int flags,
               struct sockaddr_in *addr, size_t addrlen);
 int  closesocket(int sd);
+int  shutdown(int sd, int how);
 int  dns_resolve(const char *host, uint32_t *ip_out);
 int  net_info(uint8_t mac[6], uint32_t *ip_out);
 uint16_t htons(uint16_t v);
@@ -242,6 +244,7 @@ void yield(void);             /* yield CPU */
 int  join(int tid);           /* wait for thread to exit */
 void sleep_ms(unsigned int ms);
 uint32_t monotonic_ms(void);
+size_t heap_used_bytes(void); /* live payload bytes in the libc heap */
 int32_t time(int32_t *result);
 struct timeval;
 int gettimeofday(struct timeval *value, void *timezone);
@@ -262,6 +265,7 @@ int    strncmp(const char *a, const char *b, size_t n);
 int    strcasecmp(const char *a, const char *b);
 int    strncasecmp(const char *a, const char *b, size_t n);
 char  *strcpy(char *dst, const char *src);
+char  *strcat(char *dst, const char *src);
 char  *strncpy(char *dst, const char *src, size_t n);
 char  *strchr(const char *s, int c);
 char  *strrchr(const char *s, int c);
@@ -272,6 +276,7 @@ size_t strcspn(const char *s, const char *reject);
 char  *strtok(char *s, const char *delimiters);
 char  *strerror(int error);
 char  *strdup(const char *s);
+char  *strndup(const char *s, size_t length);
 void  *memmove(void *dst, const void *src, size_t n);
 int    memcmp(const void *a, const void *b, size_t n);
 void  *memchr(const void *memory, int value, size_t size);
@@ -320,6 +325,8 @@ void  *realloc(void *ptr, size_t size);
 double sin(double x);
 double cos(double x);
 double sqrt(double x);
+double trunc(double x);
+double cbrt(double x);
 double fabs(double x);
 double tan(double x);
 double asin(double x);

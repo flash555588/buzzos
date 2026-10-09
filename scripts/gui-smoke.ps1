@@ -8,7 +8,8 @@ param(
     [string]$PythonPath = "",
     [ValidateSet("none", "dsound", "sdl", "wav")]
     [string]$AudioDriver = "none",
-    [int]$TimeoutSeconds = 45
+    [int]$TimeoutSeconds = 45,
+    [switch]$StartupOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -280,10 +281,61 @@ try {
     $appsPpm = (Join-Path $OutDir "app-center.ppm")
     $screens += Capture-Screen "app-center" $appsPpm (Join-Path $OutDir "app-center.png")
 
+    if ($StartupOnly) {
+        # Release the single HMP socket while the sampler owns it. Compare
+        # static desktop pixels across multiple former full-redraw periods.
+        $script:writer.Dispose()
+        $script:writer = $null
+        $monitor.Dispose()
+        $monitor = $null
+        & $PythonPath tools/check_gui_idle.py --monitor-port $monitorPort --out-dir (Join-Path $OutDir "idle")
+        if ($LASTEXITCODE -ne 0) {
+            Fail-WithLog "Idle desktop changed outside the clock/taskbar area."
+        }
+        $monitor = [Net.Sockets.TcpClient]::new("127.0.0.1", $monitorPort)
+        $script:writer = [IO.StreamWriter]::new($monitor.GetStream(), [Text.Encoding]::ASCII)
+        $script:writer.NewLine = "`n"
+        $script:writer.AutoFlush = $true
+        # Exercise buffered presentation beyond the boot framebuffer mapping.
+        Send-Key "s"
+        Send-Key "3"
+        Start-Sleep -Milliseconds 900
+        $modePpm = Join-Path $OutDir "desktop-1920.ppm"
+        $screens += Capture-Screen "desktop-1920" $modePpm (Join-Path $OutDir "desktop-1920.png")
+        $header = [IO.File]::ReadAllBytes($modePpm)
+        if ([Text.Encoding]::ASCII.GetString($header, 0, [Math]::Min(40, $header.Length)) -notmatch '1920 1080') {
+            Fail-WithLog "Desktop did not switch to 1920x1080."
+        }
+        Send-Key "2"
+        Start-Sleep -Milliseconds 900
+        Send-Key "ctrl-w"
+    }
+
     Send-Key "ret"
     Start-Sleep -Milliseconds 900
-    $texteditPpm = (Join-Path $OutDir "textedit.ppm")
-    $screens += Capture-Screen "textedit" $texteditPpm (Join-Path $OutDir "textedit.png")
+    $appScreenName = if ($StartupOnly) { "app-startup" } else { "textedit" }
+    $texteditPpm = (Join-Path $OutDir "$appScreenName.ppm")
+    $screens += Capture-Screen $appScreenName $texteditPpm (Join-Path $OutDir "$appScreenName.png")
+    if ($StartupOnly) {
+        Send-Key "esc"
+        Wait-ForLog "\[gui\] exited" 10
+        $log = Read-SerialLog
+        if ($log -match "=== EXCEPTION|\[gui\] (launch failed|app protocol failed|app protocol ended)") {
+            Fail-WithLog "GUI startup failed."
+        }
+        if ($log -notmatch "launch /fs/apps/") {
+            Fail-WithLog "No GUI application was launched."
+        }
+        foreach ($screen in $screens) {
+            Convert-And-Assert-Ppm $screen.Ppm $screen.Png $screen.Name
+        }
+        Send-Hmp "quit"
+        if (!$script:qemuProcess.WaitForExit(5000)) {
+            Stop-QemuIfRunning
+        }
+        Write-Host "GUI startup smoke passed: $OutDir"
+        return
+    }
     # The pointer starts at 640,400. TextEdit opens at 80,74 with its
     # maximize control centered near 629,88.
     Move-MouseRelative -11 -312
@@ -415,7 +467,7 @@ try {
     Wait-ForLog "\[gui\] exited" 10
 
     $log = Read-SerialLog
-    if ($log -match "=== EXCEPTION ===") {
+    if ($log -match "=== EXCEPTION") {
         Fail-WithLog "QEMU reported a CPU exception."
     }
     if ($log -match "\[gui\] app protocol ended") {

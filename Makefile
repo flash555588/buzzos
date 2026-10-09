@@ -84,18 +84,28 @@ NASM := nasm
 CC   := clang
 LD   := ld.lld
 OBJCOPY := llvm-objcopy
-PYTHON ?= python
+ifneq ($(strip $(ComSpec)$(COMSPEC)),)
+PYTHON ?= $(shell py -3 -c "import sys; print(sys.executable.replace(chr(92), chr(47)))" 2>/dev/null)
+ifeq ($(strip $(PYTHON)),)
+PYTHON := python
+endif
+else
+PYTHON ?= python3
+endif
+PYTHON := $(PYTHON)
+HOST_CC ?= $(if $(shell command -v gcc 2>/dev/null),gcc,$(if $(shell command -v zig.exe 2>/dev/null),zig.exe cc,clang))
+HOST_CC := $(HOST_CC)
 # Prefer MSYS2 mingw64 QEMU (pacman -S mingw-w64-x86_64-qemu) with WHPX.
 # Override examples:
 #   make run QEMU="C:/msys64/mingw64/bin/qemu-system-x86_64.exe" QEMU_ACCEL=whpx
 #   make run QEMU_ACCEL=tcg,tb-size=512
 #   make run QEMU_DISPLAY=gtk
-QEMU ?= C:/msys64/mingw64/bin/qemu-system-x86_64.exe
+QEMU ?= qemu-system-x86_64
 QEMU_ACCEL ?= whpx
 # WHPX + "-cpu max" breaks on new Intel hosts (APX/MPX feature conflicts →
 # "Unexpected VP exit code 4"). BuzzOS only needs a plain 64-bit-capable
 # model; qemu64 supplies the long-mode, SSE2 and NX baseline BuzzOS requires.
-QEMU_CPU ?= qemu64
+QEMU_CPU ?= qemu64,+rdrand
 # SDL+GL is much faster than default GTK under WHPX; clarity is acceptable.
 QEMU_DISPLAY ?= sdl,gl=on
 # Display backend: virtio-vga enables the guest VirtIO-GPU 2D path with a
@@ -213,7 +223,8 @@ DEMO_MP3_SRC := assets/buzzos-demo.mp3
 USER_ELFS := $(USER_ELF) $(SHELL_ELF) $(NANO_ELF) $(BASM_ELF) $(BCC_ELF) $(GUI_ELF) $(FUTEXHOLD_ELF) $(CAT_ELF) $(ECHO_ELF) $(FAULTTEST_ELF) $(SOCKETLEAK_ELF) $(NETSTRESS_ELF) $(HEAPTEST_ELF) $(AUDIOTEST_ELF) $(GPUTEST_ELF) $(NSPORTTEST_ELF) $(NSHTMLTEST_ELF) $(NETSURF_ELF) $(LUA_ELF) $(GUI_APP_ELFS)
 USER_SRCS := src/user/bin/hello.c src/user/bin/shell.c src/user/bin/nano.c src/user/bin/basm.c src/user/bin/bcc.c src/user/bin/gui.c src/user/bin/futexhold.c src/user/bin/cat.c src/user/bin/echo.c src/user/bin/faulttest.c src/user/bin/socketleak.c src/user/bin/netstress.c src/user/bin/heaptest.c src/user/bin/audiotest.c src/user/bin/gputest.c src/user/bin/nsporttest.c src/user/bin/nshtmltest.c $(GUI_APP_SRCS)
 USER_LIB  := src/user/libc/crt0.c src/user/libc/libc.c src/user/libc/guiapp.c src/user/libc/setjmp.asm
-USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/palette.h src/user/libc/appui.h src/user/libc/uikit.h src/user/libc/uikit_text.h src/user/libc/uikit_icon.h src/user/libc/virgl.h src/user/libc/setjmp.h src/kernel/drv/font_builtin.h
+USER_HEADERS := src/user/libc/libc.h src/user/libc/guiapp.h src/user/libc/palette.h src/user/libc/appui.h src/user/libc/uikit.h src/user/libc/uikit_text.h src/user/libc/uikit_icon.h src/user/libc/font_ui.h src/user/libc/virgl.h src/user/libc/setjmp.h src/kernel/drv/font_builtin.h
+USER_HEADERS += src/user/libc/app_identity.h
 INITRD_H := $(GENERATED_DIR)/initrd.h
 APP_REGISTRY_H := $(GENERATED_DIR)/app_registry.h
 BASM_EXAMPLE := examples/basm-full.asm
@@ -281,6 +292,7 @@ $(OBJDIR)/block/cache.o: src/kernel/sched/task.h
 $(OBJDIR)/fs/procfs.o: src/kernel/mm/pmm.h src/kernel/sched/task.h src/kernel/net/net.h src/kernel/syscall/sys_ipc.h
 $(OBJDIR)/net/net.o: src/kernel/net/net.h src/kernel/net/netdev.h src/kernel/sched/task.h src/kernel/drv/timer.h
 $(OBJDIR)/drv/timer.o: src/kernel/drv/timer.h
+$(OBJDIR)/drv/mouse.o: src/kernel/drv/mouse.h
 $(OBJDIR)/core/elf.o: src/kernel/core/elf.h src/kernel/arch/x86_64/user_bounds.h
 $(OBJDIR)/arch/x86_64/paging.o: src/kernel/arch/x86_64/paging.h src/kernel/mm/pmm.h src/kernel/arch/x86_64/user_bounds.h
 $(OBJDIR)/arch/x86_64/user.o: src/kernel/arch/x86_64/user.h src/kernel/arch/x86_64/user_bounds.h
@@ -317,15 +329,17 @@ $(IMAGE): $(OBJDIR)/kernel.elf tools/mkbootimg.py $(LIMINE_BIOS_SYS) $(LIMINE_TO
 $(BUILD)/user:
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)/user' | Out-Null"
 
-$(BUILD)/user/user.ld: Makefile | $(BUILD)/user
-	@echo 'ENTRY(_start)' > $@
-	@echo 'SECTIONS { . = 0x0000000100000000; .text : { *(.text.entry) *(.text*) } .rodata : { *(.rodata*) } .data : { *(.data*) } .bss : { *(.bss*) *(COMMON) } }' >> $@
+$(BUILD)/user/user.ld: Makefile tools/gen_user_linker.py | $(BUILD)/user
+	$(PYTHON) tools/gen_user_linker.py --output $@
 
 $(BUILD)/user/crt0.o: src/user/libc/crt0.c src/user/libc/libc.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/libc/crt0.c -o $(BUILD)/user/crt0.o
 
-$(BUILD)/user/libc.o: src/user/libc/libc.c src/user/libc/libc.h | $(BUILD)/user
-	$(CC) $(UCFLAGS) -c src/user/libc/libc.c -o $(BUILD)/user/libc.o
+$(GENERATED_DIR)/charset_gbk_tables.h: tools/gen_charset_tables.py
+	$(PYTHON) tools/gen_charset_tables.py --output $@
+
+$(BUILD)/user/libc.o: src/user/libc/libc.c src/user/libc/libc.h src/user/libc/charset_impl.h src/user/libc/iconv.h src/user/libc/errno.h $(GENERATED_DIR)/charset_gbk_tables.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -I$(GENERATED_DIR) -c src/user/libc/libc.c -o $(BUILD)/user/libc.o
 
 $(BUILD)/user/guiapp.o: src/user/libc/guiapp.c src/user/libc/guiapp.h src/user/libc/libc.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/libc/guiapp.c -o $(BUILD)/user/guiapp.o
@@ -351,7 +365,7 @@ $(BUILD)/user/bcc.o: src/user/bin/bcc.c src/user/bin/basm.h src/user/libc/libc.h
 # Regenerate with: python tools/gen_pinyin_data.py
 # (needs assets/pinyin/pinyin.txt or pypinyin + GB2312)
 $(BUILD)/user/gui.o: src/user/bin/gui.c src/user/bin/pinyin_data.h \
-		src/user/libc/gpucomp.h $(USER_HEADERS) | $(BUILD)/user
+		src/user/libc/gpucomp.h src/user/libc/font_ui_display.h src/user/libc/ui_motion.h $(USER_HEADERS) | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c src/user/bin/gui.c -o $(BUILD)/user/gui.o
 
 $(LODEPNG_OBJ): $(LODEPNG_DIR)/lodepng.c $(LODEPNG_DIR)/lodepng.h src/user/libc/libc.h | $(BUILD)/user
@@ -599,6 +613,22 @@ fs-repair: $(IMAGE)
 smoke: $(IMAGE)
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)"
 
+.PHONY: core-smoke gui-startup-smoke desktop-features-smoke metro-start-smoke calculator-layout-smoke
+core-smoke: $(IMAGE)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)" -CoreOnly
+
+gui-startup-smoke: $(IMAGE)
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Image $(IMAGE) -Qemu "$(QEMU)" -PythonPath "$(PYTHON)" -StartupOnly
+
+desktop-features-smoke: $(IMAGE)
+	$(PYTHON) tools/check_desktop_features.py --image "$(IMAGE)" --qemu "$(QEMU)"
+
+metro-start-smoke: $(IMAGE)
+	$(PYTHON) tools/check_metro_start.py --image "$(IMAGE)" --qemu "$(QEMU)"
+
+calculator-layout-smoke: $(IMAGE)
+	$(PYTHON) tools/check_calculator_compact.py --image "$(IMAGE)" --qemu "$(QEMU)"
+
 net-stress: $(IMAGE)
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/net-stress.ps1 -Image $(IMAGE) -Qemu "$(QEMU)"
 
@@ -617,13 +647,53 @@ gui-smoke: $(IMAGE)
 # The uikit rendering kernel is freestanding integer pixel math over a
 # caller-supplied buffer, so it can be checked on the host without booting.
 uikit-test: tests/uikit_test.c $(USER_HEADERS)
-	gcc -std=c11 -O1 -w -Isrc/user/libc -o $(BUILD)/uikit_test tests/uikit_test.c
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
+	$(HOST_CC) -std=c11 -O1 -w -Isrc/user/libc -o $(BUILD)/uikit_test tests/uikit_test.c
 	$(BUILD)/uikit_test
+
+.PHONY: host-test keyboard-test mouse-test motion-test animation-smoke
+mouse-test: tests/mouse_test.c src/kernel/drv/mouse.h
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
+	$(HOST_CC) -std=c11 -O1 -UNDEBUG -Isrc/kernel/drv -o $(BUILD)/mouse_test tests/mouse_test.c
+	$(BUILD)/mouse_test
+
+motion-test: tests/motion_test.c src/user/libc/ui_motion.h
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
+	$(HOST_CC) -std=c11 -O1 -UNDEBUG -Isrc/user/libc -o $(BUILD)/motion_test tests/motion_test.c
+	$(BUILD)/motion_test
+
+animation-smoke: $(IMAGE)
+	$(PYTHON) tools/check_shell_motion.py --image "$(IMAGE)" --qemu "$(QEMU)"
+
+keyboard-test: tests/keyboard_test.c src/kernel/drv/keyboard.c
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
+	$(HOST_CC) -std=c11 -O1 -Isrc/kernel/drv -Isrc/kernel/syscall -Isrc/kernel/arch/x86_64 -o $(BUILD)/keyboard_test tests/keyboard_test.c src/kernel/drv/keyboard.c
+	$(BUILD)/keyboard_test
+
+host-test: keyboard-test mouse-test motion-test task-creation-test pmm-alias-test minifs-io-test
+
+.PHONY: minifs-io-test
+minifs-io-test: tests/minifs_io_test.c src/kernel/fs/minifs/minifs.c src/kernel/block/cache.c
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
+	$(HOST_CC) -std=c11 -O1 -UNDEBUG $(KERNEL_INCLUDES) -o $(BUILD)/minifs_io_test.exe tests/minifs_io_test.c
+	$(BUILD)/minifs_io_test.exe
+
+.PHONY: pmm-alias-test
+pmm-alias-test: tests/pmm_alias_test.c src/kernel/mm/pmm.c src/kernel/arch/x86_64/paging.h
+	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
+	$(HOST_CC) -std=c11 -O1 -UNDEBUG $(KERNEL_INCLUDES) -o $(BUILD)/pmm_alias_test tests/pmm_alias_test.c
+	$(BUILD)/pmm_alias_test
+
+.PHONY: task-creation-test
+task-creation-test: tests/task_creation_test.c src/kernel/sched/task.c src/kernel/sched/task.h
+	$(HOST_CC) -std=c11 -O1 -UNDEBUG -ffunction-sections $(KERNEL_INCLUDES) -o $(BUILD)/task_creation_test tests/task_creation_test.c
+	$(BUILD)/task_creation_test
+	$(PYTHON) -m unittest discover -s tests -p "test_*.py"
 
 report: $(IMAGE)
 	$(PYTHON) tools/project_report.py --out "$(BUILD)/project-report.md" --print --python "$(PYTHON)" --make "$(MAKE)" --qemu "$(QEMU)"
 
-verify: check-project uikit-test smoke fs-check-smoke fs-check-negative fs-check-repair gui-smoke
+verify: host-test check-project uikit-test smoke fs-check-smoke fs-check-negative fs-check-repair gui-smoke
 
 image-reset-fs: $(OBJDIR)/kernel.elf tools/mkbootimg.py $(LIMINE_BIOS_SYS) $(LIMINE_TOOL)
 	$(PYTHON) tools/mkbootimg.py \

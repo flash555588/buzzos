@@ -20,3 +20,23 @@ __pycache__/
 # User-supplied music is installed into MiniFS, not redistributed from Git.
 /assets/music/
 /*.mp3
+
+# Local development evidence and credentials must remain outside Git.
+/.local/
+/test-results/
+/toolchain/
+/archives/
+/development/
+*.img
+*.iso
+*.log
+*.pyc
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+credentials.json
+cookies.json
+*.dmp

@@ -142,7 +142,7 @@ def main():
         "--qemu",
         default=os.environ.get(
             "QEMU",
-            r"C:\msys64\mingw64\bin\qemu-system-x86_64.exe",
+            "qemu-system-x86_64",
         ),
         help="qemu-system-x86_64 (preferred, WHPX) or qemu-system-i386 path",
     )

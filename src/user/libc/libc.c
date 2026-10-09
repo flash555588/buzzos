@@ -57,7 +57,7 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_SPAWN_PROC=20, SYS_PS=21, SYS_REBOOT=22, SYS_MKDIR=23,
        SYS_UNLINK=24, SYS_CREATE=25, SYS_SPAWN_PROC_ARGS=26,
        SYS_LSEEK=27, SYS_RMDIR=28, SYS_RENAME=29, SYS_SOCKET=30,
-       SYS_CONNECT=31, SYS_SEND=32, SYS_RECV=33, SYS_CLOSESOCKET=34,
+       SYS_CONNECT=31, SYS_SEND=32, SYS_RECV=33, SYS_CLOSESOCKET=34, SYS_SHUTDOWN=83,
        SYS_DNS_RESOLVE=35, SYS_BIND=36, SYS_SENDTO=37, SYS_RECVFROM=38,
        SYS_NETINFO=39, SYS_PIPE=40, SYS_FUTEX_WAIT=41, SYS_FUTEX_WAKE=42,
        SYS_GFX_CLEAR=44, SYS_GFX_PUTPIXEL=45,
@@ -74,7 +74,7 @@ enum { SYS_EXIT=1, SYS_OPEN=2, SYS_CLOSE=3, SYS_READ=4, SYS_WRITE=5,
        SYS_GPU3D_SUBMIT=74, SYS_GPU3D_PRESENT=75, SYS_GPU3D_SCANOUT=76,
        SYS_GPU3D_IMPORT_SHM=77, SYS_GUI_EVENT_SEQUENCE=78,
        SYS_GUI_EVENT_WAIT=79, SYS_GUI_EVENT_SIGNAL=80,
-       SYS_GFX_CURSOR_DEFINE=81, SYS_GFX_CURSOR_MOVE=82 };
+       SYS_GFX_CURSOR_DEFINE=81, SYS_GFX_CURSOR_MOVE=82, SYS_HEAP_PAGES=84 };
 
 static void (*exit_handlers[16])(void);
 static int exit_handler_count;
@@ -214,6 +214,10 @@ int recvfrom(int sd, void *buf, size_t len, int flags,
 
 int closesocket(int sd) {
     return syscall1(SYS_CLOSESOCKET, sd);
+}
+
+int shutdown(int sd, int how) {
+    return syscall2(SYS_SHUTDOWN, sd, how);
 }
 
 int dns_resolve(const char *host, uint32_t *ip_out) {
@@ -694,6 +698,11 @@ int strncasecmp(const char *a, const char *b, size_t n) {
             return 0;
     }
     return 0;
+}
+
+char *strcat(char *dst, const char *src) {
+    strcpy(dst + strlen(dst), src);
+    return dst;
 }
 
 char *strcpy(char *dst, const char *src) {
@@ -1403,7 +1412,7 @@ int fscanf(FILE *stream, const char *fmt, ...) {
  *  Memory allocation — reusable blocks backed by an sbrk syscall
  * ================================================================ */
 
-#define HEAP_ALIGN 8u
+#define HEAP_ALIGN 16u
 #define HEAP_CHUNK (64u * 1024u)
 #define HEAP_MAGIC 0x42555A5Au
 
@@ -1414,7 +1423,10 @@ struct heap_block {
     uint32_t magic;
     uint32_t is_free;
     uint32_t reserved;
-};
+} __attribute__((aligned(HEAP_ALIGN)));
+
+_Static_assert(sizeof(struct heap_block) % HEAP_ALIGN == 0,
+               "heap payload must retain x86_64 malloc alignment");
 
 static struct heap_block *heap_head;
 static struct heap_block *heap_tail;
@@ -1622,10 +1634,54 @@ static void heap_release(void) {
     __sync_lock_release(&heap_lock);
 }
 
+/* Sum of payload bytes in live (non-free) blocks; diagnostic aid. */
+size_t heap_used_bytes(void) {
+    size_t total = 0;
+    heap_acquire();
+    for (struct heap_block *b = heap_head; b; b = b->next) {
+        if (b->magic != HEAP_MAGIC)
+            break;
+        if (!b->is_free)
+            total += b->size;
+    }
+    heap_release();
+    return total;
+}
+
+/* Diagnostic aid: report suspicious heap pointers on stderr (serial console in
+ * the browser) instead of faulting, so the caller can be identified from the
+ * logged return address.  Bounded to avoid flooding the log. */
+static void heap_guard_report(const char *what, uintptr_t value,
+                              uintptr_t caller) {
+    static int reported;
+    char line[128];
+    int n = 0;
+    if (reported >= 24)
+        return;
+    reported++;
+    const char *p = "HEAP-GUARD ";
+    while (*p) line[n++] = *p++;
+    while (*what) line[n++] = *what++;
+    p = " ptr=0x";
+    while (*p) line[n++] = *p++;
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        int d = (int)((value >> shift) & 0xFu);
+        line[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+    }
+    p = " caller=0x";
+    while (*p) line[n++] = *p++;
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        int d = (int)((caller >> shift) & 0xFu);
+        line[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+    }
+    line[n++] = '\n';
+    write(2, line, (size_t)n);
+}
+
 static size_t heap_align(size_t size) {
     if (size > (size_t)-1 - (HEAP_ALIGN - 1u))
         return 0;
-    return (size + HEAP_ALIGN - 1u) & ~(HEAP_ALIGN - 1u);
+    return (size + HEAP_ALIGN - 1u) & ~((size_t)HEAP_ALIGN - 1u);
 }
 
 static void heap_split(struct heap_block *block, size_t size) {
@@ -1637,7 +1693,7 @@ static void heap_split(struct heap_block *block, size_t size) {
     tail->prev = block;
     tail->magic = HEAP_MAGIC;
     tail->is_free = 1;
-    tail->reserved = 0;
+    tail->reserved = block->reserved;
     if (tail->next)
         tail->next->prev = tail;
     else
@@ -1647,17 +1703,73 @@ static void heap_split(struct heap_block *block, size_t size) {
 }
 
 static void heap_merge_next(struct heap_block *block) {
-    while (block->next && block->next->is_free && block->next->magic == HEAP_MAGIC) {
+    while (block->next) {
         struct heap_block *victim = block->next;
+        if ((uintptr_t)victim < 0x100000000ull ||
+            ((uintptr_t)victim & (HEAP_ALIGN - 1u))) {
+            heap_guard_report("merge-badnext", (uintptr_t)victim,
+                              (uintptr_t)__builtin_return_address(0));
+            break;
+        }
+        if (!victim->is_free || victim->magic != HEAP_MAGIC)
+            break;
         if (heap_rover == victim)
             heap_rover = block;
         block->size += sizeof(struct heap_block) + victim->size;
+        block->reserved |= victim->reserved;
         block->next = victim->next;
-        if (block->next)
+        if (block->next) {
+            if ((uintptr_t)block->next < 0x100000000ull ||
+                ((uintptr_t)block->next & (HEAP_ALIGN - 1u))) {
+                heap_guard_report("merge-badchain", (uintptr_t)block->next,
+                                  (uintptr_t)__builtin_return_address(0));
+                block->next = 0;
+                heap_tail = block;
+                break;
+            }
             block->next->prev = block;
-        else
+        } else {
             heap_tail = block;
+        }
     }
+}
+
+static int heap_commit_unlocked(struct heap_block *block, size_t size, size_t capacity) {
+    if (!block->reserved)
+        return 0;
+    uintptr_t payload = (uintptr_t)(block + 1);
+    size_t mapped_size = size;
+    if (capacity - size >= sizeof(struct heap_block) + HEAP_ALIGN)
+        mapped_size += sizeof(struct heap_block);
+    uintptr_t start = payload & ~(uintptr_t)4095u;
+    uintptr_t end = (payload + mapped_size + 4095u) & ~(uintptr_t)4095u;
+    return (int)syscall3(SYS_HEAP_PAGES, start, end - start, 1);
+}
+
+static void heap_decommit_unlocked(struct heap_block *block) {
+    if (!block || !block->is_free || block->size < HEAP_CHUNK)
+        return;
+    uintptr_t payload = (uintptr_t)(block + 1);
+    uintptr_t start = (payload + 4095u) & ~(uintptr_t)4095u;
+    uintptr_t end = (payload + block->size) & ~(uintptr_t)4095u;
+    if (end > start && syscall3(SYS_HEAP_PAGES, start, end - start, 0) == 0)
+        block->reserved = 1;
+}
+
+static void heap_trim_unlocked(void) {
+    struct heap_block *block = heap_tail;
+    if (!block || !block->is_free || block->magic != HEAP_MAGIC)
+        return;
+    uintptr_t payload = (uintptr_t)(block + 1);
+    uintptr_t end = payload + block->size;
+    uintptr_t keep = (payload + HEAP_CHUNK + 4095u) & ~(uintptr_t)4095u;
+    if (keep >= end || end - keep < HEAP_CHUNK || end - keep > (uintptr_t)INTPTR_MAX)
+        return;
+    if (syscall1(SYS_SBRK, 0) != (intptr_t)end)
+        return;
+    intptr_t previous = syscall1(SYS_SBRK, (uintptr_t)0 - (end - keep));
+    if (previous == (intptr_t)end)
+        block->size = keep - payload;
 }
 
 static struct heap_block *heap_grow(size_t size) {
@@ -1703,6 +1815,12 @@ static void *heap_malloc_unlocked(size_t size) {
     struct heap_block *block = start;
     if (block) {
         do {
+            if ((uintptr_t)block < 0x100000000ull ||
+                ((uintptr_t)block & (HEAP_ALIGN - 1u))) {
+                heap_guard_report("malloc-walk", (uintptr_t)block,
+                                  (uintptr_t)__builtin_return_address(0));
+                return (void *)0;
+            }
             if (block->is_free && block->size >= size)
                 break;
             block = block->next ? block->next : heap_head;
@@ -1710,12 +1828,23 @@ static void *heap_malloc_unlocked(size_t size) {
         if (!block->is_free || block->size < size)
             block = 0;
     }
+    int grew = !block;
     if (!block)
         block = heap_grow(size);
     if (!block)
         return (void *)0;
+    if (heap_commit_unlocked(block, size, block->size) < 0) {
+        if (grew) {
+            heap_trim_unlocked();
+            heap_decommit_unlocked(block);
+        }
+        return (void *)0;
+    }
     heap_split(block, size);
     block->is_free = 0;
+    block->reserved = 0;
+    if (block->next && block->next->is_free && (grew || !block->next->reserved))
+        heap_decommit_unlocked(block->next);
     heap_rover = block->next ? block->next : heap_head;
     return block + 1;
 }
@@ -1732,6 +1861,12 @@ void *malloc(size_t size) {
 void free(void *ptr) {
     if (!ptr)
         return;
+    if ((uintptr_t)ptr < 0x100000000ull ||
+        ((uintptr_t)ptr & (HEAP_ALIGN - 1u))) {
+        heap_guard_report("free-bogus", (uintptr_t)ptr,
+                          (uintptr_t)__builtin_return_address(0));
+        return;
+    }
     heap_acquire();
     struct heap_block *block = ((struct heap_block *)ptr) - 1;
     if (block->magic == HEAP_MAGIC) {
@@ -1741,6 +1876,11 @@ void free(void *ptr) {
         if (prev && prev->is_free)
             heap_merge_next(prev);
         heap_rover = prev && prev->is_free ? prev : block;
+        heap_trim_unlocked();
+        heap_decommit_unlocked(heap_rover);
+    } else {
+        heap_guard_report("free-badmagic", (uintptr_t)ptr,
+                          (uintptr_t)__builtin_return_address(0));
     }
     heap_release();
 }
@@ -1762,6 +1902,12 @@ void *realloc(void *ptr, size_t size) {
         free(ptr);
         return (void *)0;
     }
+    if ((uintptr_t)ptr < 0x100000000ull ||
+        ((uintptr_t)ptr & (HEAP_ALIGN - 1u))) {
+        heap_guard_report("realloc-bogus", (uintptr_t)ptr,
+                          (uintptr_t)__builtin_return_address(0));
+        return (void *)0;
+    }
     size = heap_align(size);
     if (!size)
         return (void *)0;
@@ -1769,19 +1915,37 @@ void *realloc(void *ptr, size_t size) {
     heap_acquire();
     struct heap_block *block = ((struct heap_block *)ptr) - 1;
     if (block->magic != HEAP_MAGIC) {
+        heap_guard_report("realloc-badmagic", (uintptr_t)ptr,
+                          (uintptr_t)__builtin_return_address(0));
         heap_release();
         return (void *)0;
     }
     if (block->size >= size) {
         heap_split(block, size);
+        if (block->next && block->next->is_free)
+            heap_merge_next(block->next);
+        heap_trim_unlocked();
+        heap_decommit_unlocked(block->next);
         heap_release();
         return ptr;
     }
-    if (block->next && block->next->is_free) {
+    if (block->next && block->next->is_free &&
+        block->size + sizeof(struct heap_block) + block->next->size >= size) {
+        size_t capacity = block->size + sizeof(struct heap_block) + block->next->size;
+        unsigned int was_reserved = block->reserved;
+        block->reserved |= block->next->reserved;
+        if (heap_commit_unlocked(block, size, capacity) < 0) {
+            block->reserved = was_reserved;
+            heap_release();
+            return (void *)0;
+        }
         heap_merge_next(block);
         if (block->size >= size) {
             heap_split(block, size);
             block->is_free = 0;
+            block->reserved = 0;
+            heap_trim_unlocked();
+            heap_decommit_unlocked(block->next);
             heap_release();
             return ptr;
         }
@@ -1792,6 +1956,13 @@ void *realloc(void *ptr, size_t size) {
         memcpy(replacement, ptr, old_size);
         block->is_free = 1;
         heap_merge_next(block);
+        struct heap_block *released = block;
+        if (block->prev && block->prev->is_free) {
+            released = block->prev;
+            heap_merge_next(released);
+        }
+        heap_trim_unlocked();
+        heap_decommit_unlocked(released);
     }
     heap_release();
     return replacement;
@@ -1932,20 +2103,7 @@ int uname(struct utsname *name) {
     return 0;
 }
 
-iconv_t iconv_open(const char *to_encoding, const char *from_encoding) {
-    (void)to_encoding; (void)from_encoding;
-    return (iconv_t)1;
-}
-size_t iconv(iconv_t descriptor, char **input, size_t *input_left,
-             char **output, size_t *output_left) {
-    (void)descriptor;
-    size_t count = *input_left < *output_left ? *input_left : *output_left;
-    memcpy(*output, *input, count);
-    *input += count; *output += count;
-    *input_left -= count; *output_left -= count;
-    return *input_left ? (size_t)-1 : 0;
-}
-int iconv_close(iconv_t descriptor) { (void)descriptor; return 0; }
+#include "charset_impl.h"
 
 static int is_leap_year(int year) {
     return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
@@ -2137,7 +2295,7 @@ double atan2(double y, double x) {
 }
 
 double asin(double x) {
-    if (x < -1.0 || x > 1.0) return 0.0;
+    if (x < -1.0 || x > 1.0) return __builtin_nan("");
     if (x == 1.0) return 1.5707963267948966;
     if (x == -1.0) return -1.5707963267948966;
     return atan(x / sqrt(1.0 - x * x));
@@ -2148,7 +2306,6 @@ double acos(double x) {
 }
 
 double log(double x) {
-    if (x <= 0.0) return 0.0;
     double result;
     __asm__ volatile("fldln2; fldl %1; fyl2x; fstpl %0"
                      : "=m"(result) : "m"(x));
@@ -2156,7 +2313,6 @@ double log(double x) {
 }
 
 double log2(double x) {
-    if (x <= 0.0) return 0.0;
     double result;
     __asm__ volatile("fld1; fldl %1; fyl2x; fstpl %0"
                      : "=m"(result) : "m"(x));
@@ -2164,7 +2320,6 @@ double log2(double x) {
 }
 
 double log10(double x) {
-    if (x <= 0.0) return 0.0;
     double result;
     __asm__ volatile("fldlg2; fldl %1; fyl2x; fstpl %0"
                      : "=m"(result) : "m"(x));
@@ -2172,6 +2327,9 @@ double log10(double x) {
 }
 
 double exp(double x) {
+    if (__builtin_isnan(x)) return x;
+    if (x > 709.782712893384) return __builtin_inf();
+    if (x < -745.133219101941) return 0.0;
     double result;
     __asm__ volatile(
         "fldl %1\n\t"
@@ -2196,9 +2354,9 @@ double exp(double x) {
 
 double frexp(double value, int *exponent) {
     if (!exponent) return value;
-    if (value == 0.0) {
+    if (value == 0.0 || !__builtin_isfinite(value)) {
         *exponent = 0;
-        return 0.0;
+        return value;
     }
     int exp2 = 0;
     int negative = value < 0.0;
@@ -2216,7 +2374,9 @@ double frexp(double value, int *exponent) {
 }
 
 double ldexp(double value, int exponent) {
-    if (value == 0.0 || exponent == 0) return value;
+    if (value == 0.0 || exponent == 0 || !__builtin_isfinite(value)) return value;
+    if (exponent > 2098) return value < 0.0 ? -__builtin_inf() : __builtin_inf();
+    if (exponent < -2098) return value < 0.0 ? -0.0 : 0.0;
     if (exponent > 0) {
         while (exponent--) value *= 2.0;
     } else {
@@ -2225,27 +2385,71 @@ double ldexp(double value, int exponent) {
     return value;
 }
 
+double trunc(double x) {
+    union { double value; uint64_t bits; } number = { .value = x };
+    int exponent = (int)((number.bits >> 52) & 0x7ffu) - 1023;
+    if (exponent >= 52) return x;
+    if (exponent < 0) number.bits &= UINT64_C(0x8000000000000000);
+    else number.bits &= ~((UINT64_C(1) << (52 - exponent)) - 1);
+    return number.value;
+}
+
 double floor(double x) {
-    long value = (long)x;
-    if ((double)value > x) value--;
-    return (double)value;
+    double value = trunc(x);
+    return value > x ? value - 1.0 : value;
 }
 
 double ceil(double x) {
-    long value = (long)x;
-    if ((double)value < x) value++;
-    return (double)value;
+    double value = trunc(x);
+    return value < x ? value + 1.0 : value;
 }
 
 float ceilf(float x) { return (float)ceil((double)x); }
 double round(double x) { return x < 0.0 ? ceil(x - 0.5) : floor(x + 0.5); }
 double fmod(double x, double divisor) {
-    if (divisor == 0.0) return 0.0;
-    return x - (double)((long)(x / divisor)) * divisor;
+    if (!__builtin_isfinite(x) || __builtin_isnan(divisor) || divisor == 0.0)
+        return __builtin_nan("");
+    double remainder = fabs(x), magnitude = fabs(divisor);
+    if (remainder < magnitude) return x;
+    int exponent_x, exponent_y;
+    (void)frexp(remainder, &exponent_x);
+    (void)frexp(magnitude, &exponent_y);
+    for (int shift = exponent_x - exponent_y; shift >= 0; shift--) {
+        double scaled = ldexp(magnitude, shift);
+        if (remainder >= scaled) remainder -= scaled;
+    }
+    union { double value; uint64_t bits; } sign = { .value = x };
+    return (sign.bits >> 63) ? -remainder : remainder;
+}
+
+double cbrt(double x) {
+    if (x == 0.0 || !__builtin_isfinite(x)) return x;
+    int exponent;
+    double fraction = frexp(fabs(x), &exponent);
+    int third = exponent / 3, rest = exponent - third * 3;
+    double target = ldexp(fraction, rest), root = 1.0;
+    for (int i = 0; i < 9; i++) root = (2.0 * root + target / (root * root)) / 3.0;
+    root = ldexp(root, third);
+    return x < 0.0 ? -root : root;
 }
 double pow(double x, double exponent) {
-    long whole = (long)exponent;
-    if ((double)whole == exponent) {
+    if (exponent == 0.0) return 1.0;
+    if (__builtin_isnan(x) || __builtin_isnan(exponent)) return __builtin_nan("");
+    if (!__builtin_isfinite(exponent)) {
+        double magnitude = fabs(x);
+        if (magnitude == 1.0) return 1.0;
+        return ((magnitude > 1.0) == (exponent > 0.0)) ? __builtin_inf() : 0.0;
+    }
+    int integral = trunc(exponent) == exponent;
+    int odd = integral && fmod(fabs(exponent), 2.0) == 1.0;
+    union { double value; uint64_t bits; } sign = { .value = x };
+    if (x == 0.0 || !__builtin_isfinite(x)) {
+        double result = ((x == 0.0) == (exponent > 0.0)) ? 0.0 : __builtin_inf();
+        return (odd && (sign.bits >> 63)) ? -result : result;
+    }
+    if (x < 0.0 && !integral) return __builtin_nan("");
+    if (integral && fabs(exponent) < 9223372036854775808.0) {
+        long whole = (long)exponent;
         int negative = whole < 0;
         if (negative) whole = -whole;
         double result = 1.0;
@@ -2255,8 +2459,8 @@ double pow(double x, double exponent) {
             base *= base;
             whole >>= 1;
         }
-        return negative && result != 0.0 ? 1.0 / result : result;
+        return negative ? 1.0 / result : result;
     }
-    if (x <= 0.0) return 0.0;
-    return exp(exponent * log(x));
+    double result = exp(exponent * log(fabs(x)));
+    return x < 0.0 && odd ? -result : result;
 }

@@ -16,6 +16,9 @@ struct e820_entry {
 #define E820_COUNT  (*(uint16_t *)0x4F8)
 
 enum { PAGE_SIZE = 4096, E820_USABLE = 1 };
+/* Emergency headroom for page tables, kernel I/O and process teardown.
+ * This is a system reserve, not a per-process or per-website quota. */
+enum { PMM_KERNEL_RESERVE_PAGES = 16 * 1024 * 1024 / PAGE_SIZE };
 
 struct pmm_info {
     uint32_t page_size;
@@ -27,8 +30,13 @@ struct pmm_info {
 
 void     pmm_init(void);
 uintptr_t pmm_alloc_pages(size_t n);
+uintptr_t pmm_alloc_user_pages(size_t n);
 void     pmm_free_pages(uintptr_t addr, size_t n);
 void     pmm_info(struct pmm_info *out);
+/* Lock-free free-page count for diagnostics that may run in IRQ context.
+ * Never call pmm_info() from an interrupt: pmm_lock() spins with
+ * task_yield() and cannot make progress there. */
+size_t   pmm_free_pages_snapshot(void);
 void     pmm_dump(void);
 
 #endif

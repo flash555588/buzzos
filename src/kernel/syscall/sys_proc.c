@@ -172,8 +172,21 @@ void syscall_reset_process(int task_id) {
     process_heap_break[task_id] = 0;
 }
 
-void syscall_set_heap_start(int task_id, uintptr_t start) {
-    if (task_id < 0 || task_id >= MAX_TASKS || start < USER_LOAD_START ||
+/* True when addr is a physical page currently mapped inside some live
+ * process's heap.  Used by address-space teardown as a guard: a stale or
+ * duplicated teardown must never hand a live heap page back to the PMM,
+ * which previously manifested as a process faulting on its own heap. */
+int syscall_heap_range_contains(uintptr_t addr) {
+    for (int i = 1; i < MAX_TASKS; i++) {
+        uintptr_t base = process_heap_base[i];
+        uintptr_t brk = process_heap_break[i];
+        if (base && brk > base && addr >= base && addr < brk)
+            return 1;
+    }
+    return 0;
+}
+
+void syscall_set_heap_start(int task_id, uintptr_t start) {    if (task_id < 0 || task_id >= MAX_TASKS || start < USER_LOAD_START ||
         start > USER_LOAD_END)
         return;
     process_heap_base[task_id] = start;
@@ -221,13 +234,36 @@ intptr_t sys_sbrk(uintptr_t increment_arg, uintptr_t b, uintptr_t c, uintptr_t d
             paging_map_user_range(old_break, new_break - old_break) < 0)
             return -1;
     } else {
-        uintptr_t amount = (uintptr_t)(-increment);
+        uintptr_t amount = (uintptr_t)0 - increment_arg;
         if (amount > old_break - process_heap_base[owner])
             return -1;
         new_break = old_break - amount;
+        uintptr_t release_start = (new_break + PAGE_SIZE - 1u) & ~(uintptr_t)(PAGE_SIZE - 1u);
+        uintptr_t release_end = (old_break + PAGE_SIZE - 1u) & ~(uintptr_t)(PAGE_SIZE - 1u);
+        if (release_end > release_start &&
+            paging_release_user_range(paging_current_cr3(), release_start,
+                                      release_end - release_start) < 0)
+            return -1;
     }
     process_heap_break[owner] = new_break;
     return (intptr_t)old_break;
+}
+
+intptr_t sys_heap_pages(uintptr_t address, uintptr_t length, uintptr_t commit,
+                        uintptr_t unused, uintptr_t unused_more) {
+    (void)unused; (void)unused_more;
+    int owner = task_get_pid();
+    if (owner <= 0 || owner >= MAX_TASKS || !process_heap_base[owner] ||
+        commit > 1 || !length || (address & (PAGE_SIZE - 1u)) ||
+        (length & (PAGE_SIZE - 1u)))
+        return -1;
+    uintptr_t base = process_heap_base[owner];
+    uintptr_t end = (process_heap_break[owner] + PAGE_SIZE - 1u) & ~(uintptr_t)(PAGE_SIZE - 1u);
+    if (address < base || address >= end || length > end - address)
+        return -1;
+    if (commit)
+        return paging_map_user_range(address, length);
+    return paging_release_user_range(paging_current_cr3(), address, length);
 }
 
 void syscall_release_thread(int task_id) {
@@ -269,6 +305,7 @@ intptr_t sys_spawn(uintptr_t func_addr, uintptr_t b, uintptr_t c, uintptr_t d, u
     if (owner < 0 || owner >= MAX_TASKS)
         return -1;
 
+    uint64_t slot_flags = irq_save();
     int slot = -1;
     for (int i = 0; i < (int)USER_THREAD_STACK_SLOTS; i++) {
         if (!(process_thread_slots[owner][(unsigned)i / 64u] &
@@ -277,10 +314,13 @@ intptr_t sys_spawn(uintptr_t func_addr, uintptr_t b, uintptr_t c, uintptr_t d, u
             break;
         }
     }
-    if (slot < 0)
+    if (slot < 0) {
+        irq_restore(slot_flags);
         return -1;
+    }
     process_thread_slots[owner][(unsigned)slot / 64u] |=
         UINT64_C(1) << ((unsigned)slot % 64u);
+    irq_restore(slot_flags);
     uintptr_t user_stack = USER_DEFAULT_STACK_TOP - USER_MAIN_STACK_SIZE -
                            (uintptr_t)slot * USER_THREAD_STACK_SIZE;
     if (user_stack < USER_LOAD_END + USER_THREAD_STACK_SIZE ||

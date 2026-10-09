@@ -28,6 +28,7 @@ static int          current_id;
 struct task        *current_task;
 static uint32_t preempt_depth;
 static uint32_t sched_slice_ticks;
+static volatile int task_create_locked;
 
 #define SCHED_SLICE_TICKS ((TIMER_HZ * 4u + 999u) / 1000u)
 
@@ -195,6 +196,10 @@ int task_create(void (*entry)(void), const char *name) {
 }
 
 int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
+    /* Allocator/VFS locks may yield even with IRQs disabled. Serialize
+     * creators and keep reserved slots outside every scheduler wake path. */
+    while (__sync_lock_test_and_set(&task_create_locked, 1))
+        task_yield();
     task_reap_dead();
 
     int id = -1;
@@ -204,13 +209,27 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
             break;
         }
     }
-    if (id < 0 && num_tasks < MAX_TASKS)
-        id = num_tasks++;
-    if (id < 0) return -1;
+    uint64_t reserve_flags = irq_save();
+    if (id < 0 && num_tasks < MAX_TASKS) {
+        id = num_tasks;
+        tasks[id].state = TASK_CREATING;
+        num_tasks++;
+    } else if (id >= 0) {
+        tasks[id].state = TASK_CREATING;
+    }
+    irq_restore(reserve_flags);
+    if (id < 0) {
+        __sync_lock_release(&task_create_locked);
+        return -1;
+    }
 
     /* 64-bit interrupt frames and C calls need more headroom than i386. */
     uintptr_t stack_base = pmm_alloc_pages(KERNEL_STACK_PAGES);
-    if (!stack_base) return -1;
+    if (!stack_base) {
+        tasks[id].state = TASK_DEAD;
+        __sync_lock_release(&task_create_locked);
+        return -1;
+    }
 
     /* Stack grows down from the top */
     uintptr_t stack_top = stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
@@ -267,10 +286,10 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
         tasks[id].name[i] = 0;
     for (int i = 0; i < 15 && name[i]; i++)
         tasks[id].name[i] = name[i];
-    /* Stay blocked until the creator finishes per-task metadata (user entry,
+    /* Stay unarmed until the creator finishes per-task metadata (user entry,
      * thread func/stack, CR3, etc.). Otherwise the trampoline can run with
      * zeros and fault at EIP=0 / ESP=0. */
-    tasks[id].state = TASK_BLOCKED;
+    tasks[id].state = TASK_CREATING;
     tasks[id].wake_tick = 0;
     fpu_state_init(tasks[id].fpu_state);
 
@@ -284,6 +303,7 @@ int task_create_ex(void (*entry)(void), const char *name, int console_silent) {
         serial_puts("\n");
     }
 
+    __sync_lock_release(&task_create_locked);
     return id;
 }
 
@@ -379,6 +399,16 @@ void task_yield(void) {
 void sched_tick(uint32_t jiffies) {
     if (jiffies == 0)
         jiffies = 1;
+    {
+        static uint32_t mem_trace_accum;
+        mem_trace_accum += jiffies;
+        if (mem_trace_accum >= 5000) {
+            mem_trace_accum = 0;
+            serial_puts("[mem] tick free=");
+            serial_puthex((uint32_t)pmm_free_pages_snapshot());
+            serial_puts("\n");
+        }
+    }
     if (current_task && current_task->state == TASK_RUNNING)
         current_task->cpu_ticks += jiffies;
     if (preempt_depth)
@@ -524,6 +554,13 @@ static void process_forget(int pid) {
     procs[pid].state = PROC_UNUSED;
     procs[pid].exit_code = 0;
     procs[pid].wait_waiters = 0;
+    {
+        serial_puts("[mem] reap pid=");
+        serial_puthex((uint32_t)pid);
+        serial_puts(" free=");
+        serial_puthex((uint32_t)pmm_free_pages_snapshot());
+        serial_puts("\n");
+    }
 }
 
 /*
